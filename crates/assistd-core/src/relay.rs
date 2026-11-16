@@ -98,11 +98,11 @@ const TARGET_PERCENT: u64 = 50;
 #[derive(Debug)]
 pub struct RelayDeps {
     pub runner: SubAgentRunner,
-    /// Keeps the calling conversation's slot state across each relay.
+    /// Keeps the calling backend's slot state across each relay.
     pub slot_stash: Arc<SlotStash>,
     /// The directory each relay's quarantine is created in.
     pub dir: PathBuf,
-    /// The history budget of each sub-agent's conversation, in tokens.
+    /// The history budget of each sub-agent's history, in tokens.
     pub subagent_context_tokens: u32,
     /// The directory each sub-agent's answer is saved under, in a subdirectory
     /// named for the session.
@@ -193,7 +193,7 @@ impl RelayTool {
     }
 
     /// Relay `plan` within a task run on `lane`, cancelling it whenever the run yields to the
-    /// user's conversation and rerunning it from `args` once the run has the lane again,
+    /// user's interaction and rerunning it from `args` once the run has the lane again,
     /// since its effects stay inside its quarantine. `None` when the run was cancelled first.
     async fn relay_giving_way(
         &self,
@@ -735,10 +735,10 @@ mod tests {
 
     use super::*;
 
-    /// A parent that records whether a sub-agent conversation was opened on it.
+    /// A parent that records whether a sub-agent backend was opened on it.
     #[derive(Debug, Default)]
     struct WatchedParent {
-        conversation_opened: AtomicBool,
+        backend_opened: AtomicBool,
     }
 
     #[async_trait]
@@ -769,12 +769,12 @@ mod tests {
     }
 
     impl LlmBackend for WatchedParent {
-        fn isolated_conversation(
+        fn isolated_backend(
             &self,
             _system_prompt: String,
             _slot: SlotAssignment,
         ) -> LlmResult<Arc<dyn LlmBackend>> {
-            self.conversation_opened.store(true, Ordering::SeqCst);
+            self.backend_opened.store(true, Ordering::SeqCst);
             Err(LlmError::Unavailable("test parent".into()))
         }
     }
@@ -868,7 +868,7 @@ mod tests {
             matches!(&result, Err(ToolError::InvalidArgs(message)) if message.contains("never both")),
             "{result:?}"
         );
-        assert!(!parent.conversation_opened.load(Ordering::SeqCst));
+        assert!(!parent.backend_opened.load(Ordering::SeqCst));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
@@ -893,7 +893,7 @@ mod tests {
         let declined = relay.invoke(&turn, web_step.clone()).await.unwrap();
 
         assert_eq!(declined.output, WEB_RELAY_DECLINED);
-        assert!(!parent.conversation_opened.load(Ordering::SeqCst));
+        assert!(!parent.backend_opened.load(Ordering::SeqCst));
         assert!(!relay.reads_host(&web_step));
         assert!(relay.reads_host(&file_step));
     }
@@ -918,7 +918,7 @@ mod tests {
             matches!(&result, Err(ToolError::InvalidArgs(message)) if message.contains("may not follow")),
             "{result:?}"
         );
-        assert!(!parent.conversation_opened.load(Ordering::SeqCst));
+        assert!(!parent.backend_opened.load(Ordering::SeqCst));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
@@ -945,7 +945,7 @@ mod tests {
                 if message.starts_with("step 2: cannot hand over input")),
             "{result:?}"
         );
-        assert!(!parent.conversation_opened.load(Ordering::SeqCst));
+        assert!(!parent.backend_opened.load(Ordering::SeqCst));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

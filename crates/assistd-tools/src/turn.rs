@@ -18,10 +18,10 @@ pub trait RelayObserver: fmt::Debug + Send + Sync + 'static {
     async fn report(&self, event: RelayEvent);
 }
 
-/// The model lane a task run's turn holds, which the user's conversation may ask for.
+/// The model lane a task run's turn holds, which the user's interaction may ask for.
 #[async_trait]
 pub trait YieldableLane: fmt::Debug + Send + Sync + 'static {
-    /// Wait until the user's conversation wants the lane. Cancel-safe.
+    /// Wait until the user's interaction wants the lane. Cancel-safe.
     async fn yield_requested(&self);
 
     /// Give the lane up if it is wanted, then wait to hold one again; `false` when the
@@ -89,7 +89,7 @@ impl TurnContext {
         self
     }
 
-    /// Run on `lane`, giving it up when the user's conversation asks.
+    /// Run on `lane`, giving it up when the user's interaction asks.
     pub fn on_lane(mut self, lane: Arc<dyn YieldableLane>) -> Self {
         self.lane = Some(lane);
         self

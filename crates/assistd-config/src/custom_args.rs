@@ -64,11 +64,11 @@ pub trait ServerKind: Debug + Clone + Default + PartialEq {
     const MANAGED_FLAGS: &'static [&'static str];
 }
 
-/// The chat model server.
+/// The server of the model agents run on.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct ChatServer;
+pub struct ModelServer;
 
-impl ServerKind for ChatServer {
+impl ServerKind for ModelServer {
     const MANAGED_FLAGS: &'static [&'static str] = &[
         "-c",
         "--ctx-size",

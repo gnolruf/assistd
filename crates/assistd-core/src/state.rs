@@ -33,10 +33,10 @@ pub(crate) mod branches;
 pub(crate) mod capabilities;
 pub(crate) mod chat_focus;
 pub(crate) mod context;
-pub(crate) mod conversation;
 pub(crate) mod event_triggers;
 pub(crate) mod fire_times;
 pub(crate) mod host_reads;
+pub(crate) mod interaction;
 pub(crate) mod lanes;
 pub(crate) mod mcp_handlers;
 pub(crate) mod memory_handlers;
@@ -216,7 +216,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub subsystems: Subsystems,
     pub memory: MemoryStack,
-    /// The session and branch the user's conversation is on.
+    /// The session and branch the user's turns are on.
     pub session_ctx: Arc<SessionContext>,
     pub bus: EventBus,
     pub tasks: Arc<TaskService>,

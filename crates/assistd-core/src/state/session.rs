@@ -1,4 +1,4 @@
-//! `SessionContext`: the session and branch the user's conversation is on.
+//! `SessionContext`: the session and branch the user's turns are on.
 
 use tokio::sync::{RwLock, watch};
 

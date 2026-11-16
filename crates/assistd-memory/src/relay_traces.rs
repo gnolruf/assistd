@@ -1,5 +1,5 @@
 //! What a `relay` tool call's sub-agents did, stored beside the call's tool
-//! result and never part of the conversation the model sees.
+//! result and never part of the history the model sees.
 
 use std::path::PathBuf;
 
@@ -20,7 +20,7 @@ pub struct PersistedRelayStep {
 pub struct PersistedRelayRun {
     pub end: PersistedRelayEnd,
     pub duration_ms: u64,
-    /// Tokens its conversation had held when it ended, once reported.
+    /// Tokens its history had held when it ended, once reported.
     pub tokens: Option<u32>,
     pub entries: Vec<PersistedRelayEntry>,
 }

@@ -33,7 +33,7 @@ impl MemoryStack {
         let embedding = embedder.embed(query).await.context("embed failed")?;
         let hits = self
             .semantic
-            .nearest_chunks(embedding, limit, ChunkScope::Chats(SessionScope::All))
+            .nearest_chunks(embedding, limit, ChunkScope::Messages(SessionScope::All))
             .await
             .context("semantic search failed")?;
         for hit in hits {

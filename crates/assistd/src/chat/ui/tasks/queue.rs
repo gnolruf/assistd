@@ -126,7 +126,7 @@ fn item_rows(item: &QueueItem, selected: bool, theme: &Theme) -> [Line<'static>;
 fn queued_state(state: &TaskRunState) -> String {
     match state {
         TaskRunState::Suspended {
-            reason: SuspendReason::UserConversation,
+            reason: SuspendReason::UserInteraction,
         } => "suspended: your conversation holds the model".into(),
         TaskRunState::Suspended {
             reason: SuspendReason::GpuBusy,

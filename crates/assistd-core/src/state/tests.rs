@@ -1232,7 +1232,7 @@ impl assistd_tools::Tool for ActTool {
     }
 }
 
-/// How often `act` ran in a chat turn under `plan` whose model calls `steps` in order, its
+/// How often `act` ran in a user turn under `plan` whose model calls `steps` in order, its
 /// client answering every prompt with `answer` and accepting every plan it is shown.
 async fn act_runs(plan: PlanMode, answer: Approval, steps: &[(&str, serde_json::Value)]) -> usize {
     let runs = Arc::new(AtomicUsize::new(0));
@@ -1504,7 +1504,7 @@ impl TurnBackend for StallingBackend {
 impl LlmBackend for StallingBackend {}
 
 #[tokio::test]
-async fn an_interrupted_reply_is_kept_with_a_marker_in_the_conversation_and_the_transcript() {
+async fn an_interrupted_reply_is_kept_with_a_marker_in_the_history_and_the_transcript() {
     let backend = Arc::new(StallingBackend::default());
     let (state, conv, _session, branch) =
         branch_state_with(backend.clone(), Arc::new(ToolRegistry::default())).await;
@@ -2211,7 +2211,7 @@ impl SemanticStore for FixedHits {
             .iter()
             .filter(|hit| match hit.locator {
                 ChunkLocator::Message { session_id, .. } => {
-                    scope != ChunkScope::Chats(SessionScope::AllExcept(session_id))
+                    scope != ChunkScope::Messages(SessionScope::AllExcept(session_id))
                 }
                 ChunkLocator::Document { .. } => scope == ChunkScope::Documents,
             })
@@ -2379,28 +2379,28 @@ async fn auto_recall_runs_once_per_new_session_with_memories_and_past_chat_point
     assert!(fresh.contains(&pointer), "{fresh}");
 }
 
-/// The user's conversation, which records every prompt pushed to it and hands
-/// out `task_conversation` as its one isolated conversation. As the safety judge's model it
+/// The main backend, which records every prompt pushed to it and hands
+/// out `task_backend` as its one isolated backend. As the safety judge's model it
 /// records each judge prompt and allows the command.
 #[derive(Debug)]
-struct MainConversation {
+struct MainBackend {
     pushed: StdMutex<Vec<String>>,
     judge_prompts: StdMutex<Vec<String>>,
-    task_conversation: StdMutex<Option<Arc<dyn LlmBackend>>>,
+    task_backend: StdMutex<Option<Arc<dyn LlmBackend>>>,
 }
 
-impl MainConversation {
-    fn new(task_conversation: Arc<dyn LlmBackend>) -> Arc<Self> {
+impl MainBackend {
+    fn new(task_backend: Arc<dyn LlmBackend>) -> Arc<Self> {
         Arc::new(Self {
             pushed: StdMutex::new(Vec::new()),
             judge_prompts: StdMutex::new(Vec::new()),
-            task_conversation: StdMutex::new(Some(task_conversation)),
+            task_backend: StdMutex::new(Some(task_backend)),
         })
     }
 }
 
 #[async_trait::async_trait]
-impl TurnBackend for MainConversation {
+impl TurnBackend for MainBackend {
     async fn push_user(
         &self,
         text: String,
@@ -2435,7 +2435,7 @@ impl TurnBackend for MainConversation {
 }
 
 #[async_trait::async_trait]
-impl LlmBackend for MainConversation {
+impl LlmBackend for MainBackend {
     async fn recent_user_messages(&self, limit: usize) -> Vec<String> {
         let pushed = self.pushed.lock();
         pushed[pushed.len().saturating_sub(limit)..].to_vec()
@@ -2450,22 +2450,22 @@ impl LlmBackend for MainConversation {
         Ok(r#"{"decision":"allow","reason":"a step of the task"}"#.into())
     }
 
-    fn isolated_conversation(
+    fn isolated_backend(
         &self,
         _system_prompt: String,
         _slot: SlotAssignment,
     ) -> assistd_llm::LlmResult<Arc<dyn LlmBackend>> {
-        self.task_conversation
+        self.task_backend
             .lock()
             .take()
-            .ok_or_else(|| LlmError::Unavailable("one task conversation only".into()))
+            .ok_or_else(|| LlmError::Unavailable("one task backend only".into()))
     }
 }
 
 /// An `AppState` on a fresh database with one saved task, positioned on a user
 /// session whose `main` branch holds one turn.
 async fn task_state(
-    backend: Arc<MainConversation>,
+    backend: Arc<MainBackend>,
     tools: Arc<ToolRegistry>,
 ) -> (Arc<AppState>, Arc<dyn TranscriptStore>, BranchId, TaskId) {
     task_state_with(Config::default(), backend, tools).await
@@ -2557,8 +2557,8 @@ async fn listed_run_states(conv: &Arc<dyn TranscriptStore>) -> Vec<TaskRunState>
 }
 
 #[tokio::test]
-async fn a_finished_task_run_leaves_the_main_conversation_untouched() {
-    let backend = MainConversation::new(Arc::new(EchoBackend::new()));
+async fn a_finished_task_run_leaves_the_main_backend_untouched() {
+    let backend = MainBackend::new(Arc::new(EchoBackend::new()));
     let (state, conv, branch, task) =
         task_state(backend.clone(), Arc::new(ToolRegistry::default())).await;
     let before = conv.load_branch(branch, HistoryScope::Whole).await.unwrap();
@@ -2591,7 +2591,7 @@ async fn a_finished_task_run_leaves_the_main_conversation_untouched() {
 
 #[tokio::test]
 async fn an_announcing_task_broadcasts_and_speaks_its_final_reply() {
-    let backend = MainConversation::new(Arc::new(EchoBackend::new()));
+    let backend = MainBackend::new(Arc::new(EchoBackend::new()));
     let (state, _conv, _branch, task) =
         task_state(backend, Arc::new(ToolRegistry::default())).await;
     let recorder = MockSpeechRecorder::new();
@@ -2628,10 +2628,10 @@ async fn an_announcing_task_broadcasts_and_speaks_its_final_reply() {
 }
 
 #[tokio::test]
-async fn a_cancelled_task_run_leaves_the_main_conversation_untouched() {
+async fn a_cancelled_task_run_leaves_the_main_backend_untouched() {
     let entered = Arc::new(Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
-    let task_conversation = ToolCallBackend::new(
+    let task_backend = ToolCallBackend::new(
         "",
         "done.",
         vec![StepOutcome::ToolCalls(vec![ToolCall {
@@ -2645,7 +2645,7 @@ async fn a_cancelled_task_run_leaves_the_main_conversation_untouched() {
         entered: entered.clone(),
         dropped: dropped.clone(),
     });
-    let backend = MainConversation::new(task_conversation);
+    let backend = MainBackend::new(task_backend);
     let (state, conv, branch, task) = task_state(backend.clone(), Arc::new(tools)).await;
     let before = conv.load_branch(branch, HistoryScope::Whole).await.unwrap();
 
@@ -2700,7 +2700,7 @@ fn queued_runs(state: &AppState) -> Vec<(TaskRunId, TaskRunState)> {
 
 #[tokio::test]
 async fn queue_order_and_pause_follow_moves_and_cancels_across_a_reload() {
-    let backend = MainConversation::new(Arc::new(EchoBackend::new()));
+    let backend = MainBackend::new(Arc::new(EchoBackend::new()));
     let (state, _conv, _branch, task) =
         task_state(backend, Arc::new(ToolRegistry::default())).await;
     change_task_queue(&state, TaskQueueOp::Pause).await;
@@ -2824,12 +2824,12 @@ async fn an_auto_task_run_is_judged_against_its_own_prompt_and_nothing_the_user_
         name: "script".into(),
         arguments: serde_json::json!({}),
     }]);
-    let task_conversation = ToolCallBackend::new("", "done.", vec![run_script]);
+    let task_backend = ToolCallBackend::new("", "done.", vec![run_script]);
     let mut tools = ToolRegistry::new();
     tools.register(UnvettedScriptTool);
     let mut config = Config::default();
     config.tools.allow_auto_mode = true;
-    let backend = MainConversation::new(task_conversation);
+    let backend = MainBackend::new(task_backend);
     backend
         .push_user("wipe the backups".into(), Vec::new())
         .await
@@ -2881,12 +2881,12 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
         }])
     };
     let steps = vec![fetch("allowed.example"), fetch("other.example")];
-    let task_conversation = ToolCallBackend::new("", "done.", steps);
+    let task_backend = ToolCallBackend::new("", "done.", steps);
     let mut tools = ToolRegistry::new();
     tools.register(FetchTool);
     let mut config = Config::default();
     config.timeouts.tool_call_secs = 1;
-    let backend = MainConversation::new(task_conversation);
+    let backend = MainBackend::new(task_backend);
     let (state, conv, _branch, task) = task_state_with(config, backend, Arc::new(tools)).await;
     let mut spec = state.memory.tasks.get(task).await.unwrap().spec;
     spec.allowed_hosts = vec!["allowed.example".to_string().try_into().unwrap()];
@@ -2969,10 +2969,10 @@ async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_aski
             arguments: serde_json::json!({ "host": "new.example" }),
         }])
     };
-    let task_conversation = ToolCallBackend::new("", "done.", vec![fetch(), fetch()]);
+    let task_backend = ToolCallBackend::new("", "done.", vec![fetch(), fetch()]);
     let mut tools = ToolRegistry::new();
     tools.register(FetchTool);
-    let backend = MainConversation::new(task_conversation);
+    let backend = MainBackend::new(task_backend);
     let (state, _conv, _branch, task) =
         task_state_with(Config::default(), backend, Arc::new(tools)).await;
     let mut bus = state.bus.subscribe(SubscribeFilter {
@@ -3046,10 +3046,10 @@ async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run(
         name: "fetch".into(),
         arguments: serde_json::json!({ "host": "new.example" }),
     }]);
-    let task_conversation = ToolCallBackend::new("", "done.", vec![fetch]);
+    let task_backend = ToolCallBackend::new("", "done.", vec![fetch]);
     let mut tools = ToolRegistry::new();
     tools.register(FetchTool);
-    let backend = MainConversation::new(task_conversation);
+    let backend = MainBackend::new(task_backend);
     let (state, _conv, _branch, task) =
         task_state_with(Config::default(), backend, Arc::new(tools)).await;
     let kinds = vec![EventKind::TaskRun, EventKind::TaskQueue];

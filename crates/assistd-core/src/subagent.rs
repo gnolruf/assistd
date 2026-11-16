@@ -1,4 +1,4 @@
-//! Sub-agent runs: the agent loop over a throwaway conversation on the shared
+//! Sub-agent runs: the agent loop over a throwaway backend on the shared
 //! llama-server, saving the model's final answer and returning its contract as a
 //! [`RelayReport`].
 
@@ -66,7 +66,7 @@ struct FinalAnswer {
     tool_steps: u32,
 }
 
-/// Runs sub-agents in conversations of their own beside `parent`'s, on the
+/// Runs sub-agents in backends of their own beside `parent`'s, on the
 /// same server and model.
 #[derive(Debug)]
 pub struct SubAgentRunner {
@@ -89,10 +89,10 @@ impl SubAgentRunner {
         }
     }
 
-    /// Run `task` in an empty conversation with `system_prompt` and `tools` until the model
+    /// Run `task` on a backend with an empty history, `system_prompt` and `tools` until the model
     /// answers, save that answer whole to the new file `answer_file`, then ask for its
     /// contract. Only the report reaches the model; `turn`, the calling turn, answers the
-    /// run's prompts and is shown its tool calls, and the conversation is dropped when the
+    /// run's prompts and is shown its tool calls, and the backend is dropped when the
     /// run ends or `cancel` fires.
     pub async fn run(
         &self,
@@ -105,7 +105,7 @@ impl SubAgentRunner {
     ) -> Result<RelayReport, SubAgentError> {
         let backend = self
             .parent
-            .isolated_conversation(system_prompt, SlotAssignment::Unassigned)?;
+            .isolated_backend(system_prompt, SlotAssignment::Unassigned)?;
         let agent = Agent::new(
             Arc::clone(&backend) as Arc<dyn TurnBackend>,
             tools,

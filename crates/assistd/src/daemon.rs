@@ -19,8 +19,7 @@ use assistd_core::{
     Subsystems, VisionRevalidator, VoiceManager, VramLedger, gpu_monitor, idle_monitor,
 };
 use assistd_llm::{
-    HistoryReplay, LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe, SlotDir,
-    SlotStash,
+    HistoryReplay, LlamaClient, LlamaServerControl, LlmBackend, LlmHealthProbe, SlotDir, SlotStash,
 };
 use assistd_utils::child_server::ApiKey;
 use clap::Args;
@@ -147,7 +146,7 @@ async fn start(
 
     let session_ctx = Arc::new(SessionContext::new(memory.session_id, memory.branch_id));
 
-    let (chat, relay, slot_stash) = build_chat_and_relay(
+    let (llm, relay, slot_stash) = build_backend_and_relay(
         &config,
         &api_key,
         slot_dir,
@@ -170,9 +169,9 @@ async fn start(
         },
     )?;
 
-    replay_history(chat.as_ref(), std::mem::take(&mut memory.resumed_history)).await;
+    replay_history(llm.as_ref(), std::mem::take(&mut memory.resumed_history)).await;
 
-    let subsystems = Subsystems::new(chat, presence.clone(), tools.registry, voice.clone())
+    let subsystems = Subsystems::new(llm, presence.clone(), tools.registry, voice.clone())
         .with_window_manager(window.manager.clone())
         .with_vision_revalidator(vision_revalidator.clone())
         .with_mcp_servers(tools.mcp_servers, tools.mcp_fleet.clone())
@@ -301,7 +300,7 @@ pub(crate) fn init_config() -> Result<()> {
     Ok(())
 }
 
-/// The chat server's slot directory under the user cache dir, emptied of
+/// The model server's slot directory under the user cache dir, emptied of
 /// slots a previous daemon left behind.
 fn prepare_slot_dir() -> Result<SlotDir> {
     let cache_dir = dirs::cache_dir().context("no user cache directory for llama-server slots")?;
@@ -315,9 +314,9 @@ fn prepare_slot_dir() -> Result<SlotDir> {
     Ok(slot_dir)
 }
 
-/// The chat backend, what the `relay` tool runs sub-agents with beside it on the same
+/// The main backend, what the `relay` tool runs sub-agents with beside it on the same
 /// slot, its saved answers swept of those not in `kept_answers`, and that slot's stash.
-fn build_chat_and_relay(
+fn build_backend_and_relay(
     config: &Config,
     api_key: &ApiKey,
     slot_dir: SlotDir,
@@ -327,7 +326,7 @@ fn build_chat_and_relay(
     slots: watch::Receiver<NonZeroU32>,
 ) -> Result<(Arc<dyn LlmBackend>, RelayDeps, Arc<SlotStash>)> {
     let slot_stash = build_slot_stash(config, api_key, slot_dir, health_probe, slots)?;
-    let chat = build_chat_backend(
+    let llm = build_main_backend(
         config,
         api_key,
         Arc::clone(health_probe),
@@ -336,15 +335,15 @@ fn build_chat_and_relay(
     let relay = build_relay_deps(
         config,
         Arc::clone(&slot_stash),
-        &chat,
+        &llm,
         health_probe,
         session_ctx,
         kept_answers,
     )?;
-    Ok((chat, relay, slot_stash))
+    Ok((llm, relay, slot_stash))
 }
 
-/// The stash that keeps each conversation's state of the chat server's slot.
+/// The stash that keeps each holder's state of the model server's slot.
 fn build_slot_stash(
     config: &Config,
     api_key: &ApiKey,
@@ -363,20 +362,20 @@ fn build_slot_stash(
     Ok(Arc::new(slot_stash.with_slot_count(slots)))
 }
 
-/// What the `relay` tool runs sub-agents with: the chat backend they share, the stash of its
+/// What the `relay` tool runs sub-agents with: the main backend they share, the stash of its
 /// slot, an emptied directory for their quarantines, and where their answers are saved,
 /// swept of those not in `kept_answers`.
 fn build_relay_deps(
     config: &Config,
     slot_stash: Arc<SlotStash>,
-    chat: &Arc<dyn LlmBackend>,
+    llm: &Arc<dyn LlmBackend>,
     health_probe: &Arc<dyn LlmHealthProbe>,
     session_ctx: &SessionContext,
     kept_answers: Option<HashSet<PathBuf>>,
 ) -> Result<RelayDeps> {
     Ok(RelayDeps {
         runner: SubAgentRunner::new(
-            Arc::clone(chat),
+            Arc::clone(llm),
             Some(Arc::clone(health_probe)),
             Duration::from_secs(config.timeouts.tool_call_secs),
         ),
@@ -450,13 +449,13 @@ fn build_vision_revalidator(
     ))
 }
 
-fn build_chat_backend(
+fn build_main_backend(
     config: &Config,
     api_key: &ApiKey,
     health_probe: Arc<dyn LlmHealthProbe>,
     slot_stash: Arc<SlotStash>,
 ) -> Result<Arc<dyn LlmBackend>> {
-    let chat = LlamaChatClient::new(
+    let llm = LlamaClient::new(
         &config.chat,
         &config.model,
         &config.timeouts,
@@ -464,7 +463,7 @@ fn build_chat_backend(
         Some(health_probe),
     )?
     .with_slot_stash(slot_stash);
-    Ok(Arc::new(chat))
+    Ok(Arc::new(llm))
 }
 
 /// The VRAM ledger, checked by `presence` before every wake; `None` when the GPU
@@ -489,12 +488,12 @@ fn build_memory_stack(
         .with_embed_wake(embed.embed_wake.clone())
 }
 
-async fn replay_history(chat: &dyn LlmBackend, replay: HistoryReplay) {
+async fn replay_history(llm: &dyn LlmBackend, replay: HistoryReplay) {
     if replay.entries.is_empty() {
         return;
     }
     let count = replay.entries.len();
-    if let Err(e) = chat.replace_history(replay).await {
+    if let Err(e) = llm.replace_history(replay).await {
         tracing::warn!("memory: resume replay failed: {e:#}");
     } else {
         info!("memory: resumed {count} message(s) from prior branch");

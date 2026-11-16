@@ -1,5 +1,5 @@
 //! The task queue's dispatcher, which starts queued runs and user turns as model
-//! lanes free up and holds runs for the user's conversation, and the `TaskQueue` handler.
+//! lanes free up and holds runs for the user's interaction, and the `TaskQueue` handler.
 
 use std::future::pending;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use assistd_ipc::{Event, EventBody, SuspendReason, TaskQueueOp, TaskQueueSnapsho
 use assistd_memory::{TaskRunEnd, WaitingRun};
 
 use super::DispatchError;
-use super::conversation::ConversationState;
+use super::interaction::InteractionState;
 use super::lanes::{LaneLease, ModelLanes, changed_or_pending};
 use super::task_queue::{Cancelled, NextStart, QueueOpError, TurnStart};
 use super::task_runs::DAEMON_STOPPED;
@@ -96,7 +96,7 @@ impl TaskService {
             TaskQueueOp::Pause => self.set_task_queue_paused(true).await?,
             TaskQueueOp::Resume => {
                 self.set_task_queue_paused(false).await?;
-                self.deps.admission.conversation.end();
+                self.deps.admission.interaction.end();
             }
         }
         Ok(())
@@ -137,17 +137,17 @@ impl TaskService {
     }
 
     /// Start the next queued item whenever a lane can take it, hold waiting runs while the
-    /// GPU monitor or the user's conversation does, end the conversation once it has been
+    /// GPU monitor or the user's interaction does, end that interaction once it has been
     /// quiet long enough, and broadcast the queue after every change, until `stopping` fires.
     async fn dispatch_queued_runs(self: Arc<Self>, stopping: CancellationToken) {
         let mut queue_changes = self.deps.admission.task_queue.subscribe();
         let mut lane_changes = self.deps.admission.lanes.watch();
         let mut gpu_hold = self.deps.presence.gpu_hold();
-        let mut conversation = self.deps.admission.conversation.subscribe();
+        let mut interaction = self.deps.admission.interaction.subscribe();
         let mut published = None;
         loop {
             let gpu_held = *gpu_hold.borrow_and_update();
-            let conversation_now = *conversation.borrow_and_update();
+            let interaction_now = *interaction.borrow_and_update();
             self.suspend_waiting_runs(gpu_held).await;
             queue_changes.mark_unchanged();
             self.publish_task_queue(&mut published);
@@ -158,9 +158,9 @@ impl TaskService {
                 _ = queue_changes.changed() => {}
                 () = lane_changes.changed() => {}
                 () = changed_or_pending(&mut gpu_hold) => {}
-                () = changed_or_pending(&mut conversation) => {}
-                () = quiet_ends(conversation_now) => {
-                    self.deps.admission.conversation.end_if_quiet_by(Instant::now());
+                () = changed_or_pending(&mut interaction) => {}
+                () = quiet_ends(interaction_now) => {
+                    self.deps.admission.interaction.end_if_quiet_by(Instant::now());
                 }
                 admitted = admit(&self.deps.admission.lanes, next) => self.start_admitted(admitted),
             }
@@ -168,11 +168,11 @@ impl TaskService {
     }
 
     /// Start the waiting item a lane was found for, unless it stopped waiting meanwhile or
-    /// the user's conversation took the main lane first.
+    /// the user's interaction took the main lane first.
     fn start_admitted(self: &Arc<Self>, admitted: Admitted) {
         match admitted {
             Admitted::Run(_, lease)
-                if lease.on_main_lane() && self.deps.admission.conversation_holds_queue() =>
+                if lease.on_main_lane() && self.deps.admission.interaction_holds_queue() =>
             {
                 debug!(target: "assistd::tasks", "the user's conversation took the lane first");
             }
@@ -192,8 +192,8 @@ impl TaskService {
                 let turn = self
                     .deps
                     .admission
-                    .conversation
-                    .begin_turn(self.deps.admission.conversation_quiet_time());
+                    .interaction
+                    .begin_turn(self.deps.admission.interaction_quiet_time());
                 let start = TurnStart { lane, turn };
                 if let Err(unstarted) = self.deps.admission.task_queue.start_turn(&id, start) {
                     debug!(target: "assistd::tasks", %id, "admitted user turn left the queue first");
@@ -204,7 +204,7 @@ impl TaskService {
     }
 
     /// Suspend every waiting run while the GPU monitor holds the daemon asleep or the
-    /// user's conversation holds the only lane, and queue them again once both let go,
+    /// user's interaction holds the only lane, and queue them again once both let go,
     /// recording each change.
     async fn suspend_waiting_runs(&self, gpu_held: bool) {
         let reason = if gpu_held {
@@ -212,8 +212,8 @@ impl TaskService {
         } else {
             self.deps
                 .admission
-                .conversation_holds_queue()
-                .then_some(SuspendReason::UserConversation)
+                .interaction_holds_queue()
+                .then_some(SuspendReason::UserInteraction)
         };
         for run in self.deps.admission.task_queue.suspend_waiting(reason) {
             if let Err(e) = self.deps.store.set_run_waiting(run, reason).await {
@@ -257,10 +257,10 @@ async fn admit(lanes: &Arc<ModelLanes>, next: Option<NextStart>) -> Admitted {
     }
 }
 
-/// When a quiet conversation's quiet time runs out; never for any other.
-async fn quiet_ends(conversation: ConversationState) {
-    match conversation {
-        ConversationState::Quiet { until, .. } => tokio::time::sleep_until(until).await,
-        ConversationState::Idle | ConversationState::Talking { .. } => pending().await,
+/// When a quiet interaction's quiet time runs out; never for any other.
+async fn quiet_ends(interaction: InteractionState) {
+    match interaction {
+        InteractionState::Quiet { until, .. } => tokio::time::sleep_until(until).await,
+        InteractionState::Idle | InteractionState::Talking { .. } => pending().await,
     }
 }

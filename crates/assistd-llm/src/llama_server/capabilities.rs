@@ -15,7 +15,7 @@ use super::error::LlamaServerError;
 pub struct VisionState {
     pub model_id: Option<String>,
     pub vision_supported: bool,
-    /// Conversations the server decodes at once; `None` when not reported.
+    /// Requests the server decodes at once; `None` when not reported.
     pub total_slots: Option<NonZeroU32>,
 }
 

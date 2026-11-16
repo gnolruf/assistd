@@ -237,7 +237,7 @@ impl Agent {
     }
 
     /// Keep what the cut-off step streamed as the turn's reply, marked as
-    /// interrupted, in the conversation and for whoever records the turn.
+    /// interrupted, in the history and for whoever records the turn.
     async fn record_interruption(&self, turn: &Turn, streamed: &str) -> Result<(), LlmError> {
         let reply = interrupted_reply(streamed);
         self.backend.push_interrupted_reply(reply.clone()).await?;

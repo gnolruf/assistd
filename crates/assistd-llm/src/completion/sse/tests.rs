@@ -76,5 +76,5 @@ fn rejects_unterminated_line_past_cap_across_feeds() {
             Err(e) => break e,
         }
     };
-    assert!(matches!(err, ChatClientError::Sse(_)));
+    assert!(matches!(err, LlamaClientError::Sse(_)));
 }

@@ -1,4 +1,4 @@
-//! HTTP streaming chat client for the locally-managed llama-server.
+//! HTTP streaming client for the locally-managed llama-server.
 
 use std::collections::BTreeMap;
 use std::mem::take;
@@ -21,17 +21,17 @@ use tokio::sync::{Mutex, MutexGuard, mpsc};
 use tokio::time::{Instant, timeout, timeout_at};
 use tracing::{debug, info, warn};
 
-use super::conversation::{
-    AssistantMessage, Conversation, Message, Role, Summarizer, SummaryRequest, ToolCallRecord,
+use super::error::LlamaClientError;
+use super::history::{
+    AssistantMessage, History, Message, Role, Summarizer, SummaryRequest, ToolCallRecord,
     UserMessage, approx_tokens_bytes, ensure_budget,
 };
-use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
 use super::think_splitter::{Segment, ThinkSplitter};
 use super::wire;
 use crate::{
-    ConversationKey, HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, LlmError, LlmEvent,
-    LlmHealthProbe, LlmResult, OneShotReply, ReadyState, SlotAssignment, SlotStash, StepOutcome,
+    HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
+    LlmResult, OneShotReply, ReadyState, SlotAssignment, SlotHolder, SlotStash, StepOutcome,
     Thinking, ToolCall, ToolResultPayload, TurnBackend,
 };
 
@@ -45,30 +45,30 @@ const REASONING_BUDGET_MESSAGE: &str =
 /// Tool-call markup the chat template emits; a summary containing it tried
 /// to act instead of summarizing.
 const TOOL_CALL_MARKUP: &str = "<tool_call>";
-/// The slot the main conversation and those sharing it with a [`SlotStash`] use.
+/// The slot the main backend and those sharing it with a [`SlotStash`] use.
 const SHARED_SLOT: u32 = 0;
 
-/// HTTP streaming chat client backed by a locally-managed llama-server. The conversation lock
+/// HTTP streaming client backed by a locally-managed llama-server. The history lock
 /// is held only while state is mutated, never across the HTTP stream, a compaction summary or
 /// an event send, so neither a hung server nor a stalled consumer blocks `push_user` or
 /// `set_transient_context`.
 #[derive(Debug)]
-pub struct LlamaChatClient {
+pub struct LlamaClient {
     client: reqwest::Client,
     base_url: String,
     chat: ChatConfig,
     model: ModelConfig,
     timeouts: TimeoutsConfig,
-    conv: Mutex<Conversation>,
+    history: Mutex<History>,
     /// When set, no request is sent unless the probe reports a serving
     /// child, and a failure coinciding with a supervisor restart becomes
     /// [`LlmError::ServerRestarting`] instead of a transport fault.
     health: Option<Arc<dyn LlmHealthProbe>>,
-    /// Changes only between requests, when the conversation moves to another slot.
+    /// Changes only between requests, when the client moves to another slot.
     slot: parking_lot::Mutex<SlotBinding>,
 }
 
-impl LlamaChatClient {
+impl LlamaClient {
     /// Build a client for `model.host:model.port`, sending `api_key` when set. With a `health`
     /// probe, a request made while its child is not serving fails with
     /// [`LlmError::ServerRestarting`] without being sent.
@@ -78,7 +78,7 @@ impl LlamaChatClient {
         timeouts: &TimeoutsConfig,
         api_key: Option<&ApiKey>,
         health: Option<Arc<dyn LlmHealthProbe>>,
-    ) -> Result<Self, ChatClientError> {
+    ) -> Result<Self, LlamaClientError> {
         let client = local_client_builder()
             .default_headers(
                 api_key
@@ -91,38 +91,38 @@ impl LlamaChatClient {
             "http://{}",
             SocketAddr::new(model.host.get(), model.port.get())
         );
-        let conv = Conversation::new(chat.system_prompt.clone());
+        let history = History::new(chat.system_prompt.clone());
         Ok(Self {
             client,
             base_url,
             chat: chat.clone(),
             model: model.clone(),
             timeouts: timeouts.clone(),
-            conv: Mutex::new(conv),
+            history: Mutex::new(history),
             health,
             slot: parking_lot::Mutex::new(SlotBinding::Unassigned),
         })
     }
 
-    /// Keep this, the main conversation, on the shared slot in `stash`,
+    /// Keep this, the main backend, on the shared slot in `stash`,
     /// switching the slot to it before each request.
     pub fn with_slot_stash(mut self, stash: Arc<SlotStash>) -> Self {
         *self.slot.get_mut() = SlotBinding::Shared {
             stash,
-            key: ConversationKey::Main,
+            holder: SlotHolder::Main,
         };
         self
     }
 
     async fn claim_slot(&self) {
-        if let Some((stash, key)) = self.shared_slot() {
-            stash.switch_to(key).await;
+        if let Some((stash, holder)) = self.shared_slot() {
+            stash.switch_to(holder).await;
         }
     }
 
-    fn shared_slot(&self) -> Option<(Arc<SlotStash>, ConversationKey)> {
+    fn shared_slot(&self) -> Option<(Arc<SlotStash>, SlotHolder)> {
         match &*self.slot.lock() {
-            SlotBinding::Shared { stash, key } => Some((Arc::clone(stash), *key)),
+            SlotBinding::Shared { stash, holder } => Some((Arc::clone(stash), *holder)),
             SlotBinding::Unassigned | SlotBinding::Pinned(_) => None,
         }
     }
@@ -174,7 +174,7 @@ impl LlamaChatClient {
     async fn fail(
         &self,
         accum: StreamAccum,
-        err: ChatClientError,
+        err: LlamaClientError,
         pid_at_request: Option<u32>,
     ) -> StreamOutcome {
         if self.looks_like_server_crash(pid_at_request).await {
@@ -186,7 +186,7 @@ impl LlamaChatClient {
         }
         if accum.has_output() {
             warn!(
-                target: "assistd::chat",
+                target: "assistd::completion",
                 "mid-stream error after {} bytes / {} tool-call builders: {err}",
                 accum.text.len(),
                 accum.tool_calls.len()
@@ -216,17 +216,17 @@ impl LlamaChatClient {
     }
 
     /// The pid of the serving child a request is sent to, `None` when no
-    /// supervisor is attached. Fails with [`ChatClientError::NotReady`] when
+    /// supervisor is attached. Fails with [`LlamaClientError::NotReady`] when
     /// the supervised child is not serving.
-    async fn serving_pid(&self) -> Result<Option<u32>, ChatClientError> {
+    async fn serving_pid(&self) -> Result<Option<u32>, LlamaClientError> {
         let Some(probe) = self.health.as_ref() else {
             return Ok(None);
         };
         match probe.snapshot().await {
             Some(snapshot) if snapshot.is_serving() => Ok(snapshot.pid),
             _ => {
-                warn!(target: "assistd::chat", "llama-server is not ready; request not sent");
-                Err(ChatClientError::NotReady)
+                warn!(target: "assistd::completion", "llama-server is not ready; request not sent");
+                Err(LlamaClientError::NotReady)
             }
         }
     }
@@ -270,11 +270,11 @@ impl LlamaChatClient {
         if !saw_done {
             if accum.finish_reason.is_none() {
                 let err =
-                    ChatClientError::Sse("stream ended without [DONE] or a finish_reason".into());
+                    LlamaClientError::Sse("stream ended without [DONE] or a finish_reason".into());
                 return self.fail(accum, err, pid_at_request).await;
             }
             warn!(
-                target: "assistd::chat",
+                target: "assistd::completion",
                 "stream ended before [DONE] marker; accumulated {} bytes text, {} tool-call builders",
                 accum.text.len(),
                 accum.tool_calls.len()
@@ -284,13 +284,13 @@ impl LlamaChatClient {
         StreamOutcome::Ok(Box::new(accum))
     }
 
-    /// Stream one completion outside the conversation and return its text,
+    /// Stream one completion outside the history and return its text,
     /// with reasoning discarded; `caller` names the request in a crash error.
     async fn stream_text(&self, body: Vec<u8>, caller: &str) -> LlmResult<String> {
         match self.stream_unobserved(body).await {
             StreamOutcome::Ok(accum) | StreamOutcome::ClientDisconnected(accum) => Ok(accum.text),
             StreamOutcome::PreEmitError(e) | StreamOutcome::PartialAfterEmit { err: e, .. } => {
-                Err(LlmError::Chat(e))
+                Err(LlmError::Client(e))
             }
             StreamOutcome::ServerRestart { .. } => Err(LlmError::ServerRestarting(format!(
                 "llama-server crashed during {caller}"
@@ -311,7 +311,7 @@ impl LlamaChatClient {
         outcome
     }
 
-    /// Compact the conversation when it is over budget, summarizing with the
+    /// Compact the history when it is over budget, summarizing with the
     /// same `tools` the coming request offers so its prompt prefix is
     /// unchanged, and return it locked for that request, with the events to
     /// send once it is unlocked.
@@ -319,44 +319,44 @@ impl LlamaChatClient {
         &self,
         tools: &[Value],
         tx: &mpsc::Sender<LlmEvent>,
-    ) -> LlmResult<(MutexGuard<'_, Conversation>, Vec<LlmEvent>)> {
-        let conv = self.conv.lock().await;
-        if !conv.exceeds_budget(&self.chat, &self.model) {
+    ) -> LlmResult<(MutexGuard<'_, History>, Vec<LlmEvent>)> {
+        let history = self.history.lock().await;
+        if !history.exceeds_budget(&self.chat, &self.model) {
             let compacting_soon = self
-                .compaction_headroom(&conv)
+                .compaction_headroom(&history)
                 .is_none()
                 .then(|| compaction_status(StatusKind::CompactingSoon, "compacting soon"));
-            return Ok((conv, compacting_soon.into_iter().collect()));
+            return Ok((history, compacting_soon.into_iter().collect()));
         }
-        let before = (conv.message_count(), conv.approx_total_tokens());
-        drop(conv);
+        let before = (history.message_count(), history.approx_total_tokens());
+        drop(history);
         send_compaction_status(tx, StatusKind::CompactingHistory, "compacting history…").await;
         let started_at = Instant::now();
         let summarizer = ContinuationSummarizer {
             client: self,
             tools,
         };
-        let outcome = ensure_budget(&self.conv, &summarizer, &self.chat, &self.model).await;
-        let mut conv = self.conv.lock().await;
+        let outcome = ensure_budget(&self.history, &summarizer, &self.chat, &self.model).await;
+        let mut history = self.history.lock().await;
         if let Err(e) = outcome {
             warn!(
-                target: "assistd::chat",
+                target: "assistd::completion",
                 "ensure_budget failed ({e}); falling back to truncation"
             );
-            if conv.exceeds_budget(&self.chat, &self.model) {
-                conv.truncate_to_budget(&self.chat, &self.model);
+            if history.exceeds_budget(&self.chat, &self.model) {
+                history.truncate_to_budget(&self.chat, &self.model);
             }
         }
         info!(
-            target: "assistd::chat",
+            target: "assistd::completion",
             messages_before = before.0,
-            messages_after = conv.message_count(),
+            messages_after = history.message_count(),
             tokens_before = before.1,
-            tokens_after = conv.approx_total_tokens(),
+            tokens_after = history.approx_total_tokens(),
             "history compacted to fit the token budget"
         );
-        let events = compaction_events(&conv, started_at);
-        Ok((conv, events))
+        let events = compaction_events(&history, started_at);
+        Ok((history, events))
     }
 
     /// Drop history down to the low-water mark of the estimate, which the
@@ -365,23 +365,23 @@ impl LlamaChatClient {
         send_compaction_status(tx, StatusKind::CompactingHistory, "compacting history…").await;
         let started_at = Instant::now();
         let events = {
-            let mut conv = self.conv.lock().await;
-            let before = (conv.message_count(), conv.approx_total_tokens());
-            conv.truncate_to_budget(&self.chat, &self.model);
+            let mut history = self.history.lock().await;
+            let before = (history.message_count(), history.approx_total_tokens());
+            history.truncate_to_budget(&self.chat, &self.model);
             warn!(
-                target: "assistd::chat",
+                target: "assistd::completion",
                 messages_before = before.0,
-                messages_after = conv.message_count(),
+                messages_after = history.message_count(),
                 tokens_before = before.1,
-                tokens_after = conv.approx_total_tokens(),
+                tokens_after = history.approx_total_tokens(),
                 "prompt exceeded the context window; history truncated to retry"
             );
-            compaction_events(&conv, started_at)
+            compaction_events(&history, started_at)
         };
         send_events(tx, events).await;
     }
 
-    /// Fit the conversation to its budget, send it with `tools` offered, and
+    /// Fit the history to its budget, send it with `tools` offered, and
     /// correct the token estimate by what the server measured.
     async fn attempt_step(
         &self,
@@ -389,16 +389,16 @@ impl LlamaChatClient {
         tx: &mpsc::Sender<LlmEvent>,
     ) -> LlmResult<StreamOutcome> {
         let (body_bytes, estimated_tokens, compaction_headroom, events) = {
-            let (conv, mut events) = self.fit_budget(tools, tx).await?;
-            events.push(context_size(&conv));
-            let mut payload = self.base_request(conv.as_wire_messages());
+            let (history, mut events) = self.fit_budget(tools, tx).await?;
+            events.push(context_size(&history));
+            let mut payload = self.base_request(history.as_wire_messages());
             offer_tools(&mut payload, tools.to_vec());
             let body = serde_json::to_vec(&payload)
-                .map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?;
+                .map_err(|e| LlmError::Client(LlamaClientError::Json(e)))?;
             (
                 body,
-                conv.heuristic_tokens(),
-                self.compaction_headroom(&conv),
+                history.heuristic_tokens(),
+                self.compaction_headroom(&history),
                 events,
             )
         };
@@ -408,37 +408,37 @@ impl LlamaChatClient {
         let outcome = self
             .stream_openai(body_bytes, compaction_headroom, tx)
             .await;
-        let mut conv = self.conv.lock().await;
-        self.calibrate(&mut conv, estimated_tokens, &outcome);
+        let mut history = self.history.lock().await;
+        self.calibrate(&mut history, estimated_tokens, &outcome);
         Ok(outcome)
     }
 
     /// Record the prompt size the server measured for a request estimated at
     /// `estimated_tokens`; a refusal naming no size counts as a full window.
-    fn calibrate(&self, conv: &mut Conversation, estimated_tokens: u32, outcome: &StreamOutcome) {
+    fn calibrate(&self, history: &mut History, estimated_tokens: u32, outcome: &StreamOutcome) {
         let measured = match outcome {
             StreamOutcome::Ok(accum)
             | StreamOutcome::PartialAfterEmit { accum, .. }
             | StreamOutcome::ClientDisconnected(accum) => accum.prompt_tokens,
-            StreamOutcome::PreEmitError(ChatClientError::ContextOverflow { prompt_tokens }) => {
+            StreamOutcome::PreEmitError(LlamaClientError::ContextOverflow { prompt_tokens }) => {
                 Some(prompt_tokens.unwrap_or(self.model.context_length.get()))
             }
             StreamOutcome::PreEmitError(_) | StreamOutcome::ServerRestart { .. } => None,
         };
         if let Some(prompt_tokens) = measured {
             debug!(
-                target: "assistd::chat",
+                target: "assistd::completion",
                 estimated_tokens,
                 prompt_tokens,
                 "calibrating token estimate from server usage"
             );
-            conv.calibrate(estimated_tokens, prompt_tokens);
+            history.calibrate(estimated_tokens, prompt_tokens);
         }
     }
 
     /// `None` when compaction is already near, so it is announced once.
-    fn compaction_headroom(&self, conv: &Conversation) -> Option<NonZeroU32> {
-        NonZeroU32::new(conv.compaction_warning_headroom(&self.chat, &self.model))
+    fn compaction_headroom(&self, history: &History) -> Option<NonZeroU32> {
+        NonZeroU32::new(history.compaction_warning_headroom(&self.chat, &self.model))
     }
 
     fn request_timeout(&self) -> Duration {
@@ -469,13 +469,13 @@ impl LlamaChatClient {
                 return Err(self
                     .fail(
                         StreamAccum::default(),
-                        ChatClientError::Http(e),
+                        LlamaClientError::Http(e),
                         pid_at_request,
                     )
                     .await);
             }
             Err(_) => {
-                let err = ChatClientError::Sse(format!(
+                let err = LlamaClientError::Sse(format!(
                     "no response headers within {}s",
                     self.request_timeout().as_secs()
                 ));
@@ -523,19 +523,19 @@ impl LlamaChatClient {
                 Ok(Ok(None)) => return Ok(false),
                 Ok(Err(e)) => {
                     return Err(self
-                        .fail(take(accum), ChatClientError::Http(e), pid_at_request)
+                        .fail(take(accum), LlamaClientError::Http(e), pid_at_request)
                         .await);
                 }
                 Err(_) => {
                     warn!(
-                        target: "assistd::chat",
+                        target: "assistd::completion",
                         timeout_secs = deadline.as_secs(),
                         phase = if saw_bytes { "inter_chunk" } else { "first_byte" },
                         bytes_so_far = accum.text.len(),
                         tool_call_builders = accum.tool_calls.len(),
                         "SSE stream inactive past deadline; aborting read"
                     );
-                    let err = ChatClientError::Sse(format!(
+                    let err = LlamaClientError::Sse(format!(
                         "no bytes received for {}s",
                         deadline.as_secs()
                     ));
@@ -574,7 +574,7 @@ impl LlamaChatClient {
             Ok(parsed) => parsed,
             Err(e) => {
                 return Err(self
-                    .fail(take(accum), ChatClientError::Json(e), pid_at_request)
+                    .fail(take(accum), LlamaClientError::Json(e), pid_at_request)
                     .await);
             }
         };
@@ -613,24 +613,24 @@ impl LlamaChatClient {
 }
 
 #[async_trait]
-impl TurnBackend for LlamaChatClient {
+impl TurnBackend for LlamaClient {
     async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> LlmResult<()> {
-        let mut conv = self.conv.lock().await;
+        let mut history = self.history.lock().await;
         if attachments.is_empty() {
-            conv.push_user(text);
+            history.push_user(text);
         } else {
-            conv.push_user_with_attachments(text, attachments);
+            history.push_user_with_attachments(text, attachments);
         }
         Ok(())
     }
 
     async fn push_tool_results(&self, results: Vec<ToolResultPayload>) -> LlmResult<()> {
-        let mut conv = self.conv.lock().await;
+        let mut history = self.history.lock().await;
         for result in results {
             if result.attachments.is_empty() {
-                conv.push_tool_result(result.call_id, result.content);
+                history.push_tool_result(result.call_id, result.content);
             } else {
-                conv.push_tool_result_with_attachments(
+                history.push_tool_result_with_attachments(
                     result.name,
                     result.content,
                     result.attachments,
@@ -646,14 +646,14 @@ impl TurnBackend for LlamaChatClient {
             self.truncate_after_overflow(&tx).await;
             outcome = self.attempt_step(&tools, &tx).await?;
         }
-        let mut conv = self.conv.lock().await;
+        let mut history = self.history.lock().await;
         match outcome {
             StreamOutcome::Ok(accum) | StreamOutcome::ClientDisconnected(accum) => {
-                commit_step(&mut conv, *accum)
+                commit_step(&mut history, *accum)
             }
             StreamOutcome::PreEmitError(e) | StreamOutcome::PartialAfterEmit { err: e, .. } => {
-                conv.rollback_last_user();
-                Err(LlmError::Chat(e))
+                history.rollback_last_user();
+                Err(LlmError::Client(e))
             }
             StreamOutcome::ServerRestart { accum, pre_emit } => {
                 let bytes_so_far = accum.text.len();
@@ -670,24 +670,24 @@ impl TurnBackend for LlamaChatClient {
     }
 
     async fn push_interrupted_reply(&self, reply: String) -> LlmResult<()> {
-        let mut conv = self.conv.lock().await;
-        conv.consume_transient_note();
-        conv.push_assistant(reply);
+        let mut history = self.history.lock().await;
+        history.consume_transient_note();
+        history.push_assistant(reply);
         Ok(())
     }
 
     async fn set_transient_note(&self, text: String) -> LlmResult<()> {
-        let mut conv = self.conv.lock().await;
-        conv.set_transient_note(text);
+        let mut history = self.history.lock().await;
+        history.set_transient_note(text);
         Ok(())
     }
 }
 
 #[async_trait]
-impl LlmBackend for LlamaChatClient {
+impl LlmBackend for LlamaClient {
     async fn set_transient_context(&self, text: String) -> LlmResult<()> {
-        let mut conv = self.conv.lock().await;
-        conv.set_transient_context(text);
+        let mut history = self.history.lock().await;
+        history.set_transient_context(text);
         Ok(())
     }
 
@@ -698,14 +698,14 @@ impl LlmBackend for LlamaChatClient {
             .map(history_message)
             .collect();
         let messages = replay.entries.into_iter().map(history_message).collect();
-        let mut conv = self.conv.lock().await;
-        conv.replace_messages(replay.summary.as_deref(), &folded_steps, messages);
+        let mut history = self.history.lock().await;
+        history.replace_messages(replay.summary.as_deref(), &folded_steps, messages);
         Ok(())
     }
 
     async fn truncate_to_last_real_user(&self) -> LlmResult<usize> {
-        let mut conv = self.conv.lock().await;
-        Ok(conv.truncate_to_last_real_user())
+        let mut history = self.history.lock().await;
+        Ok(history.truncate_to_last_real_user())
     }
 
     async fn complete_oneshot(&self, prompt: String, reply: OneShotReply) -> LlmResult<String> {
@@ -734,7 +734,7 @@ impl LlmBackend for LlamaChatClient {
                     payload.response_format = Some(wire::ResponseFormat::json_schema(schema));
                 }
             }
-            serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
+            serde_json::to_vec(&payload).map_err(|e| LlmError::Client(LlamaClientError::Json(e)))?
         };
         let request = self.stream_text(body_bytes, "complete_oneshot");
         match self.shared_slot() {
@@ -744,7 +744,7 @@ impl LlmBackend for LlamaChatClient {
     }
 
     async fn recent_user_messages(&self, limit: usize) -> Vec<String> {
-        self.conv.lock().await.recent_user_messages(limit)
+        self.history.lock().await.recent_user_messages(limit)
     }
 
     async fn complete_with_schema(
@@ -753,8 +753,8 @@ impl LlmBackend for LlamaChatClient {
         schema: Map<String, Value>,
     ) -> LlmResult<String> {
         let body_bytes = {
-            let conv = self.conv.lock().await;
-            let mut messages = conv.as_wire_messages();
+            let history = self.history.lock().await;
+            let mut messages = history.as_wire_messages();
             messages.push(wire::ChatMessage::plain(
                 Role::User.as_wire(),
                 wire::ContentBody::Text(instruction.as_str().into()),
@@ -764,13 +764,13 @@ impl LlmBackend for LlamaChatClient {
             payload.reasoning_budget_tokens = None;
             payload.reasoning_budget_message = None;
             payload.response_format = Some(wire::ResponseFormat::json_schema(&schema));
-            serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
+            serde_json::to_vec(&payload).map_err(|e| LlmError::Client(LlamaClientError::Json(e)))?
         };
         self.claim_slot().await;
         self.stream_text(body_bytes, "complete_with_schema").await
     }
 
-    fn isolated_conversation(
+    fn isolated_backend(
         &self,
         system_prompt: String,
         slot: SlotAssignment,
@@ -785,7 +785,7 @@ impl LlmBackend for LlamaChatClient {
             chat,
             model: self.model.clone(),
             timeouts: self.timeouts.clone(),
-            conv: Mutex::new(Conversation::new(system_prompt)),
+            history: Mutex::new(History::new(system_prompt)),
             health: self.health.clone(),
             slot: parking_lot::Mutex::new(self.slot.lock().assign(slot)),
         }))
@@ -797,27 +797,27 @@ impl LlmBackend for LlamaChatClient {
     }
 }
 
-/// The slot a conversation's requests use.
+/// The slot a client's requests use.
 #[derive(Debug)]
 enum SlotBinding {
     Unassigned,
-    /// The shared slot, its state kept in `stash` under `key` while others use it.
+    /// The shared slot, its state kept in `stash` under `holder` while others use it.
     Shared {
         stash: Arc<SlotStash>,
-        key: ConversationKey,
+        holder: SlotHolder,
     },
     Pinned(u32),
 }
 
 impl SlotBinding {
-    /// The binding `assignment` names for a conversation on this one's server; a shared
+    /// The binding `assignment` names for a client on this one's server; a shared
     /// slot without a stash is left unassigned.
     fn assign(&self, assignment: SlotAssignment) -> Self {
         match (assignment, self) {
-            (SlotAssignment::Shared(key), SlotBinding::Shared { stash, .. }) => {
+            (SlotAssignment::Shared(holder), SlotBinding::Shared { stash, .. }) => {
                 SlotBinding::Shared {
                     stash: Arc::clone(stash),
-                    key,
+                    holder,
                 }
             }
             (SlotAssignment::Pinned(index), _) => SlotBinding::Pinned(index),
@@ -834,11 +834,11 @@ impl SlotBinding {
     }
 }
 
-/// Summarizes by continuing the live conversation with the request's own
+/// Summarizes by continuing the live history with the request's own
 /// tools and template settings, so llama-server reuses its cached prompt; a
 /// zero thinking budget skips thinking without changing the template.
 struct ContinuationSummarizer<'a> {
-    client: &'a LlamaChatClient,
+    client: &'a LlamaClient,
     tools: &'a [Value],
 }
 
@@ -846,7 +846,7 @@ struct ContinuationSummarizer<'a> {
 impl Summarizer for ContinuationSummarizer<'_> {
     /// Ask with the request's tools first, so the cached prompt is reused; a
     /// reply that calls a tool or is empty is asked again with no tools offered.
-    async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, ChatClientError> {
+    async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, LlamaClientError> {
         self.client.claim_slot().await;
         let SummaryRequest {
             mut messages,
@@ -857,9 +857,9 @@ impl Summarizer for ContinuationSummarizer<'_> {
             wire::ContentBody::Text(instruction.as_str().into()),
         ));
         match self.request_summary(messages.clone(), self.tools).await {
-            Err(ChatClientError::Summarize(reason)) if !self.tools.is_empty() => {
+            Err(LlamaClientError::Summarize(reason)) if !self.tools.is_empty() => {
                 warn!(
-                    target: "assistd::chat",
+                    target: "assistd::completion",
                     %reason,
                     "summary attempt failed; asking again without tools"
                 );
@@ -875,7 +875,7 @@ impl ContinuationSummarizer<'_> {
         &self,
         messages: Vec<wire::ChatMessage<'_>>,
         tools: &[Value],
-    ) -> Result<String, ChatClientError> {
+    ) -> Result<String, LlamaClientError> {
         let client = self.client;
         let mut payload = client.base_request(messages);
         offer_tools(&mut payload, tools.to_vec());
@@ -891,8 +891,8 @@ impl ContinuationSummarizer<'_> {
             StreamOutcome::PreEmitError(err) | StreamOutcome::PartialAfterEmit { err, .. } => {
                 Err(err)
             }
-            StreamOutcome::ServerRestart { pre_emit: true, .. } => Err(ChatClientError::NotReady),
-            StreamOutcome::ServerRestart { .. } => Err(ChatClientError::Restarted),
+            StreamOutcome::ServerRestart { pre_emit: true, .. } => Err(LlamaClientError::NotReady),
+            StreamOutcome::ServerRestart { .. } => Err(LlamaClientError::Restarted),
         }
     }
 }
@@ -906,15 +906,15 @@ fn offer_tools(payload: &mut wire::ChatRequest<'_>, tools: Vec<Value>) {
 }
 
 /// The summary a finished stream holds, refusing a reply that called a tool or said nothing.
-fn summary_text(reply: StreamAccum) -> Result<String, ChatClientError> {
+fn summary_text(reply: StreamAccum) -> Result<String, LlamaClientError> {
     let text = reply.text;
     if !reply.tool_calls.is_empty() || text.contains(TOOL_CALL_MARKUP) {
-        return Err(ChatClientError::Summarize(
+        return Err(LlamaClientError::Summarize(
             "the model called a tool instead of summarizing".into(),
         ));
     }
     if text.trim().is_empty() {
-        return Err(ChatClientError::Summarize(
+        return Err(LlamaClientError::Summarize(
             "summarizer returned empty text".into(),
         ));
     }
@@ -1018,12 +1018,12 @@ enum StreamOutcome {
     /// Stream failed after deltas were forwarded; `accum` holds what arrived.
     PartialAfterEmit {
         accum: Box<StreamAccum>,
-        err: ChatClientError,
+        err: LlamaClientError,
     },
     /// The consumer dropped the receiver mid-stream; stop quietly.
     ClientDisconnected(Box<StreamAccum>),
     /// Stream errored before any deltas were forwarded; propagate as `Err`.
-    PreEmitError(ChatClientError),
+    PreEmitError(LlamaClientError),
     /// The failure coincided with a supervisor restart. `pre_emit` is
     /// true when nothing had been streamed to the consumer yet.
     ServerRestart {
@@ -1036,15 +1036,15 @@ impl StreamOutcome {
     fn is_context_overflow(&self) -> bool {
         matches!(
             self,
-            Self::PreEmitError(ChatClientError::ContextOverflow { .. })
+            Self::PreEmitError(LlamaClientError::ContextOverflow { .. })
         )
     }
 }
 
 /// The events telling the consumer compaction finished, led by the summary
-/// now heading the conversation when there is one.
-fn compaction_events(conv: &Conversation, started_at: Instant) -> Vec<LlmEvent> {
-    let summarized = conv
+/// now heading the history when there is one.
+fn compaction_events(history: &History, started_at: Instant) -> Vec<LlmEvent> {
+    let summarized = history
         .summary_snapshot()
         .map(|(summary, cut)| LlmEvent::HistoryCompacted {
             summary: summary.to_string(),
@@ -1055,10 +1055,10 @@ fn compaction_events(conv: &Conversation, started_at: Instant) -> Vec<LlmEvent> 
     summarized.into_iter().chain([finished]).collect()
 }
 
-fn context_size(conv: &Conversation) -> LlmEvent {
+fn context_size(history: &History) -> LlmEvent {
     LlmEvent::ContextSize {
-        tokens: conv.approx_total_tokens(),
-        total: conv.total_tokens(),
+        tokens: history.approx_total_tokens(),
+        total: history.total_tokens(),
     }
 }
 
@@ -1132,20 +1132,20 @@ async fn forward(
     accum: &mut StreamAccum,
 ) -> Result<(), StreamOutcome> {
     if tx.send(event).await.is_err() {
-        debug!(target: "assistd::chat", "client disconnected mid-stream");
+        debug!(target: "assistd::completion", "client disconnected mid-stream");
         return Err(StreamOutcome::ClientDisconnected(Box::new(take(accum))));
     }
     Ok(())
 }
 
-/// Record the step in `conv` and consume its transient note, which a failed
+/// Record the step in `history` and consume its transient note, which a failed
 /// step leaves for the retry. Tool calls cut off before the finish chunk are
 /// discarded rather than run half-built; a token-limit cutoff is not recorded.
-fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<StepOutcome> {
-    conv.consume_transient_note();
+fn commit_step(history: &mut History, mut accum: StreamAccum) -> LlmResult<StepOutcome> {
+    history.consume_transient_note();
     if accum.finish_reason.as_deref() == Some("length") {
         warn!(
-            target: "assistd::chat",
+            target: "assistd::completion",
             text_bytes = accum.text.len(),
             reasoning_bytes = accum.reasoning.len(),
             tool_calls = accum.tool_calls.len(),
@@ -1154,7 +1154,7 @@ fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<Ste
         return Ok(StepOutcome::Truncated);
     }
     if accum.tool_calls.is_empty() {
-        conv.push_assistant(accum.text);
+        history.push_assistant(accum.text);
         return Ok(StepOutcome::Final);
     }
     if accum.finish_reason.is_none() {
@@ -1165,7 +1165,7 @@ fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<Ste
     }
     if accum.finish_reason.as_deref() != Some("tool_calls") {
         warn!(
-            target: "assistd::chat",
+            target: "assistd::completion",
             finish_reason = accum.finish_reason.as_deref().unwrap_or("<none>"),
             tool_calls = accum.tool_calls.len(),
             "finish_reason disagrees with emitted tool calls; running them anyway"
@@ -1174,7 +1174,7 @@ fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<Ste
     let narration = take(&mut accum.text);
     let reasoning = take(&mut accum.reasoning);
     let (records, parsed) = accum.finalize_tool_calls()?;
-    conv.push_assistant_with_tool_calls(
+    history.push_assistant_with_tool_calls(
         (!narration.trim().is_empty()).then_some(narration),
         reasoning,
         records,
@@ -1182,13 +1182,13 @@ fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<Ste
     Ok(StepOutcome::ToolCalls(parsed))
 }
 
-fn server_error(error: wire::StreamError) -> ChatClientError {
+fn server_error(error: wire::StreamError) -> LlamaClientError {
     if error.kind.as_deref() == Some(CONTEXT_OVERFLOW_ERROR) {
-        return ChatClientError::ContextOverflow {
+        return LlamaClientError::ContextOverflow {
             prompt_tokens: error.n_prompt_tokens,
         };
     }
-    ChatClientError::Server {
+    LlamaClientError::Server {
         status: error.code,
         body: error.message,
     }
@@ -1196,18 +1196,18 @@ fn server_error(error: wire::StreamError) -> ChatClientError {
 
 /// The failure a non-success response reports, keeping its raw body unless
 /// it is a context overflow.
-fn http_error(status: u16, body: String) -> ChatClientError {
+fn http_error(status: u16, body: String) -> LlamaClientError {
     match serde_json::from_str::<wire::ErrorBody>(&body).map(|parsed| server_error(parsed.error)) {
-        Ok(overflow @ ChatClientError::ContextOverflow { .. }) => overflow,
-        _ => ChatClientError::Server { status, body },
+        Ok(overflow @ LlamaClientError::ContextOverflow { .. }) => overflow,
+        _ => LlamaClientError::Server { status, body },
     }
 }
 
 /// The failure an `error:` event reports, keeping its raw payload when it
 /// is not llama-server's error object.
-fn error_event(payload: &str) -> ChatClientError {
+fn error_event(payload: &str) -> LlamaClientError {
     serde_json::from_str(payload).map_or_else(
-        |_| ChatClientError::Sse(format!("error event: {payload}")),
+        |_| LlamaClientError::Sse(format!("error event: {payload}")),
         server_error,
     )
 }

@@ -1,4 +1,4 @@
-//! Multi-turn conversation state with token budgeting: a bytes-per-token
+//! Message history with token budgeting: a bytes-per-token
 //! heuristic, corrected by the prompt size the server last measured.
 
 use std::borrow::Cow;
@@ -17,7 +17,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use super::error::ChatClientError;
+use super::error::LlamaClientError;
 use super::wire;
 
 mod step_log;
@@ -62,7 +62,7 @@ const SUMMARY_ASK_PERCENT: u32 = 75;
 /// Recent user/assistant exchanges kept verbatim when summarizing.
 const PRESERVE_RECENT_TURNS: usize = 6;
 
-/// Message role for conversation turns.
+/// Role of a message in the history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     System,
@@ -120,7 +120,7 @@ impl ImageDataUri {
     }
 }
 
-/// One entry in the in-memory conversation, owned by [`Conversation`].
+/// One entry in the in-memory history, owned by [`History`].
 #[derive(Debug, Clone)]
 pub enum Message {
     /// Compaction summary of the history before it, without its prefix.
@@ -198,7 +198,7 @@ pub struct AssistantMessage {
     pub tool_calls: Vec<ToolCallRecord>,
 }
 
-/// What a compaction summary leaves of the conversation: its `kept_turns`
+/// What a compaction summary leaves of the history: its `kept_turns`
 /// newest user turns, the oldest of them cut to its `kept_steps` newest tool
 /// steps when its earlier steps were folded into its call log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,30 +207,30 @@ pub struct CompactionCut {
     pub kept_steps: Option<NonZeroUsize>,
 }
 
-/// A summary to write by continuing the conversation itself, so the server
+/// A summary to write by continuing the history itself, so the server
 /// can reuse the prompt it already holds and read only the instruction.
 #[derive(Debug)]
 pub struct SummaryRequest<'a> {
-    /// The conversation as the next step would render it, except that the
+    /// The history as the next step would render it, except that the
     /// turns being folded lose their context blocks.
     pub messages: Vec<wire::ChatMessage<'a>>,
     /// The closing user message, naming the stretch to summarize.
     pub instruction: String,
 }
 
-/// Condenses a stretch of the conversation into a summary when it outgrows
+/// Condenses a stretch of the history into a summary when it outgrows
 /// its token budget.
 #[async_trait]
 pub trait Summarizer: Send + Sync {
     /// The model's reply to `request`: the summary text alone.
-    async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, ChatClientError>;
+    async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, LlamaClientError>;
 }
 
-/// Mutable conversation state. `messages` never holds the system prompt,
+/// The messages a backend sends its model. `messages` never holds the system prompt,
 /// only turns plus at most one [`Message::Summary`], at index 0; the
 /// rendered form carries a single system message, at its head.
 #[derive(Debug, Clone)]
-pub struct Conversation {
+pub struct History {
     system_prompt: String,
     pending_context: Option<String>,
     transient_note: Option<String>,
@@ -245,10 +245,10 @@ pub struct Conversation {
     revision: u64,
 }
 
-/// A summary fold planned on a snapshot of the conversation, applied once
+/// A summary fold planned on a snapshot of the history, applied once
 /// the summary is written if the history has not been rewritten meanwhile.
 struct CompactionPlan {
-    snapshot: Conversation,
+    snapshot: History,
     instruction: String,
     fold: Fold,
     revision: u64,
@@ -262,8 +262,8 @@ struct Fold {
     turn_start: usize,
 }
 
-impl Conversation {
-    /// Creates an empty conversation with the given static system prompt.
+impl History {
+    /// Creates an empty history with the given static system prompt.
     pub fn new(system_prompt: String) -> Self {
         Self {
             system_prompt,
@@ -432,7 +432,7 @@ impl Conversation {
             .saturating_add_signed(self.calibration)
     }
 
-    /// Tokens the conversation has held in all: its current size plus
+    /// Tokens the history has held in all: its current size plus
     /// everything compaction has removed from it.
     pub fn total_tokens(&self) -> u32 {
         self.approx_total_tokens()
@@ -481,7 +481,7 @@ impl Conversation {
         self.messages.len()
     }
 
-    /// Token count of the conversation by a bytes-per-token heuristic. It
+    /// Token count of the history by a bytes-per-token heuristic. It
     /// knows nothing of tool schemas or the chat template's own tokens.
     pub fn heuristic_tokens(&self) -> u32 {
         let mut total = 0u32;
@@ -528,7 +528,7 @@ impl Conversation {
         ))
     }
 
-    /// Plan the summary fold that brings the conversation under budget, or
+    /// Plan the summary fold that brings the history under budget, or
     /// truncate in place and return `None` when nothing can be summarized.
     /// `None` too when already under budget.
     fn plan_compaction(
@@ -545,7 +545,7 @@ impl Conversation {
         };
         if fold.end <= self.summary_insertion_index() {
             debug!(
-                target: "assistd::chat",
+                target: "assistd::completion",
                 "ensure_budget: nothing to summarize, falling through to truncation"
             );
             self.truncate_to_budget(chat, model);
@@ -560,7 +560,7 @@ impl Conversation {
     }
 
     /// A copy whose turns covered by `fold` carry no context block, so what
-    /// was injected for those moments is not summarized as conversation fact.
+    /// was injected for those moments is not summarized as history fact.
     fn without_folded_context(&self, fold: Fold) -> Self {
         let mut snapshot = self.clone();
         for message in &mut snapshot.messages[..fold.end.min(fold.turn_start)] {
@@ -585,13 +585,13 @@ impl Conversation {
             self.fold_into_summary(fold, summary);
         } else {
             warn!(
-                target: "assistd::chat",
+                target: "assistd::completion",
                 "ensure_budget: history was rewritten while summarizing, discarding the summary"
             );
         }
         if self.exceeds_budget(chat, model) {
             debug!(
-                target: "assistd::chat",
+                target: "assistd::completion",
                 "ensure_budget: still over budget after summarize, truncating"
             );
             self.truncate_to_budget(chat, model);
@@ -721,7 +721,7 @@ impl Conversation {
         while u64::from(self.approx_total_tokens()) > target {
             let Some(idx) = self.first_droppable_index() else {
                 warn!(
-                    target: "assistd::chat",
+                    target: "assistd::completion",
                     "truncate_to_budget: cannot drop any more messages without losing the current turn"
                 );
                 break;
@@ -1052,16 +1052,16 @@ fn quote_first_call(step: &Message) -> String {
     })
 }
 
-/// Keep `conv` under budget by folding older history into one summary,
+/// Keep `history` under budget by folding older history into one summary,
 /// releasing the lock while the summarizer runs. Returns an error, with
 /// history unchanged, if the summarizer fails or returns empty text.
 pub async fn ensure_budget(
-    conv: &Mutex<Conversation>,
+    history: &Mutex<History>,
     summarizer: &dyn Summarizer,
     chat: &ChatConfig,
     model: &ModelConfig,
-) -> Result<(), ChatClientError> {
-    let Some(plan) = conv.lock().await.plan_compaction(chat, model) else {
+) -> Result<(), LlamaClientError> {
+    let Some(plan) = history.lock().await.plan_compaction(chat, model) else {
         return Ok(());
     };
     let CompactionPlan {
@@ -1075,7 +1075,8 @@ pub async fn ensure_budget(
         instruction,
     };
     let summary = summarize_bounded(summarizer, request, chat).await?;
-    conv.lock()
+    history
+        .lock()
         .await
         .apply_compaction(fold, revision, &summary, chat, model);
     Ok(())
@@ -1086,11 +1087,11 @@ async fn summarize_bounded(
     summarizer: &dyn Summarizer,
     request: SummaryRequest<'_>,
     chat: &ChatConfig,
-) -> Result<String, ChatClientError> {
+) -> Result<String, LlamaClientError> {
     let summary = summarizer.summarize(request).await?;
     let trimmed = summary.trim();
     if trimmed.is_empty() {
-        return Err(ChatClientError::Summarize(
+        return Err(LlamaClientError::Summarize(
             "summarizer returned empty text".into(),
         ));
     }

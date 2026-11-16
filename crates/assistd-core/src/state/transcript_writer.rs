@@ -26,7 +26,7 @@ pub(super) struct PersistTarget {
 }
 
 impl PersistTarget {
-    /// A target on `branch` for a turn of the conversation `ledger` follows.
+    /// A target on `branch` for a turn of the history `ledger` follows.
     pub(super) fn new(branch: BranchId, ledger: SharedLedger) -> Self {
         Self {
             branch,
@@ -54,7 +54,7 @@ pub(super) enum WriteCommand {
         target: PersistTarget,
         stats: TurnStats,
     },
-    /// Record `summary` as standing in for what `cut` leaves out of the target's conversation.
+    /// Record `summary` as standing in for what `cut` leaves out of the target's history.
     Summary {
         target: PersistTarget,
         summary: String,
@@ -136,7 +136,7 @@ impl TranscriptWriter {
         }
     }
 
-    /// Build the target's ledger from its branch when the conversation's
+    /// Build the target's ledger from its branch when the history's
     /// history was replaced since it was last built.
     async fn read_ledger(&self, target: &PersistTarget) {
         if target.ledger.is_read() {

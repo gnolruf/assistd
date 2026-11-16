@@ -30,7 +30,7 @@ const POLICY: &str = include_str!("judge/policy.txt");
 /// The tags that delimit the prompt's data sections.
 const SECTION_TAGS: &[&str] = &["user_messages", "message", "cwd", "unvetted", "command"];
 
-/// The model a [`SafetyJudge`] asks, with access to the user's side of the conversation.
+/// The model a [`SafetyJudge`] asks, with access to the messages the user wrote.
 #[async_trait]
 pub trait JudgeModel: fmt::Debug + Send + Sync + 'static {
     /// The text of the newest `limit` messages the user wrote, oldest first, with no tool

@@ -16,7 +16,7 @@ use assistd_config::{
     ChatConfig, HfFile, LoopbackAddr, ModelConfig, NonBlankString, SttEncoder, SynthesisConfig,
     TimeoutsConfig, TranscriptionConfig, VoiceFamily,
 };
-use assistd_llm::{LlamaChatClient, LlmBackend, LlmEvent, LlmResult};
+use assistd_llm::{LlamaClient, LlmBackend, LlmEvent, LlmResult};
 use assistd_utils::time::saturating_millis;
 use assistd_voice::{
     SentenceBuffer, SherpaTranscriber, SherpaVoiceOutput, Transcriber, VoiceOutput,
@@ -142,7 +142,7 @@ impl LlmSettings {
     }
 
     fn client(&self) -> Result<Arc<dyn LlmBackend>> {
-        let client = LlamaChatClient::new(&self.chat, &self.model, &self.timeouts, None, None)
+        let client = LlamaClient::new(&self.chat, &self.model, &self.timeouts, None, None)
             .context("building LLM client")?;
         Ok(Arc::new(client))
     }

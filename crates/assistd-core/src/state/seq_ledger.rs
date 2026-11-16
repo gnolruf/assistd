@@ -1,4 +1,4 @@
-//! Branch seqs of the rows behind a conversation's messages, which place a
+//! Branch seqs of the rows behind a history's messages, which place a
 //! compaction cut on the branch.
 
 use std::sync::Arc;
@@ -56,7 +56,7 @@ pub(super) struct SeqLedger {
 }
 
 impl SeqLedger {
-    /// The ledger of a conversation replayed from `rows`.
+    /// The ledger of a history replayed from `rows`.
     pub(super) fn from_history(rows: &[HistoryRow]) -> Self {
         let rows = rows
             .iter()
@@ -131,13 +131,13 @@ impl SeqLedger {
     }
 }
 
-/// A conversation's [`SeqLedger`], shared with the transcript writer. Unread
-/// until the writer builds it from the branch at the conversation's next turn.
+/// A history's [`SeqLedger`], shared with the transcript writer. Unread
+/// until the writer builds it from the branch at the history's next turn.
 #[derive(Debug, Clone, Default)]
 pub(super) struct SharedLedger(Arc<Mutex<Option<SeqLedger>>>);
 
 impl SharedLedger {
-    /// The ledger of a conversation starting on an empty branch.
+    /// The ledger of a history starting on an empty branch.
     pub(super) fn of_new_branch() -> Self {
         Self(Arc::new(Mutex::new(Some(SeqLedger::default()))))
     }
@@ -150,7 +150,7 @@ impl SharedLedger {
         *self.0.lock() = Some(ledger);
     }
 
-    /// Forget the rows, for a conversation whose history was replaced from the store.
+    /// Forget the rows, for a history whose history was replaced from the store.
     pub(super) fn invalidate(&self) {
         *self.0.lock() = None;
     }
@@ -165,7 +165,7 @@ impl SharedLedger {
         self.0.lock().as_mut()?.cut_at(cut)
     }
 
-    /// Follow an undo of the conversation's newest turn.
+    /// Follow an undo of the history's newest turn.
     pub(super) fn forget_last_turn(&self) {
         let mut ledger = self.0.lock();
         if ledger.as_mut().is_some_and(|l| !l.forget_last_turn()) {

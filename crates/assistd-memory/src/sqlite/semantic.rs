@@ -132,7 +132,7 @@ impl SemanticStore for SqliteSemanticStore {
             return Ok(Vec::new());
         }
         match scope {
-            ChunkScope::Chats(sessions) => {
+            ChunkScope::Messages(sessions) => {
                 self.handle
                     .search("nearest_chunks", move |c| {
                         nearest_message_chunks(c, &query_vector, top_k, sessions)

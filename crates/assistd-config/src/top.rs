@@ -375,13 +375,13 @@ fn validate_ports(issues: &mut Vec<ConfigIssue>, config: &Config) {
     if embedding.enabled && embedding.port == model.port {
         issues.push(ConfigIssue::PortClash {
             key: "embedding.port",
-            other: "model.port (the chat server)",
+            other: "model.port (the model server)",
         });
     }
     if search.enabled && search.port == model.port {
         issues.push(ConfigIssue::PortClash {
             key: "search.port",
-            other: "model.port (the chat server)",
+            other: "model.port (the model server)",
         });
     }
     if search.enabled && embedding.enabled && search.port == embedding.port {

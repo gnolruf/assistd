@@ -1,5 +1,5 @@
 //! Handlers for `TaskRun` and `TaskCancel`, and a saved task run as an
-//! unattended turn in a conversation and transcript session of its own, its prompts approved
+//! unattended turn on a backend and transcript session of its own, its prompts approved
 //! by the task's mode and hosts or paused for the user.
 
 use std::sync::Arc;
@@ -11,9 +11,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, info_span, warn};
 
 use assistd_ipc::{ConfirmSource, Event, EventBody, TaskId, TaskRunId, TaskTrigger};
-use assistd_llm::{
-    BackendJudgeModel, ConversationKey, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
-};
+use assistd_llm::{BackendJudgeModel, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, SlotHolder};
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
 };
@@ -37,7 +35,7 @@ use crate::presence::{PresenceLlmHealthProbe, RequestGuard};
 
 const EVENT_BUFFER: usize = 32;
 
-/// Follows the main system prompt in every task run's conversation.
+/// Follows the main system prompt in every task run's history.
 const TASK_PREAMBLE: &str = "You are running a saved task on your own. No user is present: \
      nobody will answer a question, so ask none. A command needing confirmation waits until \
      the user answers it later. Do the work with your tools, then make your final reply the \
@@ -225,36 +223,36 @@ impl TaskService {
             return Ok(None);
         };
         let system_prompt = task_system_prompt(&self.deps.config.chat.system_prompt);
-        let key = ConversationKey::TaskRun(turn.run);
-        let conversation = self
+        let holder = SlotHolder::TaskRun(turn.run);
+        let backend = self
             .deps
             .llm
-            .isolated_conversation(system_prompt, lease.slot(key))?;
+            .isolated_backend(system_prompt, lease.slot(holder))?;
         let lane = Arc::new(RunLane {
             tasks: Arc::clone(self),
             task: turn.task.id,
             run: turn.run,
             request_id: turn.id.clone(),
             held: LaneHold::new(lease, awake),
-            backend: Arc::clone(&conversation),
+            backend: Arc::clone(&backend),
             events: tx.clone(),
             cancel: cancel.clone(),
         });
         let persist = self.open_task_run_session(turn).await;
         let outcome = self
-            .unattended_turn(turn, conversation, Arc::clone(&lane), persist, cancel, tx)
+            .unattended_turn(turn, backend, Arc::clone(&lane), persist, cancel, tx)
             .await;
-        self.end_run_conversation(key, lane.on_main_lane()).await;
+        self.end_run_backend(holder, lane.on_main_lane()).await;
         outcome
     }
 
     /// Drop the ended run's slot state and, when it held the main lane, restore the main
-    /// conversation's while the daemon is still idle.
-    async fn end_run_conversation(&self, run: ConversationKey, on_main_lane: bool) {
+    /// backend's while the daemon is still idle.
+    async fn end_run_backend(&self, run: SlotHolder, on_main_lane: bool) {
         if let Some(stash) = &self.deps.slot_stash {
             stash.end(run).await;
             if on_main_lane {
-                stash.switch_to(ConversationKey::Main).await;
+                stash.switch_to(SlotHolder::Main).await;
             }
         }
     }
@@ -321,20 +319,20 @@ impl TaskService {
         }
     }
 
-    /// Run the task's prompt in `conversation` on `lane`, persisting to `persist` and sending
+    /// Run the task's prompt over `backend` on `lane`, persisting to `persist` and sending
     /// its wire events to `tx`, with nothing spoken; returns the final reply once the turn
     /// emitted `Done`.
     async fn unattended_turn(
         &self,
         turn: &TaskRunTurn,
-        conversation: Arc<dyn LlmBackend>,
+        backend: Arc<dyn LlmBackend>,
         lane: Arc<RunLane>,
         persist: Option<PersistTarget>,
         cancel: &CancellationToken,
         tx: &EventSink,
     ) -> Result<Option<String>, DispatchError> {
         let (llm_tx, llm_rx) = mpsc::channel(EVENT_BUFFER);
-        let agent_task = self.spawn_task_agent(turn, conversation, lane, llm_tx, cancel.clone());
+        let agent_task = self.spawn_task_agent(turn, backend, lane, llm_tx, cancel.clone());
         let transcript = Arc::clone(&self.deps.transcript);
         let reply = TurnDriver::new(turn.id.clone(), transcript, persist, tx.clone())
             .drive(llm_rx, cancel)
@@ -346,13 +344,13 @@ impl TaskService {
         }
     }
 
-    /// The main agent's tools over `conversation`, each model step giving way to the user's
-    /// conversation on `lane`, with every confirmation labelled as the run's and approved by
+    /// The main agent's tools over `backend`, each model step giving way to the user's
+    /// interaction on `lane`, with every confirmation labelled as the run's and approved by
     /// the task's mode or hosts, or parked until answered.
     fn spawn_task_agent(
         &self,
         turn: &TaskRunTurn,
-        conversation: Arc<dyn LlmBackend>,
+        backend: Arc<dyn LlmBackend>,
         lane: Arc<RunLane>,
         llm_tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
@@ -361,7 +359,7 @@ impl TaskService {
             self.deps.presence.clone(),
         )));
         let backend = Arc::new(YieldingBackend {
-            inner: conversation,
+            inner: backend,
             lane: Arc::clone(&lane),
         });
         let agent = Agent::new(

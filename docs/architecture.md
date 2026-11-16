@@ -19,7 +19,7 @@ flowchart TB
     subgraph daemon["assistd daemon"]
         bin["<b>assistd</b><br/>CLI parsing · subsystem init · lifecycle"]
         core["<b>assistd-core</b><br/>AppState · Agent loop · socket server · presence"]
-        llm["<b>assistd-llm</b><br/>chat client · router spec"]
+        llm["<b>assistd-llm</b><br/>llama-server client · router spec"]
         tools["<b>assistd-tools</b><br/>run tool · commands · policy gates"]
         voice["<b>assistd-voice</b><br/>sherpa-onnx STT · TTS · VAD"]
         wm["<b>assistd-wm</b><br/>i3 / Sway IPC"]
@@ -61,7 +61,7 @@ flowchart TB
 | `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, `build_tools()` factory. | `config`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the socket client behind the `client` feature. | `utils`                                                                          |
-| `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaChatClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `tools`, `utils`                                                |
+| `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `tools`, `utils`                                                |
 | `assistd-mcp`    | Stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools.  | `tools`, `utils`                                                                 |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `SemanticStore`, `TaskStore`.   | `ipc`                                                                            |
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
@@ -111,27 +111,27 @@ the server's only source of options. Each daemon launch generates a
 random API key, written to a mode-0600 file under `$XDG_RUNTIME_DIR` and
 passed as `--api-key-file` to both llama-servers (with `--no-slots`), so
 other local processes cannot load, unload or query models; every client
-sends it as a bearer token. The chat server's `--slot-save-path` is a
+sends it as a bearer token. The model server's `--slot-save-path` is a
 mode-0700 `$XDG_CACHE_HOME/assistd/slots` that the daemon empties at
 startup and before every spawn, since a saved slot is only valid for the
-server that wrote it. `SlotStash` keeps one file in it per conversation set
-aside, keyed by `ConversationKey` (`Main`, `TaskRun`). Before each request a
-keyed conversation calls `switch_to`, which saves the slot for whichever
-conversation holds it and restores the target's file (skipping the restore
+server that wrote it. `SlotStash` keeps one file in it per holder set
+aside, a `SlotHolder` (`Main`, `TaskRun`). Before each request a
+backend with a holder calls `switch_to`, which saves the slot for whichever
+holder has it and restores the target's file (skipping the restore
 if the child changed since the save), deleting the file once restored.
 `preserve_across` saves the holder before a group of unkeyed sub-agent
 requests and restores it after, so a relay inside a task run keeps that run's
-slot; with more than one slot the main conversation keeps slot 0 to itself, so
-the group runs without either. A file is deleted when its conversation ends (a finished run, `/new`),
+slot; with more than one slot the main backend keeps slot 0 to itself, so
+the group runs without either. A file is deleted when its holder ends (a finished run, `/new`),
 and past two suspended runs the oldest run's file is dropped. The stash applies
 these transitions one at a time on a task it owns, so one that has begun
 finishes even when the turn that asked for it is interrupted. Any failure only
-costs re-processing that conversation's context. `assistd-utils`'s `ChildServer`
+costs re-processing that holder's context. `assistd-utils`'s `ChildServer`
 supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when
 `/proc` shows every listener on the address belongs to the child's
 process group, so a stale server or squatter on the port is never
-trusted), then `LlamaChatClient`
+trusted), then `LlamaClient`
 streams chat completions over `POST /v1/chat/completions`. Chat and
 control-plane requests are sent only while the supervisor is `Ready` with
 a live child, so nothing reaches the port between a crash and the next
@@ -170,7 +170,7 @@ query.
 One per-query state machine, single-threaded per turn. The loop:
 
 1. `backend.push_user(text, attachments)` — append user message + any
-   image attachments to the conversation.
+   image attachments to the history.
 2. `backend.step(tools.openai_schemas(), tx)` — send `messages +
    tools` to llama-server, stream tokens.
 3. The response is either text (`StepOutcome::Final` → emit
@@ -188,18 +188,18 @@ One per-query state machine, single-threaded per turn. The loop:
 5. Loop back to step 2 until the model emits text. If the model
    repeats the same call several times in a row, or the turn runs
    past a hard-coded step ceiling, the loop tells the model, in a
-   one-shot message at the end of the conversation, to stop calling
+   one-shot message at the end of the history, to stop calling
    tools and answer from what it has already gathered. The tool schema
    stays in the request so a call made anyway is still parsed (and ends
    the turn) rather than streamed to the user as raw markup.
 
 A sub-agent run (`SubAgentRunner`) drives the same loop over
-an empty conversation that the main backend's `isolated_conversation` opens
+a backend with an empty history that the main backend's `isolated_backend` opens
 on the same server and model, with its own system prompt, tool registry and
-event sink. Its history budget is the main conversation's
+event sink. Its history budget is the main backend's
 `chat.max_history_tokens`, and it compacts the same way: the summary is
-written inside the sub-agent's own conversation, which keeps its task, and
-never leaves it. The summary request continues the conversation with its
+written inside the sub-agent's own history, which keeps its task, and
+never leaves it. The summary request continues the history with its
 tools offered, so the server reuses the cached prompt; a reply that calls a
 tool or is empty is asked for again without tools, and only when that also
 fails does compaction fall back to dropping old steps without a summary. Its
@@ -210,7 +210,7 @@ an error. While a relay runs, its plan, then each sub-agent's text, reasoning,
 context size, tool calls, results and compactions reach the client as
 `EventBody::Relay` progress, never the model. The TUI draws them as a compact
 block in place of the `relay` tool block, and `/agents` opens any sub-agent's
-full transcript. The conversation is dropped when the run ends, so none of it
+full transcript. The backend is dropped when the run ends, so none of it
 reaches the main history. What the client was shown is stored with the
 relay's tool result in `relay_steps` and `relay_entries`, never embedded, and
 replayed with branch history.
@@ -220,7 +220,7 @@ A sub-agent's final answer is saved whole, with no length cap, to
 runner rather than the sub-agent so the file always exists and is complete.
 It is sanitised first: control, bidi and format characters are stripped,
 chat-template tokens (`<|im_start|>`, `<tool_call>`, `[INST]`) are broken with
-a space, from the same token list the conversation uses for every other piece
+a space, from the same token list the history uses for every other piece
 of untrusted text, and it is quoted under a header that labels it untrusted
 data. The run then takes one more turn through
 `complete_with_schema`, a tool-free, thinking-free request whose
@@ -297,7 +297,7 @@ fixed: `file_review` reaches files, seeing its `inputs` read-only with no
 network; `web_research` reaches the web, getting an `Egress` and no inputs.
 The tool's schema and description list the roles, and the wire and the
 database carry a step's role by name. A web step naming inputs is refused as
-invalid arguments before a quarantine or conversation exists, since a relay
+invalid arguments before a quarantine or backend exists, since a relay
 that could both see private files and reach the network could leak them, and
 a web step's quarantine is never handed inputs. Every file step's inputs are
 checked before the first step starts: a missing input, one that is neither a
@@ -320,7 +320,7 @@ its saved answer as an extra input. Since a report carries what its sub-agent
 read, a plan with a web step after a file step is refused as invalid arguments.
 The tool result is the last step's rendered `RelayReport`; a failed step ends
 the plan as a failed tool result, not a failed turn. A relay starts without confirmation, unless it has a
-web step and the calling conversation has read this machine; commands inside it ask
+web step and the calling turn's history has read this machine; commands inside it ask
 the same `ConfirmationGate` as the main agent's, with the prompt marked
 `ConfirmSource::Relay` and the step's task so the user can tell who is asking.
 Cancelling the turn drops the call, which drops the run and removes the
@@ -332,8 +332,8 @@ response-token limit, as a main turn's steps are. The quarantine wrapper is
 looked up beside the `assistd` executable; without it, relays fail.
 
 The loop does not parallelize tool calls. Tools execute serially, and
-their results land in the conversation in the order the model
-emitted them. This keeps the conversation deterministic and the
+their results land in the history in the order the model
+emitted them. This keeps the history deterministic and the
 `Event` stream readable.
 
 A saved task runs through the same loop with no user present.
@@ -344,10 +344,10 @@ running are recorded as failed, since their side effects may have happened. A
 dispatcher on the `TaskRunner` starts the head run whenever `ModelLanes` has a
 lane for it. There is one lane per slot the server reports as `total_slots` in
 `/props`, probed with vision support and re-probed after a reload. Lane 0 is
-the main conversation's and is the agent turn lock itself, so with one slot a
+the main backend's and is the agent turn lock itself, so with one slot a
 run waits out the user's turn and holds the next one off. With more slots, runs
 take lanes 1..N, each pinned to its slot with `id_slot`, and the main
-conversation stays on slot 0. While the GPU monitor holds the daemon asleep for
+backend stays on slot 0. While the GPU monitor holds the daemon asleep for
 another process, waiting runs are `Suspended(GpuBusy)` instead of waking the
 model. `TaskRequest::Queue` moves, cancels, pauses and resumes the queue (the pause is
 kept in the `task_queue` table, so it outlasts a restart), and
@@ -391,12 +391,12 @@ saved tasks after every save, enable, disable or delete. Event fires queue
 through the same coalescing as time triggers.
 
 An admitted run takes the request guard, as a query does, then opens an
-`isolated_conversation`. That conversation gets the main system prompt plus a
+`isolated_backend`. That backend gets the main system prompt plus a
 short preamble saying no user is present, and the main agent's full tool
 registry. On lane 0 it is keyed `TaskRun` in the `SlotStash`, and when the run
-ends its slot file is dropped and the main conversation's slot restored. It is
+ends its slot file is dropped and the main backend's slot restored. It is
 saved as a transcript session of its own, linked from its `task_runs` row, and
-its events reach subscribers wrapped in `EventBody::TaskRun`. The main conversation,
+its events reach subscribers wrapped in `EventBody::TaskRun`. The main backend,
 its branch and the active session are never touched. `TaskRequest::Cancel`
 cancels a run the way `InterruptTurn` cancels a turn. A run still going at
 shutdown is recorded as failed. At startup and after each run ends, every task's
@@ -408,7 +408,7 @@ prompts name the run too) and go through `ConfirmRouter::for_task_run`, set to
 the task's `mode` as a chat connection would be, with the safety judge in Auto
 when `tools.allow_auto_mode` allows it (`TaskSave` refuses Auto otherwise). The
 judge is given the task's prompt as the whole of what the user asked for, and
-nothing from the main conversation. A
+nothing from the main backend's history. A
 `web` fetch from a host not yet approved asks as `Unattended::WebHost`, which no
 mode approves but a run does once when the host is one of the task's
 `allowed_hosts`, matched exactly. What the mode and hosts approve runs once,
@@ -422,23 +422,23 @@ subscribes later can still answer it. The tool deadline stops while a prompt is
 parked. `TaskRequest::Confirm` answers it for that prompt alone, except that
 `always` on a host fetch adds the host to the task's `allowed_hosts`, for the
 rest of the run and later ones; the run then waits first in the queue for a lane,
-moving its conversation to that lane's slot. `TaskRequest::Runs` lists a task's
+moving its backend to that lane's slot. `TaskRequest::Runs` lists a task's
 latest runs with their trigger, times, final reply and session. The task's
 prompt is the only instruction a run gets; no plan is stored on the task.
 
 With one lane, a user message that finds a run on it follows
-`[tasks] interruption`. Under `interrupt` the run's turn sees the conversation
+`[tasks] interruption`. Under `interrupt` the run's turn sees the user's interaction
 open through its `RunLane` and yields at its next model step. A step in flight is
 cancelled and announced as `StatusKind::YieldedToUser`, so its partial output is
 dropped. A tool call in flight finishes first. A relay in flight is cancelled and
 rerun from its arguments, since its effects stay in its quarantine. The yielded run
-waits first in the queue as `Suspended(UserConversation)`, its slot state stashed.
+waits first in the queue as `Suspended(UserInteraction)`, its slot state stashed.
 Under `after_task` the turn is told `EventBody::Queued` and takes the lane once the run
 ends, ahead of the queue. Under `after_queue` it joins the queue as a user-turn item,
 behind any turns already waiting, which the dispatcher hands the main lane in its
 turn; `TaskQueueOp::CancelTurn` drops it. Every user turn opens the
-`UserConversation`, which holds waiting runs as `Suspended(UserConversation)`. The
-conversation ends once no turn has arrived for `resume_after_idle_secs` after the
+`UserInteraction`, which holds waiting runs as `Suspended(UserInteraction)`. The
+interaction ends once no turn has arrived for `resume_after_idle_secs` after the
 last reply and its speech finished, or the wake word's follow-up window if longer.
 `/new`, `ChatClosed` and `TaskQueueOp::Resume` end it at once. Its hold, and when
 it lifts, rides on the `TaskQueue` snapshot.
@@ -447,7 +447,7 @@ it lifts, rides on the `TaskQueue` snapshot.
 
 A planning turn shows how the agent means to do a piece of work before
 anything runs. The `Planner` drives the
-agent loop over a given conversation with the planning registry, which
+agent loop over a given backend with the planning registry, which
 `build_tools()` assembles beside the main one: `run` over the
 readers, `web` and a `bash` whose policy holds no "always allow" approvals,
 plus `reminisce` when memory is on. No `write`, `wm`, `see`, `screenshot`,
@@ -456,14 +456,14 @@ plus `reminisce` when memory is on. No `write`, `wm`, `see`, `screenshot`,
 anyone in any mode, so the planning turn runs only what needs no
 confirmation; each refusal is counted and the tool result gains a note
 telling the model to describe that step instead. A plan-mode note is set
-as the transient note on every step, so it renders at the conversation's
+as the transient note on every step, so it renders at the history's
 tail and the system prompt, and its cache, are unchanged.
 
 Whether a turn plans is a flag on the `ConfirmRouter` in its `TurnContext`, so it
 can change mid-turn. While it is set every ask is refused and counted, and an agent
-built by `Planner::chat_agent` offers, before each step, the planning registry
+built by `Planner::user_turn_agent` offers, before each step, the planning registry
 plus `exit_plan_mode` in place of the main registry plus `enter_plan_mode`; its
-conversation carries the plan-mode note only while planning. A query's `plan`
+backend carries the plan-mode note only while planning. A query's `plan`
 says whether its turn may plan: `off`, the default and what voice turns use, which gets
 the plain agent; `offered` for chat messages; `planning` for chat messages sent
 in plan mode, which start with the flag set.
@@ -499,18 +499,18 @@ mode with the edit scope covers it, `JudgeDecides` for programs and MCP tools
 in Auto, else `Asks`. The result is a `Plan` of the brief with a fresh `PlanId`.
 
 `TaskRequest::Refine` refines a task prompt, saved or not, under the permission
-mode and allowed hosts the request gives, in an isolated conversation with the
+mode and allowed hosts the request gives, on an isolated backend with the
 task-run system prompt, keyed `TaskRefine` in the `SlotStash`. Only the latest
-refine's conversation is kept; a new one ends it. It takes the main lane and
+refine's backend is kept; a new one ends it. It takes the main lane and
 request guard as a query does, and `InterruptTurn` cancels it; its turn reaches
 the client wrapped in `EventBody::TaskPlan`, and its result as `EventBody::TaskRefined`
 with the rewritten `TaskPrompt`, its `Plan` and a `ModeRecommendation`: the
 least permissive mode, Auto only when allowed, under which the fewest of the
 plan's actions would ask, with the actions it covers and those that would still
 ask. It saves nothing. With
-`feedback` it continues the same conversation, so a revision keeps what the
+`feedback` it continues on the same backend, so a revision keeps what the
 model already found, quoting back the rewrite the client was shown, which the
-grammar-held request left out of the conversation; it is refused unless the
+grammar-held request left out of the history; it is refused unless the
 last refine was of the same prompt.
 
 In the TUI, `/tasks` opens a panel over these requests alone, since tasks
@@ -532,7 +532,7 @@ pauses and resumes the queue, and it notifies on every run newly needing input,
 focused or not. A task with `announce` set broadcasts a successful run's final
 reply as `EventBody::TaskReply`, which the tray notifies while the chat is unfocused;
 the daemon speaks it once no user turn is in flight and nothing is playing, and a
-chat turn starting meanwhile cuts it off.
+user turn starting meanwhile cuts it off.
 
 ### Tools (`assistd-tools`)
 
@@ -606,16 +606,16 @@ vision projector. "Always allow" for a web host, an MCP tool or an application i
 beside the config in `approved_hosts.toml`, `approved_mcp_tools.toml` or
 `approved_apps.toml`.
 An approved host is trusted with what the model was told, not with what it
-has read. Once a tool call has read this machine into a conversation, `web fetch`
+has read. Once a tool call has read this machine into a history, `web fetch`
 asks about every URL, approved host or not, with no "always allow", and `relay`
 asks before a plan with a web step starts, showing those steps' tasks: either
 could carry what was read. `Tool::reads_host` decides what counts: every tool
 and `run` command does except `web`, a `relay` of web steps only, a `remember`
 save, and the plan-mode tools. The record (`HostReads`) travels in the `TurnContext`. The
-user's conversation keeps one across its turns, rebuilt from the branch's saved
+user's turns keep one between them, rebuilt from the branch's saved
 tool calls when another branch becomes active; a task run starts with a new
 one; a sub-agent's reads are not recorded, since its quarantine holds files or
-the web, never both. Host-level trust remains for a conversation that has only
+the web, never both. Host-level trust remains for a history that has only
 searched and fetched, which can still send what the user typed, recalled
 memories and the window title to an approved host, and `web search` queries
 reach SearXNG's search engines unasked.
@@ -682,8 +682,8 @@ it. A `remember` search embeds its query and ranks saved memories by
 cosine similarity; the `reminisce` tool runs the same kind of search
 over transcript chunks from earlier sessions. Indexed local documents
 own chunks in the same table, but their vectors are kept in a table
-of their own, quantised to a byte per dimension, so chat recall never
-reads or ranks document chunks. Like chat requests,
+of their own, quantised to a byte per dimension, so message recall never
+reads or ranks document chunks. Like model requests,
 embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
 meantime stays pending and is embedded by a later pass.
@@ -959,12 +959,12 @@ A walk through "what files changed this week?" typed into `assistd chat`:
    and calls `run_turn()` with the turn's `TurnContext`, which every
    tool call receives: it carries who answers the turn's prompts, who
    watches its relays, the lane a task run gives up on request, and whether
-   the conversation has read this machine. A
+   the turn's history has read this machine. A
    `TurnDriver`, the same one a task run uses, persists the agent's
    events and sends them to the sink.
 
-4. **LLM step** ([`crates/assistd-llm/src/chat/client.rs`](../crates/assistd-llm/src/chat/client.rs)).
-   `LlamaChatClient` POSTs `messages + tools` to llama-server with
+4. **LLM step** ([`crates/assistd-llm/src/completion/client.rs`](../crates/assistd-llm/src/completion/client.rs)).
+   `LlamaClient` POSTs `messages + tools` to llama-server with
    `stream: true`. SSE deltas come back; text tokens propagate as
    `EventBody::Delta`, tool calls accumulate until the stream closes.
 
@@ -1020,7 +1020,7 @@ A walk through "what files changed this week?" typed into `assistd chat`:
    attachments and returns the JSON result.
 
 7. **Loop back.** Result emitted as `EventBody::ToolResult`, pushed back
-   into the conversation, agent calls `step` again. The model now
+   into the history, agent calls `step` again. The model now
    has the file list in context and produces a written summary.
    Tokens stream out as `EventBody::Delta`s, the loop closes with
    `EventBody::Done`, the socket connection closes.

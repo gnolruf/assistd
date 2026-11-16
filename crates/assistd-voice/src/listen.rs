@@ -84,7 +84,7 @@ pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
     async fn stop_for_push_to_talk(&self) -> Result<(), ListenError>;
 
     /// When push-to-talk last took the mic; commands heard before then
-    /// belong to a conversation it superseded.
+    /// belong to an exchange it superseded.
     fn last_push_to_talk(&self) -> Option<Instant>;
 
     /// Whether the listener is currently capturing.

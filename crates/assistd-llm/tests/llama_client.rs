@@ -1,4 +1,4 @@
-//! Integration tests for the streaming chat client against a hand-rolled
+//! Integration tests for the streaming client against a hand-rolled
 //! in-process HTTP/1.1 server that speaks chunked SSE.
 
 #![cfg(feature = "test-support")]
@@ -22,9 +22,9 @@ use assistd_config::defaults::{nz32, nz64, temperature};
 use assistd_config::{ChatConfig, LoopbackAddr, ModelConfig, TimeoutsConfig};
 use assistd_ipc::StatusKind;
 use assistd_llm::{
-    BackendJudgeModel, ChatClientError, HealthSnapshot, HealthWaitError, LlamaChatClient,
-    LlmBackend, LlmError, LlmEvent, LlmHealthProbe, OneShotReply, ReadyState, SlotAssignment,
-    StepOutcome, Thinking, ToolCall, ToolResultPayload, TurnBackend,
+    BackendJudgeModel, HealthSnapshot, HealthWaitError, LlamaClient, LlamaClientError, LlmBackend,
+    LlmError, LlmEvent, LlmHealthProbe, OneShotReply, ReadyState, SlotAssignment, StepOutcome,
+    Thinking, ToolCall, ToolResultPayload, TurnBackend,
 };
 use assistd_tools::{JUDGE_TIMEOUT, JudgedCommand, SafetyJudge, Verdict};
 
@@ -336,7 +336,7 @@ impl LlmHealthProbe for ScriptedProbe {
     }
 }
 
-fn chat_spec(port: u16) -> ClientCfg {
+fn client_spec(port: u16) -> ClientCfg {
     ClientCfg {
         chat: ChatConfig {
             system_prompt: "test system prompt".into(),
@@ -369,13 +369,13 @@ fn delta(text: &str) -> LlmEvent {
     LlmEvent::Delta { text: text.into() }
 }
 
-fn build_client(cfg: &ClientCfg) -> LlamaChatClient {
-    LlamaChatClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, None, None).unwrap()
+fn build_client(cfg: &ClientCfg) -> LlamaClient {
+    LlamaClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, None, None).unwrap()
 }
 
-fn build_probed_client(cfg: &ClientCfg, probe: &Arc<ScriptedProbe>) -> LlamaChatClient {
+fn build_probed_client(cfg: &ClientCfg, probe: &Arc<ScriptedProbe>) -> LlamaClient {
     let health: Arc<dyn LlmHealthProbe> = probe.clone();
-    LlamaChatClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, None, Some(health)).unwrap()
+    LlamaClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, None, Some(health)).unwrap()
 }
 
 async fn next_non_context_event(rx: &mut mpsc::Receiver<LlmEvent>) -> Option<LlmEvent> {
@@ -415,7 +415,7 @@ async fn single_turn_streams_deltas_and_finishes() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     assert_eq!(
         ask(&client, "hi").await,
         [delta("Hello"), delta(" "), delta("world")]
@@ -441,7 +441,7 @@ async fn conv_lock_is_not_held_while_streaming() {
     script.push_stream(StreamResponse::Deltas(many)).await;
     let (port, _server) = spawn_fake(script).await;
 
-    let client = Arc::new(build_client(&chat_spec(port)));
+    let client = Arc::new(build_client(&client_spec(port)));
     // One slot: once the test stops draining, the stream parks mid-flight.
     let (tx, mut rx) = mpsc::channel(1);
     client.push_user("first".into(), Vec::new()).await.unwrap();
@@ -467,7 +467,7 @@ async fn conv_lock_is_not_held_while_streaming() {
 #[tokio::test]
 async fn conv_lock_is_not_held_while_the_consumer_is_stalled() {
     let (port, _server) = spawn_fake(Script::new()).await;
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     client.push_user("first".into(), Vec::new()).await.unwrap();
     let (tx, _rx) = mpsc::channel(1);
     tx.try_send(delta("unread")).unwrap();
@@ -495,7 +495,7 @@ async fn stalled_stream_aborts_within_inactivity_timeout() {
         .await;
     let (port, _server) = spawn_fake(script).await;
 
-    let mut spec = chat_spec(port);
+    let mut spec = client_spec(port);
     spec.timeouts.stream_inactivity_secs = 1;
     let client = build_client(&spec);
 
@@ -507,7 +507,7 @@ async fn stalled_stream_aborts_within_inactivity_timeout() {
         .expect("step must return within outer 5s budget")
         .expect_err("a reply that stalls midway is an error");
     assert!(
-        matches!(err, LlmError::Chat(ChatClientError::Sse(_))),
+        matches!(err, LlmError::Client(LlamaClientError::Sse(_))),
         "{err:?}"
     );
     let elapsed = started.elapsed();
@@ -527,7 +527,7 @@ async fn stalled_error_body_aborts_within_inactivity_timeout() {
         .await;
     let (port, _server) = spawn_fake(script).await;
 
-    let mut spec = chat_spec(port);
+    let mut spec = client_spec(port);
     spec.timeouts.stream_inactivity_secs = 1;
     let client = build_client(&spec);
 
@@ -540,7 +540,7 @@ async fn stalled_error_body_aborts_within_inactivity_timeout() {
     assert!(
         matches!(
             &err,
-            LlmError::Chat(ChatClientError::Server { status: 500, body }) if body == "partial"
+            LlmError::Client(LlamaClientError::Server { status: 500, body }) if body == "partial"
         ),
         "{err:?}"
     );
@@ -554,7 +554,7 @@ async fn slow_first_token_is_not_treated_as_a_stall() {
         .await;
     let (port, _server) = spawn_fake(script).await;
 
-    let mut spec = chat_spec(port);
+    let mut spec = client_spec(port);
     spec.timeouts.stream_inactivity_secs = 1;
     spec.chat.request_timeout_secs = nz64(4);
     let client = build_client(&spec);
@@ -567,7 +567,7 @@ async fn slow_first_token_is_not_treated_as_a_stall() {
         .expect("step must return within outer 15s budget");
     let err = res.expect_err("a first byte that never arrives is still an error");
     assert!(
-        matches!(err, LlmError::Chat(ChatClientError::Sse(_))),
+        matches!(err, LlmError::Client(LlamaClientError::Sse(_))),
         "{err:?}"
     );
     let elapsed = started.elapsed();
@@ -592,7 +592,7 @@ async fn generation_longer_than_request_timeout_is_not_truncated() {
         .await;
     let (port, _server) = spawn_fake(script).await;
 
-    let mut spec = chat_spec(port);
+    let mut spec = client_spec(port);
     spec.chat.request_timeout_secs = nz64(1);
     spec.timeouts.stream_inactivity_secs = 2;
     let client = build_client(&spec);
@@ -625,13 +625,13 @@ async fn step_dropped_mid_reply_fails_and_leaves_the_turn_out_of_history() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
 
     client.push_user("hi".into(), Vec::new()).await.unwrap();
     let (tx, mut rx) = mpsc::channel(32);
     let err = client.step(Vec::new(), tx).await.unwrap_err();
     assert!(
-        matches!(err, LlmError::Chat(ChatClientError::Http(_))),
+        matches!(err, LlmError::Client(LlamaClientError::Http(_))),
         "{err:?}"
     );
     assert_eq!(drain(&mut rx).await, [delta("partial"), delta(" reply")]);
@@ -667,7 +667,7 @@ async fn server_reported_usage_triggers_summarization_the_heuristic_would_skip()
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let spec = chat_spec(port);
+    let spec = client_spec(port);
     let client = build_client(&spec);
     let mut compaction_notices = Vec::new();
     for i in 0..8 {
@@ -726,7 +726,7 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let mut spec = chat_spec(port);
+    let mut spec = client_spec(port);
     spec.chat.max_history_tokens = nz32(100);
     spec.chat.summary_target_tokens = nz32(10);
     let client = build_client(&spec);
@@ -761,7 +761,7 @@ async fn a_summary_that_calls_a_tool_is_asked_again_without_tools() {
         .push_stream(StreamResponse::Deltas(vec!["next".into()]))
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
-    let mut spec = chat_spec(port);
+    let mut spec = client_spec(port);
     spec.chat.max_history_tokens = nz32(100);
     spec.chat.summary_target_tokens = nz32(10);
     let client = build_client(&spec);
@@ -865,7 +865,7 @@ async fn step_runs_tool_calls_reported_with_stop_finish_reason() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     client
         .push_user("list /tmp".into(), Vec::new())
         .await
@@ -901,7 +901,7 @@ async fn step_cut_off_at_the_token_limit_is_truncated_and_left_out_of_history() 
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     client
         .push_user("list /tmp".into(), Vec::new())
         .await
@@ -935,7 +935,7 @@ async fn step_discards_tool_calls_from_a_stream_cut_off_before_its_finish_chunk(
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     client
         .push_user("list /tmp".into(), Vec::new())
         .await
@@ -946,7 +946,7 @@ async fn step_discards_tool_calls_from_a_stream_cut_off_before_its_finish_chunk(
         .await
         .expect_err("a half-received tool call must not run");
     assert!(
-        matches!(err, LlmError::Chat(ChatClientError::Sse(_))),
+        matches!(err, LlmError::Client(LlamaClientError::Sse(_))),
         "expected a stream error, got {err:?}"
     );
 
@@ -976,7 +976,7 @@ async fn step_failing_before_any_output_drops_the_user_message() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     client
         .push_user("first try".into(), Vec::new())
         .await
@@ -986,7 +986,7 @@ async fn step_failing_before_any_output_drops_the_user_message() {
     assert!(
         matches!(
             &err,
-            LlmError::Chat(ChatClientError::Server { status: 500, .. })
+            LlmError::Client(LlamaClientError::Server { status: 500, .. })
         ),
         "{err:?}"
     );
@@ -1040,7 +1040,7 @@ async fn step_refused_as_over_the_context_window_drops_old_history_and_retries_o
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     ask(&client, "first question").await;
     ask(&client, "second question").await;
     client
@@ -1076,7 +1076,7 @@ async fn step_refused_as_over_the_context_window_drops_old_history_and_retries_o
     assert!(
         matches!(
             err,
-            LlmError::Chat(ChatClientError::ContextOverflow {
+            LlmError::Client(LlamaClientError::ContextOverflow {
                 prompt_tokens: Some(13000)
             })
         ),
@@ -1114,7 +1114,7 @@ async fn step_fails_with_the_error_llama_server_reports_mid_stream() {
             .push_stream(StreamResponse::Deltas(vec!["fine".into()]))
             .await;
         let (port, _server) = spawn_fake(script.clone()).await;
-        let client = build_client(&chat_spec(port));
+        let client = build_client(&client_spec(port));
         client.push_user("hi".into(), Vec::new()).await.unwrap();
         let (tx, _rx) = mpsc::channel(32);
 
@@ -1122,7 +1122,7 @@ async fn step_fails_with_the_error_llama_server_reports_mid_stream() {
         assert!(
             matches!(
                 &err,
-                LlmError::Chat(ChatClientError::Server { status: 500, body }) if body == "kv cache full"
+                LlmError::Client(LlamaClientError::Server { status: 500, body }) if body == "kv cache full"
             ),
             "{label}: {err:?}"
         );
@@ -1152,7 +1152,7 @@ async fn step_parses_tool_call_across_argument_chunks() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     client
         .push_user("list /tmp".into(), Vec::new())
         .await
@@ -1201,7 +1201,7 @@ async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     client
         .push_user("please echo hi".into(), Vec::new())
         .await
@@ -1268,7 +1268,7 @@ async fn narration_before_a_tool_call_stays_in_history() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     client
         .push_user("please echo hi".into(), Vec::new())
         .await
@@ -1318,7 +1318,7 @@ async fn complete_oneshot_survives_a_response_larger_than_the_channel() {
     script.push_stream(StreamResponse::Deltas(deltas)).await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     let text = timeout(
         Duration::from_secs(10),
         client.complete_oneshot("title?".into(), OneShotReply::Text(Thinking::Enabled)),
@@ -1341,7 +1341,7 @@ async fn complete_oneshot_sends_a_lone_prompt_on_the_summary_budget() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let cfg = chat_spec(port);
+    let cfg = client_spec(port);
     let client = build_client(&cfg);
     client
         .push_user("earlier".into(), Vec::new())
@@ -1387,7 +1387,7 @@ async fn transient_note_is_the_last_wire_message_for_exactly_one_step() {
     }
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     client.push_user("go".into(), Vec::new()).await.unwrap();
     client
         .set_transient_note("answer now".into())
@@ -1413,7 +1413,7 @@ async fn transient_note_is_the_last_wire_message_for_exactly_one_step() {
 }
 
 #[tokio::test]
-async fn isolated_conversation_never_reaches_the_main_conversation() {
+async fn isolated_backend_never_reaches_the_main_history() {
     let script = Script::new();
     for reply in ["main answer", "sub answer", "main again"] {
         script
@@ -1421,11 +1421,11 @@ async fn isolated_conversation_never_reaches_the_main_conversation() {
             .await;
     }
     let (port, _server) = spawn_fake(script.clone()).await;
-    let main = build_client(&chat_spec(port));
+    let main = build_client(&client_spec(port));
 
     ask(&main, "main question").await;
     let sub = main
-        .isolated_conversation("sub prompt".into(), SlotAssignment::Unassigned)
+        .isolated_backend("sub prompt".into(), SlotAssignment::Unassigned)
         .unwrap();
     ask(sub.as_ref(), "sub task").await;
     drop(sub);
@@ -1451,7 +1451,7 @@ async fn isolated_conversation_never_reaches_the_main_conversation() {
 }
 
 #[tokio::test]
-async fn schema_completion_constrains_the_reply_and_leaves_the_conversation_alone() {
+async fn schema_completion_constrains_the_reply_and_leaves_the_history_alone() {
     let script = Script::new();
     for reply in ["free answer", r#"{"found":true}"#, "next"] {
         script
@@ -1459,9 +1459,9 @@ async fn schema_completion_constrains_the_reply_and_leaves_the_conversation_alon
             .await;
     }
     let (port, _server) = spawn_fake(script.clone()).await;
-    let main = build_client(&chat_spec(port));
+    let main = build_client(&client_spec(port));
     let sub = main
-        .isolated_conversation("sub prompt".into(), SlotAssignment::Unassigned)
+        .isolated_backend("sub prompt".into(), SlotAssignment::Unassigned)
         .unwrap();
     ask(sub.as_ref(), "task").await;
     let schema = json!({"type": "object", "properties": {"found": {"type": "boolean"}}});
@@ -1519,7 +1519,7 @@ async fn reasoning_rides_along_with_its_tool_call_across_user_turns() {
     }
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = build_client(&chat_spec(port));
+    let client = build_client(&client_spec(port));
     client.push_user("look".into(), Vec::new()).await.unwrap();
     let (tx, mut rx) = mpsc::channel(32);
     let outcome = client.step(Vec::new(), tx).await.unwrap();
@@ -1573,7 +1573,7 @@ async fn requests_are_sent_only_while_the_supervised_server_is_serving() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
     let probe = ScriptedProbe::serving();
-    let client = build_probed_client(&chat_spec(port), &probe);
+    let client = build_probed_client(&client_spec(port), &probe);
     client
         .push_user("private question".into(), Vec::new())
         .await
@@ -1638,7 +1638,7 @@ async fn history_is_not_sent_for_summarizing_while_the_server_is_not_serving() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let mut spec = chat_spec(port);
+    let mut spec = client_spec(port);
     spec.chat.max_history_tokens = nz32(60);
     spec.chat.summary_target_tokens = nz32(15);
     let probe = ScriptedProbe::serving();
@@ -1680,7 +1680,7 @@ async fn a_failed_stream_is_a_restart_only_when_the_supervisor_moved_on_mid_requ
         .push_stream(StreamResponse::StallAfterDeltas(vec!["partial".into()]))
         .await;
     let (port, _server) = spawn_fake(script).await;
-    let mut spec = chat_spec(port);
+    let mut spec = client_spec(port);
     spec.timeouts.stream_inactivity_secs = 1;
     let probe = ScriptedProbe::serving();
     let client = build_probed_client(&spec, &probe);
@@ -1710,7 +1710,7 @@ async fn a_failed_stream_is_a_restart_only_when_the_supervisor_moved_on_mid_requ
         };
         let (step, ()) = tokio::join!(client.step(Vec::new(), tx), change_supervisor_mid_stream);
         match (restarted, &step) {
-            (true, Err(LlmError::ServerRestarting(_))) | (false, Err(LlmError::Chat(_))) => {}
+            (true, Err(LlmError::ServerRestarting(_))) | (false, Err(LlmError::Client(_))) => {}
             _ => panic!("{label}: {step:?}"),
         }
     }
@@ -1746,7 +1746,7 @@ async fn safety_judge_sees_only_what_the_user_wrote_and_asks_for_a_greedy_schema
             .await;
     }
     let (port, _server) = spawn_fake(script.clone()).await;
-    let client: Arc<dyn LlmBackend> = Arc::new(build_client(&chat_spec(port)));
+    let client: Arc<dyn LlmBackend> = Arc::new(build_client(&client_spec(port)));
     client
         .set_transient_context("CONTEXT BLOCK".into())
         .await
@@ -1821,7 +1821,7 @@ async fn safety_judge_asks_when_the_model_fails_stalls_or_answers_off_schema() {
         let script = Script::new();
         script.push_stream(reply).await;
         let (port, _server) = spawn_fake(script.clone()).await;
-        let client: Arc<dyn LlmBackend> = Arc::new(build_client(&chat_spec(port)));
+        let client: Arc<dyn LlmBackend> = Arc::new(build_client(&client_spec(port)));
 
         let verdict = judge_over(client, Duration::from_millis(500))
             .judge(JUDGED_CARGO_BUILD)
@@ -1840,7 +1840,7 @@ async fn safety_judge_asks_without_a_request_when_the_command_forges_a_section()
         ]))
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
-    let client: Arc<dyn LlmBackend> = Arc::new(build_client(&chat_spec(port)));
+    let client: Arc<dyn LlmBackend> = Arc::new(build_client(&client_spec(port)));
 
     let verdict = judge_over(client, JUDGE_TIMEOUT)
         .judge(JudgedCommand {
@@ -1862,7 +1862,7 @@ async fn safety_judge_prompt_carries_chat_template_tokens_as_inert_text() {
         ]))
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
-    let client: Arc<dyn LlmBackend> = Arc::new(build_client(&chat_spec(port)));
+    let client: Arc<dyn LlmBackend> = Arc::new(build_client(&client_spec(port)));
 
     judge_over(client, JUDGE_TIMEOUT)
         .judge(JudgedCommand {

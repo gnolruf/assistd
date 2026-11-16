@@ -11,7 +11,7 @@ use assistd_tools::JudgeModel;
 use crate::{LlmBackend, OneShotReply};
 
 /// A [`JudgeModel`] answered by a backend's server, judging against either that backend's
-/// conversation or one fixed prompt.
+/// history or one fixed prompt.
 #[derive(Debug)]
 pub struct BackendJudgeModel {
     backend: Arc<dyn LlmBackend>,
@@ -25,7 +25,7 @@ enum Asked {
 }
 
 impl BackendJudgeModel {
-    /// Judges against the newest messages the user wrote in `backend`'s conversation.
+    /// Judges against the newest messages the user wrote in `backend`'s history.
     pub fn new(backend: Arc<dyn LlmBackend>) -> Self {
         Self {
             backend,
@@ -34,7 +34,7 @@ impl BackendJudgeModel {
     }
 
     /// Judges against `prompt` alone as what the user asked for; nothing in `backend`'s
-    /// conversation reaches the judge.
+    /// history reaches the judge.
     pub fn for_prompt(backend: Arc<dyn LlmBackend>, prompt: String) -> Self {
         Self {
             backend,

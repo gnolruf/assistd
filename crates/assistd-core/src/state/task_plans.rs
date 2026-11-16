@@ -1,4 +1,4 @@
-//! The handler for `TaskRefine`: a task prompt explored in a conversation of its own,
+//! The handler for `TaskRefine`: a task prompt explored on a backend of its own,
 //! rewritten as a brief for an unattended run, and revised there on feedback.
 
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use assistd_ipc::{Event, EventBody, HostName, PermissionMode, TaskPrompt};
-use assistd_llm::{ConversationKey, LlmBackend, LlmEvent, SlotAssignment};
+use assistd_llm::{LlmBackend, LlmEvent, SlotAssignment, SlotHolder};
 
 use super::task_runs::task_system_prompt;
 use super::task_service::TaskService;
@@ -36,16 +36,16 @@ pub(super) struct RefineAsk {
     pub feedback: Option<String>,
 }
 
-/// The planning conversation of the latest refine since the daemon started.
+/// The planning backend of the latest refine since the daemon started.
 #[derive(Debug, Default)]
 pub(in crate::state) struct TaskPlans {
     latest: StdMutex<Option<PlanningSession>>,
 }
 
-/// A planning conversation, the prompt it explored, and its last rewrite of that prompt.
+/// A planning backend, the prompt it explored, and its last rewrite of that prompt.
 #[derive(Debug, Clone)]
 struct PlanningSession {
-    conversation: Arc<dyn LlmBackend>,
+    backend: Arc<dyn LlmBackend>,
     prompt: TaskPrompt,
     rewrite: Option<TaskPrompt>,
 }
@@ -59,7 +59,7 @@ impl TaskPlans {
         *self.latest.lock() = Some(session);
     }
 
-    /// Drop the latest planning conversation; `false` when there was none.
+    /// Drop the latest planning backend; `false` when there was none.
     fn forget(&self) -> bool {
         self.latest.lock().take().is_some()
     }
@@ -122,7 +122,7 @@ impl TaskService {
         let (llm_tx, llm_rx) = mpsc::channel(EVENT_BUFFER);
         let planner = &self.deps.planner;
         let planning = planner.refine(
-            Arc::clone(&session.conversation),
+            Arc::clone(&session.backend),
             plan_ask,
             permissions,
             id.to_string(),
@@ -140,7 +140,7 @@ impl TaskService {
         Ok(refinement)
     }
 
-    /// The conversation to refine `prompt` in and what to ask it: with `feedback`, the one
+    /// The backend to refine `prompt` on and what to ask it: with `feedback`, the one
     /// that last rewrote `prompt`; without, a new one in place of the last.
     async fn planning_session(
         &self,
@@ -159,26 +159,26 @@ impl TaskService {
                 .ok_or(TaskPlanError::NothingToRevise)?;
             return Ok((session, PlanAsk::Revise { shown, feedback }));
         }
-        self.end_planning_conversation().await;
-        let conversation = self.deps.llm.isolated_conversation(
+        self.end_planning_backend().await;
+        let backend = self.deps.llm.isolated_backend(
             task_system_prompt(&self.deps.config.chat.system_prompt),
-            SlotAssignment::Shared(ConversationKey::TaskRefine),
+            SlotAssignment::Shared(SlotHolder::TaskRefine),
         )?;
         let ask = PlanAsk::Work(prompt.as_str().to_string());
         let session = PlanningSession {
-            conversation,
+            backend,
             prompt,
             rewrite: None,
         };
         Ok((session, ask))
     }
 
-    /// Forget the latest planning conversation and its saved slot state.
-    async fn end_planning_conversation(&self) {
+    /// Forget the latest planning backend and its saved slot state.
+    async fn end_planning_backend(&self) {
         if self.plans.forget()
             && let Some(stash) = &self.deps.slot_stash
         {
-            stash.end(ConversationKey::TaskRefine).await;
+            stash.end(SlotHolder::TaskRefine).await;
         }
     }
 }

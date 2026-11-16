@@ -1,5 +1,5 @@
 //! The two forms a sub-agent's answer takes on its way back: the whole answer
-//! saved to a file, and a bounded contract for the main conversation. Both are
+//! saved to a file, and a bounded contract for the main backend. Both are
 //! sanitised and quoted as untrusted data.
 
 use std::fmt::Write;
@@ -41,7 +41,7 @@ impl RelayStatus {
     }
 }
 
-/// What a sub-agent returns to the main conversation, its size bounded by
+/// What a sub-agent returns to the main backend, its size bounded by
 /// [`RelayContract::schema`].
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]

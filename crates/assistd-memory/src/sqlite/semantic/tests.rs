@@ -120,7 +120,7 @@ async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
         .await;
 
     let hits = store
-        .nearest_chunks(unit_vec(0.0), 3, ChunkScope::Chats(SessionScope::All))
+        .nearest_chunks(unit_vec(0.0), 3, ChunkScope::Messages(SessionScope::All))
         .await
         .unwrap();
     let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
@@ -133,7 +133,7 @@ async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
     );
     assert_eq!(hits[1].text, "short");
     let ChunkLocator::Message { message_id, .. } = hits[0].locator else {
-        panic!("a chat search must hit messages");
+        panic!("a message search must hit messages");
     };
     assert_eq!(message_id, long_message);
     for hit in &hits {
@@ -141,7 +141,7 @@ async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
             session_id, role, ..
         } = hit.locator
         else {
-            panic!("a chat search must hit messages");
+            panic!("a message search must hit messages");
         };
         assert_eq!(session_id, transcript.session);
         assert_eq!(role, PersistedRole::User);
@@ -164,7 +164,11 @@ async fn nearest_chunks_keeps_the_best_top_k() {
 
     for (top_k, expected) in [(3, &ids[..3]), (usize::MAX, &ids[..])] {
         let hits = store
-            .nearest_chunks(unit_vec(0.0), top_k, ChunkScope::Chats(SessionScope::All))
+            .nearest_chunks(
+                unit_vec(0.0),
+                top_k,
+                ChunkScope::Messages(SessionScope::All),
+            )
             .await
             .unwrap();
         let got: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
@@ -183,7 +187,7 @@ async fn nearest_chunks_can_exclude_or_keep_one_session() {
         .await;
 
     let all = store
-        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Chats(SessionScope::All))
+        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Messages(SessionScope::All))
         .await
         .unwrap();
     let all_ids: Vec<ChunkId> = all.iter().map(|h| h.chunk_id).collect();
@@ -197,7 +201,7 @@ async fn nearest_chunks_can_exclude_or_keep_one_session() {
         .nearest_chunks(
             unit_vec(0.0),
             5,
-            ChunkScope::Chats(SessionScope::AllExcept(current.session)),
+            ChunkScope::Messages(SessionScope::AllExcept(current.session)),
         )
         .await
         .unwrap();
@@ -205,7 +209,7 @@ async fn nearest_chunks_can_exclude_or_keep_one_session() {
         .iter()
         .map(|h| {
             let ChunkLocator::Message { session_id, .. } = h.locator else {
-                panic!("a chat search must hit messages");
+                panic!("a message search must hit messages");
             };
             (h.chunk_id, session_id)
         })
@@ -216,7 +220,7 @@ async fn nearest_chunks_can_exclude_or_keep_one_session() {
         .nearest_chunks(
             unit_vec(0.0),
             5,
-            ChunkScope::Chats(SessionScope::Only(past.session)),
+            ChunkScope::Messages(SessionScope::Only(past.session)),
         )
         .await
         .unwrap();
@@ -225,7 +229,7 @@ async fn nearest_chunks_can_exclude_or_keep_one_session() {
 }
 
 #[tokio::test]
-async fn documents_and_chats_rank_apart_and_reindexing_replaces_document_chunks() {
+async fn documents_and_messages_rank_apart_and_reindexing_replaces_document_chunks() {
     let (handle, store, _temp) = fresh().await;
     let transcript = Transcript::new(&handle).await;
     let message_chunk = transcript
@@ -257,12 +261,16 @@ async fn documents_and_chats_rank_apart_and_reindexing_replaces_document_chunks(
     embed_chunk(&store, stale[0], &unit_vec(0.0)).await;
     embed_chunk(&store, detail, &unit_vec(0.2)).await;
 
-    let chats = store
-        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Chats(SessionScope::All))
+    let messages = store
+        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Messages(SessionScope::All))
         .await
         .unwrap();
-    let chat_ids: Vec<ChunkId> = chats.iter().map(|h| h.chunk_id).collect();
-    assert_eq!(chat_ids, [message_chunk], "chat search must skip documents");
+    let message_ids: Vec<ChunkId> = messages.iter().map(|h| h.chunk_id).collect();
+    assert_eq!(
+        message_ids,
+        [message_chunk],
+        "message search must skip documents"
+    );
 
     let documents = store
         .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Documents)
@@ -442,7 +450,7 @@ async fn non_finite_vectors_never_enter_top_k() {
         .await;
 
     let hits = store
-        .nearest_chunks(unit_vec(0.0), 2, ChunkScope::Chats(SessionScope::All))
+        .nearest_chunks(unit_vec(0.0), 2, ChunkScope::Messages(SessionScope::All))
         .await
         .unwrap();
     let got: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
@@ -522,7 +530,7 @@ async fn unembeddable_rows_are_neither_missing_nor_searched_until_cleared_or_cha
     );
     assert!(
         store
-            .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Chats(SessionScope::All))
+            .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Messages(SessionScope::All))
             .await
             .unwrap()
             .is_empty()
@@ -592,8 +600,8 @@ async fn adopting_a_different_embedding_space_drops_every_vector() {
             memories: 1
         }
     );
-    let all_chats = ChunkScope::Chats(SessionScope::All);
-    let hits = store.nearest_chunks(unit_vec(0.0), 5, all_chats).await;
+    let all_messages = ChunkScope::Messages(SessionScope::All);
+    let hits = store.nearest_chunks(unit_vec(0.0), 5, all_messages).await;
     assert!(hits.unwrap().is_empty());
     assert!(
         store
@@ -604,7 +612,7 @@ async fn adopting_a_different_embedding_space_drops_every_vector() {
     );
 
     embed_chunk(&store, chunk, &unit_vec(0.0)).await;
-    let hits = store.nearest_chunks(unit_vec(0.0), 5, all_chats).await;
+    let hits = store.nearest_chunks(unit_vec(0.0), 5, all_messages).await;
     assert_eq!(hits.unwrap()[0].chunk_id, chunk);
     assert_eq!(
         store.adopt_embedding_space(&rearranged).await.unwrap(),

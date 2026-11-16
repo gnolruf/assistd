@@ -24,12 +24,12 @@ pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use mcp::{McpServerState, McpTransportKind, TokenRevocation};
 pub use task::{
-    ActionOutlook, AnticipatedAction, ConversationHold, DEFAULT_EVENT_COOLDOWN_SECS,
-    DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, HostName, KeptRuns, LaneHolder, MAX_KEPT_RUNS,
-    MAX_LISTED_RUNS, MissedFire, ModeRecommendation, PausedPrompt, Plan, PlanId, PlanStep,
-    PlannedAction, QueueItem, SuspendReason, TaskEvent, TaskId, TaskName, TaskPrompt, TaskQueueOp,
-    TaskQueueSnapshot, TaskRequest, TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary,
-    TaskSpec, TaskSpecError, TaskTrigger,
+    ActionOutlook, AnticipatedAction, DEFAULT_EVENT_COOLDOWN_SECS, DEFAULT_PATH_DEBOUNCE_SECS,
+    FinishOutcome, HostName, InteractionHold, KeptRuns, LaneHolder, MAX_KEPT_RUNS, MAX_LISTED_RUNS,
+    MissedFire, ModeRecommendation, PausedPrompt, Plan, PlanId, PlanStep, PlannedAction, QueueItem,
+    SuspendReason, TaskEvent, TaskId, TaskName, TaskPrompt, TaskQueueOp, TaskQueueSnapshot,
+    TaskRequest, TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary, TaskSpec, TaskSpecError,
+    TaskTrigger,
 };
 pub use tool_report::{ToolAttachment, ToolReport, ToolStreams};
 pub use wakeword::WakeWordOp;
@@ -288,7 +288,7 @@ impl<T> From<Result<T, NotReady>> for ComponentReadiness {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "agent", rename_all = "snake_case")]
 pub enum ConfirmSource {
-    /// The main conversation's agent.
+    /// The main backend's agent.
     #[default]
     Main,
     /// A relay's sub-agent, working from untrusted content on `task`, inside task run `run`
@@ -330,7 +330,7 @@ pub enum RelayEvent {
     Delta { text: String },
     /// A streamed chunk of the sub-agent's reasoning.
     ReasoningDelta { text: String },
-    /// Tokens the sub-agent's conversation has held, counting what compaction removed.
+    /// Tokens the sub-agent's history has held, counting what compaction removed.
     ContextSize { total: u32 },
     /// The sub-agent invoked a tool.
     ToolCall {
@@ -370,7 +370,7 @@ pub struct RelayStepRecord {
 pub struct RelayStepRun {
     pub end: RelayStepEnd,
     pub duration_ms: u64,
-    /// Tokens its conversation had held when it ended, once reported.
+    /// Tokens its history had held when it ended, once reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<u32>,
     pub entries: Vec<RelayTraceEntry>,
@@ -775,7 +775,7 @@ pub enum StatusKind {
     CompactingHistory,
     /// The compaction announced by [`StatusKind::CompactingHistory`] finished.
     HistoryCompacted,
-    /// A task run gave the model to the user's conversation; the step it was streaming
+    /// A task run gave the model to the user's interaction; the step it was streaming
     /// was discarded and runs again when the task resumes.
     YieldedToUser,
 }
@@ -812,7 +812,7 @@ impl fmt::Display for Role {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnStats {
     pub duration_ms: u64,
-    /// Tokens the turn added to the conversation.
+    /// Tokens the turn added to the history.
     pub tokens: u64,
 }
 
@@ -1024,8 +1024,8 @@ pub enum EventBody {
     },
     /// Progress of a relay running inside the turn's `relay` tool call.
     Relay { event: RelayEvent },
-    /// Tokens in the conversation as sent with the model request about to stream,
-    /// and `total` the conversation has held, counting what compaction removed.
+    /// Tokens in the history as sent with the model request about to stream,
+    /// and `total` the history has held, counting what compaction removed.
     ContextSize { tokens: u32, total: u32 },
     /// Non-terminal notice of a recoverable condition.
     Status {

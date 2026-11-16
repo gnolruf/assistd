@@ -15,9 +15,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
 use assistd_ipc::TaskRunId;
-use assistd_llm::{ConversationKey, SlotDir, SlotStash};
+use assistd_llm::{SlotDir, SlotHolder, SlotStash};
 
-const RUN: ConversationKey = ConversationKey::TaskRun(TaskRunId(1));
+const RUN: SlotHolder = SlotHolder::TaskRun(TaskRunId(1));
 
 /// Records every slot action as `"<action> <filename>"` and answers it, a save
 /// writing its file into `dir` first. The action named in `stalled` is held
@@ -136,14 +136,14 @@ fn stash_at(addr: SocketAddr, dir: &TempDir) -> SlotStash {
 }
 
 #[tokio::test]
-async fn a_switch_whose_caller_is_gone_finishes_before_its_conversation_ends() {
+async fn a_switch_whose_caller_is_gone_finishes_before_its_holder_ends() {
     let dir = tempfile::tempdir().unwrap();
     let fake = FakeSlots::saving_into(&dir);
     let stash = stash_at(fake.spawn().await, &dir);
     stash.switch_to(RUN).await;
 
     fake.stall_next("save");
-    fake.drop_mid_request(stash.switch_to(ConversationKey::Main))
+    fake.drop_mid_request(stash.switch_to(SlotHolder::Main))
         .await;
     tokio::join!(stash.end(RUN), async { fake.release() });
 
@@ -153,7 +153,7 @@ async fn a_switch_whose_caller_is_gone_finishes_before_its_conversation_ends() {
 }
 
 #[tokio::test]
-async fn ending_a_conversation_removes_a_slot_file_the_stash_has_no_record_of() {
+async fn ending_a_holder_removes_a_slot_file_the_stash_has_no_record_of() {
     let dir = tempfile::tempdir().unwrap();
     let fake = FakeSlots::saving_into(&dir);
     let stash = stash_at(fake.spawn().await, &dir);

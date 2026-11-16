@@ -1,12 +1,12 @@
 //! Announcing a task run's final reply: broadcast for notifications, then spoken once the
-//! user's conversation has gone quiet, a chat turn starting meanwhile cutting it off.
+//! user's interaction has gone quiet, a user turn starting meanwhile cutting it off.
 
 use tokio::sync::mpsc;
 
 use assistd_ipc::{Event, EventBody, TaskName, TaskRunId};
 use assistd_voice::SentenceBuffer;
 
-use super::conversation::ConversationState;
+use super::interaction::InteractionState;
 use super::query::run_speech_worker;
 use super::task_service::TaskService;
 
@@ -35,7 +35,7 @@ impl TaskService {
                 reply,
             },
         ));
-        self.wait_for_quiet_chat().await;
+        self.wait_for_quiet_interaction().await;
         let voice_output = self.deps.voice.speech().clone();
         let start_epoch = voice_output.current_epoch();
         let (speech_tx, speech_rx) = mpsc::channel(sentences.len().max(1));
@@ -54,19 +54,19 @@ impl TaskService {
     }
 
     /// Return once no user turn is in flight and nothing is being spoken.
-    async fn wait_for_quiet_chat(&self) {
-        let mut conversation = self.deps.admission.conversation.subscribe();
+    async fn wait_for_quiet_interaction(&self) {
+        let mut interaction = self.deps.admission.interaction.subscribe();
         let mut speaking = self.deps.voice.speech().subscribe_speaking();
         loop {
             let talking = matches!(
-                *conversation.borrow_and_update(),
-                ConversationState::Talking { .. }
+                *interaction.borrow_and_update(),
+                InteractionState::Talking { .. }
             );
             if !talking && !*speaking.borrow_and_update() {
                 return;
             }
             let changed = tokio::select! {
-                changed = conversation.changed() => changed,
+                changed = interaction.changed() => changed,
                 changed = speaking.changed() => changed,
             };
             if changed.is_err() {

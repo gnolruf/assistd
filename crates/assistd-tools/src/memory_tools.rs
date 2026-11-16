@@ -301,7 +301,7 @@ impl ReminisceTool {
         };
         let hits = self
             .semantic
-            .nearest_chunks(query_vec, request.limit, ChunkScope::Chats(scope))
+            .nearest_chunks(query_vec, request.limit, ChunkScope::Messages(scope))
             .await?;
         tracing::info!(
             target: "assistd::embed",
@@ -692,7 +692,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             *spy.scope.lock(),
-            Some(ChunkScope::Chats(SessionScope::AllExceptInContext(first)))
+            Some(ChunkScope::Messages(SessionScope::AllExceptInContext(
+                first
+            )))
         );
 
         let second = SessionId::new();
@@ -700,7 +702,9 @@ mod tests {
         tool.invoke(&TurnContext::default(), query).await.unwrap();
         assert_eq!(
             *spy.scope.lock(),
-            Some(ChunkScope::Chats(SessionScope::AllExceptInContext(second))),
+            Some(ChunkScope::Messages(SessionScope::AllExceptInContext(
+                second
+            ))),
             "the tool must follow a session switch, not pin its first session"
         );
     }

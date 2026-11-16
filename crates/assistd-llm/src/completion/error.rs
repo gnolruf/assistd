@@ -1,10 +1,10 @@
-//! Chat client errors.
+//! llama-server client errors.
 
 use thiserror::Error;
 
-/// Errors produced by [`crate::LlamaChatClient`].
+/// Errors produced by [`crate::LlamaClient`].
 #[derive(Debug, Error)]
-pub enum ChatClientError {
+pub enum LlamaClientError {
     #[error("HTTP transport error: {0}")]
     Http(#[from] reqwest::Error),
 
