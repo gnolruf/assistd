@@ -46,7 +46,7 @@ Guidelines for AI agents (and humans) working in this repository.
   (grouped std, external crates, workspace crates, `crate`/`super`),
   then `mod` declarations and re-exports, then consts, then types
   each followed by their impls, then free functions, then
-  `#[cfg(test)] mod tests;`. No `use` between items or inside
+  `#[cfg(test)] mod tests`. No `use` between items or inside
   function bodies.
 - **Keep functions short.** Aim for under 60 lines. Past 100, split
   the function into named steps; clippy enforces the limit, so split
@@ -68,10 +68,12 @@ Guidelines for AI agents (and humans) working in this repository.
   add test-only helpers, modules, constructors, or features to
   production code to make something testable; if it can't be
   tested through its real interface, don't test it.
-- **Keep test modules from swamping the file.** When a
-  `#[cfg(test)]` module grows past the production code it tests,
-  move it to a sibling file (`foo/tests.rs` via
-  `#[cfg(test)] mod tests;`) so the source file stays readable.
+- **Unit tests live inline.** Put them in a
+  `#[cfg(test)] mod tests { ... }` block at the end of the source
+  file. A separate `tests.rs` (via `#[cfg(test)] mod tests;`) is
+  allowed only where the module already has a directory for real
+  submodules, or at the crate root; never create a directory just
+  to hold tests.
 - **Stay minimal.** Don't add features, abstractions, or
   configuration knobs the task didn't ask for. A bug fix is a bug
   fix; bundling unrelated cleanup makes review harder. Three
