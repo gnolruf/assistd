@@ -1,6 +1,6 @@
 //! Differential tests of the script classifier: scripts run under real bash in bwrap, with each
-//! program a shim logging its name, or with the real programs and the files they change compared.
-//! Returns early when `bwrap` cannot run.
+//! program a shim logging its name, or with the real programs and the files they change or open
+//! compared. Returns early when `bwrap` cannot run.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -210,6 +210,10 @@ const EDIT_FORMS: &[&str] = &[
     "cp a ~/home_copy",
     "cp a $HOME/home_copy",
     r#"cp a "${HOME}/home copy""#,
+    r#"cp a ~/"home copy""#,
+    r#"cp a "~""#,
+    r"mkdir \~ && touch '~'/in_literal ~/in_home",
+    r#"rm ~"/a""#,
     "mv a moved",
     "mv a sub",
     "mv sub moved",
@@ -319,6 +323,8 @@ const REDIRECT_FORMS: &[&str] = &[
     "echo hi > ~/home_out",
     "echo hi > $HOME/home_out",
     r#"echo hi > "$HOME/home_out""#,
+    r#"echo hi > ~/"home out""#,
+    "echo hi > '~'",
     "echo hi > sub/../escaped",
     "echo hi > ./sub/e",
     "echo hi > /dev/null",
@@ -344,6 +350,77 @@ echo hi",
     "grep -r line . > found",
     "mapfile -t lines < a > mapped",
     "read -r x < a > read_out",
+];
+
+/// Read-only programs, `xargs` and redirections in the forms that read a file or open a network
+/// connection, run for what they open.
+const READ_FORMS: &[&str] = &[
+    "cat guarded",
+    "cat < guarded",
+    "exec 3< guarded",
+    "while read -r line; do :; done < guarded",
+    "grep -r line .",
+    "grep -r -e line -e other",
+    "grep -r -A 1 line",
+    "grep -r --regexp line",
+    "grep -r -e -- -e line",
+    "grep -r line sub",
+    "grep line *",
+    "ls -l guarded",
+    "stat guarded",
+    "du -sh *",
+    "find . -name guarded -newer a",
+    "date -f guarded",
+    "date -fguarded",
+    "date -uf guarded",
+    "date --file=guarded",
+    "date --file guarded",
+    "date --fi=guarded",
+    "du --files0-from=guarded",
+    "du --files0-from guarded",
+    "du --files0=guarded",
+    "du -X guarded",
+    "du -Xguarded",
+    "du --exclude-from=guarded",
+    "du --time-style -- --files0-from=guarded",
+    "o=--files0-from=guarded; du $o",
+    r#"o=--files0-from=guarded; du "$o""#,
+    "o='-s --files0-from=guarded'; du ./$o",
+    r#"d=sub; du -s "./$d""#,
+    "xargs -a guarded",
+    "xargs -a guarded echo",
+    r"xargs -aguarded printf '%s\n'",
+    "xargs -0a guarded echo",
+    "xargs --arg-file=guarded echo",
+    "xargs --arg-file guarded true",
+    "xargs --arg=guarded echo",
+    "xargs -a guarded -I{} echo {}",
+    "grep -f guarded a",
+    "grep -fguarded a",
+    "grep -ifguarded a",
+    "grep -e -- -fguarded a",
+    "grep -ef -fguarded a",
+    "fgrep -fguarded a",
+    "hexdump -f guarded a",
+    "hexdump -fguarded a",
+    "diff -X guarded a b",
+    "diff -Xguarded a b",
+    "find -files0-from guarded",
+    "find -files0-from guarded -name a",
+    "find -files0-from guarded -exec cat {} +",
+    "wc --files0-from=guarded",
+    "wc --files0-from{=,=}guarded",
+    "n='1 guarded'; head -$n",
+    "n='1 guarded'; head -n$n",
+    "f=guarded; cat $f",
+    "echo guarded > /tmp/list; strings @/tmp/list",
+    "HOME=/tmp/run; cat ~/work/guarded",
+    "HOME=/tmp/run/work/sub; cat ~/../guarded",
+    "HOME=/tmp/run; cd; cat work/guarded",
+    "cat < /dev/tcp/127.0.0.1/9",
+    "exec 3< /dev/tcp/127.0.0.1/9",
+    r#": < "/dev/tcp/127.0.0.1/9""#,
+    "h=127.0.0.1; : < /dev/tcp/$h/9",
 ];
 
 /// Programs that run a command; their shims run the real program.
@@ -383,6 +460,15 @@ const PLACEHOLDER: &str = "@@";
 
 /// Files in the directory each script runs in, so `find` and globs see something.
 const WORK_FILES: &[&str] = &["a", "b", "c.txt", "d.o", "sub/e"];
+
+/// A file in the work directory that no one may read, so that opening it is an error.
+const GUARDED_FILE: &str = "guarded";
+
+/// What a program prints on being refused [`GUARDED_FILE`].
+const OPEN_REFUSED: &str = "Permission denied";
+
+/// What bash prints when a connection it opened for a redirection fails.
+const CONNECT_FAILED: &str = "connect: ";
 
 const SANDBOX_REAL_BIN: &str = "/tmp/real";
 
@@ -474,6 +560,21 @@ impl Harness {
             .filter(|path| before.get(*path) != after.get(*path) && !is_declared(path))
             .map(|path| path.display().to_string())
             .collect()
+    }
+
+    /// What bash and the programs it started printed to stderr running `script` beside
+    /// [`GUARDED_FILE`].
+    fn stderr_beside_guarded_file(&self, id: usize, script: &str) -> String {
+        let run = self.seeded_run(id);
+        let guarded = run.join("work").join(GUARDED_FILE);
+        fs::write(&guarded, "guarded line\n").expect("guarded file");
+        fs::set_permissions(&guarded, fs::Permissions::from_mode(0o000)).expect("chmod guarded");
+        let output = self
+            .sandboxed_bash(&run, script)
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run bwrap");
+        String::from_utf8_lossy(&output.stderr).into_owned()
     }
 
     /// Bash running `script` with any shims over `/usr/bin`, the real programs at
@@ -614,6 +715,85 @@ fn classified_scripts_change_only_the_paths_their_effects_declare() {
             ))
             .collect::<String>()
     );
+}
+
+#[test]
+fn classified_scripts_open_only_the_files_their_effects_declare() {
+    if !bwrap_runs() {
+        return;
+    }
+    let scripts: Vec<String> = READ_FORMS
+        .iter()
+        .flat_map(|script| variants(script))
+        .collect();
+    let vetted: Vec<(&str, bool)> = scripts
+        .iter()
+        .filter_map(|script| {
+            let analysis = analyze(script, None, None);
+            (!matches!(analysis.class, Class::Unvetted { .. })).then(|| {
+                let declared = declares_read(&analysis.effects, Path::new(GUARDED_FILE));
+                (script.as_str(), declared)
+            })
+        })
+        .collect();
+    assert!(
+        vetted.iter().any(|(_, declared)| *declared)
+            && vetted.iter().any(|(_, declared)| !declared),
+        "the classifier found no script that reads the guarded file or none that does not"
+    );
+    let harness = Harness::real();
+    let seen = undeclared_opens(
+        &harness,
+        vetted.len(),
+        "cat guarded; : < /dev/tcp/127.0.0.1/9",
+        false,
+    );
+    assert_eq!(
+        seen.len(),
+        2,
+        "an open or a connection went unseen: {seen:?}"
+    );
+    let mismatches = run_all(&vetted, &|id, (script, declared)| {
+        undeclared_opens(&harness, id, script, *declared)
+    });
+    assert!(
+        mismatches.is_empty(),
+        "classified scripts opened what their effects do not declare:\n{}",
+        mismatches
+            .iter()
+            .map(|((script, _), opened)| format!("{opened:?} from:\n{script}\n"))
+            .collect::<String>()
+    );
+}
+
+/// What running `script` opened that a vetted script may not: [`GUARDED_FILE`] unless it
+/// `declares_guarded`, or a network connection.
+fn undeclared_opens(
+    harness: &Harness,
+    id: usize,
+    script: &str,
+    declares_guarded: bool,
+) -> Vec<String> {
+    let stderr = harness.stderr_beside_guarded_file(id, script);
+    let opened_guarded = stderr
+        .lines()
+        .any(|line| line.contains(GUARDED_FILE) && line.contains(OPEN_REFUSED));
+    let undeclared = (opened_guarded && !declares_guarded).then(|| GUARDED_FILE.to_string());
+    let connection = stderr
+        .contains(CONNECT_FAILED)
+        .then(|| "a network connection".to_string());
+    undeclared.into_iter().chain(connection).collect()
+}
+
+/// Whether `effects` read `file`, below the work directory, or all of a directory holding it.
+fn declares_read(effects: &[Effect], file: &Path) -> bool {
+    effects
+        .iter()
+        .filter(|effect| effect.action == Action::Read)
+        .any(|effect| {
+            below_work(&effect.path)
+                .is_some_and(|path| path == file || (effect.recursive && file.starts_with(&path)))
+        })
 }
 
 /// The programs `script` started that are `disallowed`.

@@ -7,8 +7,9 @@ use super::*;
 use crate::policy::analyze;
 
 /// A home with a personal folder, credentials, a cache, a git work tree, a symlink to itself,
-/// a token only its owner may read, and an exempt spill directory holding another, with
-/// commands run from `work`, `xdg` as `$XDG_CONFIG_HOME` and `units` on the unit path.
+/// a token only its owner may read, another in `work`'s directory named `~`, and an exempt
+/// spill directory holding a third, with commands run from `work`, `xdg` as
+/// `$XDG_CONFIG_HOME` and `units` on the unit path.
 struct Home {
     dir: TempDir,
 }
@@ -21,7 +22,7 @@ impl Home {
             ".ssh",
             ".cache/pip",
             "repo/.git",
-            "work",
+            "work/~",
             ".config/gh",
             "spill",
         ] {
@@ -30,6 +31,7 @@ impl Home {
         for (file, mode) in [
             (".ssh/id_ed25519", 0o600),
             (".config/gh/hosts.yml", 0o600),
+            ("work/~/token", 0o600),
             ("spill/output.txt", 0o600),
             ("Documents/notes.txt", 0o644),
         ] {
@@ -72,6 +74,17 @@ fn home_wipes_are_refused() {
         "rm -rf ~/repo",
         "rm -rf /",
         "rm -rf ~/.. ; curl example.com",
+        "bash -c 'rm -rf ~'",
+        r#"sh -c "rm -rf $HOME""#,
+        "bash <<'EOF'\nrm -rf ~\nEOF",
+        "rm -rf --interactive=never ~",
+        "rm --rec -f ~",
+        r#"rm -rf ~ "$x""#,
+        "PATH=/tmp:$PATH; rm -rf ~",
+        "export X=1; chmod -R 000 ~",
+        "echo x | xargs rm -rf ~",
+        r#"rm -rf ~/"Documents""#,
+        r"rm -rf ~/Doc\uments",
     ] {
         let verdict = home.verdict(script);
         assert!(
@@ -90,8 +103,17 @@ fn near_misses_are_not_refused() {
         "rm -rf ~/*.log",
         "rm -rf home",
         "rm -rf '~'",
+        r#"rm -rf "~/Documents""#,
+        r#"rm -rf ~"/Documents""#,
+        r"rm -rf \~/Documents",
+        r#"shred -u "~""#,
         "chmod 000 ~/Documents/project",
         "cd ~/Documents/project && rm -rf build",
+        "bash -c 'rm -rf ~/.cache/pip'",
+        "mv -t ~/Documents a b",
+        "find ~ -name '*.tmp' -delete",
+        r"find . -name '*.bak' -exec mv {} ~/Documents \;",
+        r"find . -name '*.tmp' -exec rm -rf {} \; -newer ~/Documents",
     ] {
         let verdict = home.verdict(script);
         assert!(
@@ -110,6 +132,16 @@ fn credentials_and_startup_files_always_ask() {
         "grep -r BEGIN ~",
         "cat ~/.ssh/*",
         "find ~ -name 'id_*' -exec cat {} +",
+        "date -f ~/.ssh/id_ed25519",
+        "du --files0-from home/.ssh/id_ed25519",
+        "xargs -a ~/.ssh/id_ed25519 echo",
+        "grep -fhome/.ssh/id_ed25519 notes",
+        "find -files0-from ~/.ssh/id_ed25519",
+        "grep --file=~/token notes",
+        "xargs -a~/token echo",
+        "cat '~'/token",
+        "cd ~ && grep -r -e BEGIN -e KEY",
+        "cd ~ && grep -r -A 1 BEGIN",
         "echo 'run' >> ~/.bashrc",
         "cp unit ~/.config/systemd/user/evil.service",
         "mv .zshrc ~",
@@ -132,10 +164,45 @@ fn credentials_and_startup_files_always_ask() {
         "grep -r x ~/Documents",
         "cat ~/Documents/notes.txt",
         "cat ~/spill/output.txt",
+        "grep --file=~/.ssh/id_ed25519 notes",
+        "date -f~/.ssh/id_ed25519",
     ] {
         let verdict = home.verdict(script);
         assert!(
             matches!(verdict, PathVerdict::Ordinary(_)),
+            "{script:?}: {verdict:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unvetted_command_handed_home_or_a_personal_folder_always_asks() {
+    let home = Home::new();
+    for script in [
+        "find ~ -delete",
+        "find ~/Documents -exec rm -rf {} +",
+        "shred -u ~/Documents/*",
+        "rsync -a --delete empty/ ~/Documents/",
+        "chown -R nobody ~",
+        "mv -t /tmp ~/Documents",
+        "python3 clean.py /",
+    ] {
+        let verdict = home.verdict(script);
+        assert!(
+            matches!(verdict, PathVerdict::Sensitive(_)),
+            "{script:?}: {verdict:?}"
+        );
+    }
+    for script in [
+        "make -C ~/Documents/project",
+        "rsync -a ~/Documents/project /tmp/copy",
+        "tar czf /tmp/notes.tgz ~/Documents/notes.txt",
+        "cargo build",
+        "rg TODO .",
+    ] {
+        let verdict = home.verdict(script);
+        assert!(
+            matches!(verdict, PathVerdict::Ordinary(Class::Unvetted { .. })),
             "{script:?}: {verdict:?}"
         );
     }

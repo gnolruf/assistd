@@ -28,6 +28,9 @@ pub(super) struct Word {
     pub dynamic_name: bool,
     /// Some part was quoted or escaped, so it is never a reserved word.
     pub quoted: bool,
+    /// It starts with a `~` bash leaves as written: one quoted, or with something quoted or
+    /// expanded before the first unquoted `/`.
+    pub literal_tilde: bool,
 }
 
 impl Word {
@@ -36,6 +39,21 @@ impl Word {
         Self {
             text: text.to_string(),
             ..Self::default()
+        }
+    }
+
+    /// The part of this word that `text` is, as a word of its own. Bash expands a `~` only at
+    /// the start of a word, so one that starts a later part stays as written.
+    pub(super) fn part(&self, text: &str) -> Self {
+        let is_whole = text.len() == self.text.len();
+        Self {
+            text: text.to_string(),
+            literal_tilde: if is_whole {
+                self.literal_tilde
+            } else {
+                text.starts_with('~')
+            },
+            ..self.clone()
         }
     }
 }
@@ -916,11 +934,24 @@ struct Span {
     closes_together: bool,
 }
 
+/// What bash makes of the `~` a word may start with.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum TildePrefix {
+    /// The word starts with no unquoted `~`, or quotes part of what follows it.
+    #[default]
+    Unexpanded,
+    /// Unquoted from the `~` on, and still before the first unquoted `/`.
+    Open,
+    /// Unquoted up to a `/`, so bash expands it.
+    Expanded,
+}
+
 #[derive(Default)]
 struct WordBuf {
     text: String,
     started: bool,
     quoted: bool,
+    tilde: TildePrefix,
     dynamic: bool,
     splits: bool,
     tail_dynamic: bool,
@@ -943,15 +974,29 @@ impl WordBuf {
         self.started = true;
         self.quoted = true;
         self.last_unquoted = None;
+        self.leave_tilde_unexpanded();
     }
 
     fn quoted_char(&mut self, c: char) {
         self.quoted = true;
+        self.leave_tilde_unexpanded();
         self.literal(c);
         self.last_unquoted = None;
     }
 
+    /// Something bash does not read as part of a tilde-prefix follows a still open one.
+    fn leave_tilde_unexpanded(&mut self) {
+        if self.tilde == TildePrefix::Open {
+            self.tilde = TildePrefix::Unexpanded;
+        }
+    }
+
     fn unquoted_char(&mut self, c: char) {
+        match (c, self.tilde) {
+            ('~', TildePrefix::Unexpanded) if !self.started => self.tilde = TildePrefix::Open,
+            ('/', TildePrefix::Open) => self.tilde = TildePrefix::Expanded,
+            _ => {}
+        }
         let closes_brace_expansion = c == '}' && self.brace.take() == Some(true);
         match c {
             '*' | '?' => self.glob(),
@@ -976,6 +1021,7 @@ impl WordBuf {
     }
 
     fn expansion(&mut self, raw: &str, splits: bool) {
+        self.leave_tilde_unexpanded();
         self.started = true;
         self.text.push_str(raw);
         self.dynamic = true;
@@ -1006,6 +1052,7 @@ impl WordBuf {
 
     fn finish(self) -> Option<Word> {
         self.started.then_some(Word {
+            literal_tilde: self.tilde == TildePrefix::Unexpanded && self.text.starts_with('~'),
             dynamic_name: self.splits || self.tail_dynamic,
             text: self.text,
             dynamic: self.dynamic,

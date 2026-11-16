@@ -74,7 +74,8 @@ pub enum PathVerdict {
     /// every mode; holds what and where, for the error line.
     Refused(String),
     /// An effect touches credentials, an owner-only file in `$HOME`, a startup file, a shell
-    /// profile or a directory on `PATH`, which always asks; holds what and where, for the prompt.
+    /// profile or a directory on `PATH`, or hands an unvetted command `$HOME` or a personal
+    /// folder, which always asks; holds what and where, for the prompt.
     Sensitive(String),
     /// Every effect is ordinary. Holds the script's class, made unvetted when a target cannot
     /// be resolved, or a copy or move carries a symlink or hidden entry no effect names.
@@ -212,7 +213,9 @@ impl PathGuards {
                 continue;
             };
             match self.guarded(effect.action, &path, effect.recursive) {
-                Some(guard) if guard.guarded.is_catastrophic() => {
+                Some(guard)
+                    if guard.guarded.is_catastrophic() && effect.action != Action::Unknown =>
+                {
                     return PathVerdict::Refused(describe(effect, &path, guard));
                 }
                 Some(guard) => {
@@ -330,14 +333,17 @@ impl PathGuards {
     /// The guard `action` on the canonical `path` falls under, if any.
     fn guarded(&self, action: Action, path: &Path, recursive: bool) -> Option<Guard> {
         let destroys = recursive && matches!(action, Action::Delete | Action::ChangeAttributes);
+        let irreplaceable = self
+            .irreplaceable
+            .iter()
+            .find(|(tree, _)| tree.starts_with(path))
+            .map(|(tree, guarded)| Guard::of(tree, *guarded, path));
+        if action == Action::Unknown {
+            return irreplaceable;
+        }
         if destroys {
-            if let Some(guard) = self
-                .irreplaceable
-                .iter()
-                .find(|(tree, _)| tree.starts_with(path))
-                .map(|(tree, guarded)| Guard::of(tree, *guarded, path))
-            {
-                return Some(guard);
+            if irreplaceable.is_some() {
+                return irreplaceable;
             }
             if path.join(".git").symlink_metadata().is_ok() {
                 return Some(Guard::of(path, Guarded::WorkTree, path));
@@ -567,6 +573,7 @@ fn describe(effect: &Effect, path: &Path, guard: Guard) -> String {
         Action::Write => "writes",
         Action::Delete => "deletes",
         Action::ChangeAttributes => "changes the mode of",
+        Action::Unknown => "hands a command that could not be vetted",
     };
     let holding = if guard.holds { "a tree holding " } else { "" };
     let class = if guard.guarded.is_catastrophic() {
