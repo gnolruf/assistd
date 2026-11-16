@@ -778,4 +778,1151 @@ async fn write_frame(
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use std::borrow::Cow;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use tokio::sync::oneshot;
+
+    use super::*;
+    use crate::{Config, PresenceManager, PresenceState, PresenceTarget};
+
+    fn test_state() -> Arc<AppState> {
+        state_with_backend(Arc::new(assistd_llm::EchoBackend::new()))
+    }
+
+    fn state_with_backend(backend: Arc<dyn assistd_llm::LlmBackend>) -> Arc<AppState> {
+        state_with(backend, Arc::new(assistd_tools::ToolRegistry::default()))
+    }
+
+    fn state_with(
+        backend: Arc<dyn assistd_llm::LlmBackend>,
+        tools: Arc<assistd_tools::ToolRegistry>,
+    ) -> Arc<AppState> {
+        Arc::new(AppState::new(
+            Config::default(),
+            backend,
+            PresenceManager::stub(PresenceTarget::Active),
+            tools,
+            assistd_voice::VoiceManager::new(true),
+        ))
+    }
+
+    /// A `serve_at` task on a socket in a fresh temp dir.
+    struct TestServer {
+        _dir: tempfile::TempDir,
+        path: PathBuf,
+        shutdown: oneshot::Sender<()>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl TestServer {
+        async fn start(state: Arc<AppState>) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("assistd.sock");
+            let (shutdown, rx) = oneshot::channel::<()>();
+            let server_path = path.clone();
+            let task = tokio::spawn(async move {
+                serve_at(&server_path, state, async {
+                    let _ = rx.await;
+                })
+                .await
+                .unwrap();
+            });
+            wait_for_listener(&path).await;
+            Self {
+                _dir: dir,
+                path,
+                shutdown,
+                task,
+            }
+        }
+
+        async fn stop(self) {
+            self.shutdown.send(()).unwrap();
+            self.task.await.unwrap();
+        }
+    }
+
+    async fn with_server<F, Fut, R>(state: Arc<AppState>, body: F) -> R
+    where
+        F: FnOnce(PathBuf) -> Fut,
+        Fut: Future<Output = R>,
+    {
+        let server = TestServer::start(state).await;
+        let out = body(server.path.clone()).await;
+        server.stop().await;
+        out
+    }
+
+    async fn wait_for_listener(path: &Path) {
+        for _ in 0..200 {
+            if UnixStream::connect(path).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("listener at {} did not become ready", path.display());
+    }
+
+    async fn read_event(reader: &mut BufReader<OwnedReadHalf>) -> Option<Event> {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).await.unwrap();
+        (n > 0).then(|| serde_json::from_str(line.trim()).unwrap())
+    }
+
+    async fn read_until_terminal(reader: &mut BufReader<OwnedReadHalf>) -> Vec<Event> {
+        let mut events = Vec::new();
+        while let Some(event) = read_event(reader).await {
+            let terminal = event.is_terminal();
+            events.push(event);
+            if terminal {
+                break;
+            }
+        }
+        events
+    }
+
+    /// Write `lines` as newline-delimited frames, optionally close the write
+    /// side, and return both halves.
+    async fn open_connection(
+        path: &Path,
+        lines: &[&str],
+        close_write: bool,
+    ) -> (OwnedWriteHalf, BufReader<OwnedReadHalf>) {
+        let stream = UnixStream::connect(path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        for line in lines {
+            write.write_all(line.as_bytes()).await.unwrap();
+            write.write_all(b"\n").await.unwrap();
+        }
+        if close_write {
+            write.shutdown().await.unwrap();
+        } else {
+            write.flush().await.unwrap();
+        }
+        let mut reader = BufReader::new(read);
+        read_hello(&mut reader).await;
+        (write, reader)
+    }
+
+    async fn read_hello(reader: &mut BufReader<OwnedReadHalf>) {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Hello>(line.trim()).unwrap(),
+            Hello::current(),
+            "the daemon's first line must be its hello"
+        );
+    }
+
+    async fn send_request_collect_events(path: &Path, body: &str) -> Vec<Event> {
+        let (_write, mut reader) = open_connection(path, &[body], true).await;
+        read_until_terminal(&mut reader).await
+    }
+
+    /// Wait until `n` subscribers are attached to the event bus, so events
+    /// published afterwards are guaranteed to reach them.
+    async fn wait_for_subscribers(state: &AppState, n: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.bus.sender().receiver_count() < n {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("subscriber never attached to the event bus");
+    }
+
+    fn delta(id: &str, text: &str) -> Event {
+        Event::new(id, EventBody::Delta { text: text.into() })
+    }
+
+    fn done(id: &str) -> Event {
+        Event::new(id, EventBody::Done)
+    }
+
+    #[tokio::test]
+    async fn echoes_query_text_as_delta_then_done() {
+        let server = TestServer::start(test_state()).await;
+        let events = send_request_collect_events(
+            &server.path,
+            r#"{"type":"query","id":"req-1","text":"ping"}"#,
+        )
+        .await;
+        assert_eq!(events, [delta("req-1", "ping"), done("req-1")]);
+
+        let path = server.path.clone();
+        server.stop().await;
+        assert!(!path.exists(), "socket file should be removed on shutdown");
+    }
+
+    #[tokio::test]
+    async fn concurrent_connections_sharing_a_request_id_stay_isolated() {
+        with_server(test_state(), |path| async move {
+            let mut handles = Vec::new();
+            for i in 0..16 {
+                let p = path.clone();
+                handles.push(tokio::spawn(async move {
+                    let text = format!("msg-{i}");
+                    let body = format!(r#"{{"type":"query","id":"shared","text":"{text}"}}"#);
+                    let events = send_request_collect_events(&p, &body).await;
+                    assert_eq!(events, [delta("shared", &text), done("shared")], "conn {i}");
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn first_frame_may_pass_the_control_cap_only_as_a_query() {
+        let past_control_cap = "a".repeat(usize::try_from(MAX_CONTROL_REQUEST_BYTES).unwrap());
+        with_server(test_state(), |path| async move {
+            let query = format!(r#"{{"text":"{past_control_cap}","type":"query","id":"q"}}"#);
+            let events = send_request_collect_events(&path, &query).await;
+            assert_eq!(events, [delta("q", &past_control_cap), done("q")]);
+
+            let save = format!(
+                r#"{{"id":"m","type":"memory_save","key":"k","value":"{past_control_cap}"}}"#
+            );
+            let events = send_request_collect_events(&path, &save).await;
+            assert_eq!(
+                events,
+                [Event::new(
+                    String::new(),
+                    EventBody::Error {
+                        message: format!(
+                            "only a query may exceed {MAX_CONTROL_REQUEST_BYTES} bytes"
+                        )
+                    }
+                )]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn frame_past_the_request_cap_is_rejected() {
+        let event = with_server(test_state(), |path| async move {
+            let stream = UnixStream::connect(&path).await.unwrap();
+            let (read, mut write) = stream.into_split();
+            write_past_cap(&mut write, MAX_REQUEST_BYTES).await;
+            let mut reader = BufReader::new(read);
+            read_hello(&mut reader).await;
+            read_event(&mut reader).await
+        })
+        .await;
+        assert_eq!(
+            event,
+            Some(Event::new(
+                String::new(),
+                EventBody::Error {
+                    message: format!("request exceeded {MAX_REQUEST_BYTES}-byte limit")
+                }
+            ))
+        );
+    }
+
+    async fn write_past_cap(write: &mut OwnedWriteHalf, cap: u64) {
+        let chunk = vec![b'a'; 1024 * 1024];
+        let mut remaining = usize::try_from(cap).expect("request cap fits usize") + 1;
+        while remaining > 0 {
+            let n = remaining.min(chunk.len());
+            if write.write_all(&chunk[..n]).await.is_err() {
+                break;
+            }
+            remaining -= n;
+        }
+        let _ = write.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn malformed_request_returns_error_event() {
+        with_server(test_state(), |path| async move {
+            let events = send_request_collect_events(&path, "not json").await;
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Event { id, body: EventBody::Error { message } }]
+                        if id.is_empty() && message.starts_with("invalid request: ")
+                ),
+                "{events:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn second_serve_refuses_to_clobber_live_socket() {
+        let server = TestServer::start(test_state()).await;
+
+        let err = serve_at(&server.path, test_state(), std::future::pending::<()>())
+            .await
+            .expect_err("second serve_at must fail while first is alive");
+        assert!(
+            matches!(&err, SocketError::AlreadyRunning { path } if *path == server.path),
+            "{err:?}"
+        );
+        assert!(
+            server.path.exists(),
+            "live socket must remain after a refused second-bind attempt"
+        );
+
+        let events =
+            send_request_collect_events(&server.path, r#"{"type":"query","id":"q","text":"ok"}"#)
+                .await;
+        assert_eq!(events.last(), Some(&done("q")));
+
+        server.stop().await;
+    }
+
+    #[test]
+    fn startup_lock_refuses_second_holder_until_first_drops() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("assistd.sock");
+        let lock_path = socket_path.with_extension("lock");
+
+        let first = StartupLock::acquire_at(&socket_path).unwrap();
+        let err = StartupLock::acquire_at(&socket_path).expect_err("second acquire must fail");
+        assert!(
+            matches!(&err, SocketError::AlreadyStarting { path } if *path == lock_path),
+            "{err:?}"
+        );
+
+        drop(first);
+        StartupLock::acquire_at(&socket_path).expect("lock must be free once the guard drops");
+    }
+
+    #[test]
+    fn startup_lock_creates_owner_only_dir_and_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("assistd-1000");
+        let socket_path = dir.join("assistd.sock");
+
+        let _lock = StartupLock::acquire_at(&socket_path).unwrap();
+
+        assert_eq!(mode_of(&dir), SOCKET_DIR_MODE);
+        assert_eq!(mode_of(&socket_path.with_extension("lock")), LOCK_FILE_MODE);
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        std::fs::symlink_metadata(path).unwrap().mode() & 0o777
+    }
+
+    #[tokio::test]
+    async fn socket_is_owner_only() {
+        let server = TestServer::start(test_state()).await;
+        assert_eq!(mode_of(&server.path), SOCKET_MODE);
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn creates_missing_socket_dir_owner_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("assistd-1000");
+        let path = dir.join("assistd.sock");
+        let server_path = path.clone();
+        let (shutdown, rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            serve_at(&server_path, test_state(), async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+        });
+        wait_for_listener(&path).await;
+
+        assert_eq!(mode_of(&dir), SOCKET_DIR_MODE);
+
+        shutdown.send(()).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn refuses_socket_dir_writable_by_others() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), Permissions::from_mode(0o777)).unwrap();
+
+        let err = serve_at(
+            &dir.path().join("assistd.sock"),
+            test_state(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .expect_err("a world-writable socket dir must be refused");
+        assert!(
+            matches!(err, SocketError::UnsafeSocketDir { problem, .. } if problem == "writable by other users"),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_socket_dir_that_is_a_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = serve_at(
+            &link.join("assistd.sock"),
+            test_state(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .expect_err("a symlinked socket dir must be refused");
+        assert!(
+            matches!(err, SocketError::UnsafeSocketDir { problem, .. } if problem == "not a directory"),
+            "{err:?}"
+        );
+    }
+
+    /// Backend that emits N deltas with a fixed pause between each, then
+    /// Done.
+    #[derive(Debug)]
+    struct SlowBackend {
+        deltas: usize,
+        pause: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl assistd_llm::TurnBackend for SlowBackend {
+        async fn push_user(
+            &self,
+            _text: String,
+            _attachments: Vec<assistd_tools::Attachment>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn push_tool_results(
+            &self,
+            _results: Vec<assistd_llm::ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn step(
+            &self,
+            _tools: Vec<serde_json::Value>,
+            tx: mpsc::Sender<assistd_llm::LlmEvent>,
+        ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
+            for i in 0..self.deltas {
+                let _ = tx
+                    .send(assistd_llm::LlmEvent::Delta {
+                        text: format!("d{i}"),
+                    })
+                    .await;
+                tokio::time::sleep(self.pause).await;
+            }
+            Ok(assistd_llm::StepOutcome::Final)
+        }
+
+        async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+    }
+
+    impl assistd_llm::LlmBackend for SlowBackend {}
+
+    /// Backend that emits a single delta then blocks indefinitely on an
+    /// un-awoken channel.
+    #[derive(Debug)]
+    struct StuckBackend;
+
+    #[async_trait::async_trait]
+    impl assistd_llm::TurnBackend for StuckBackend {
+        async fn push_user(
+            &self,
+            _text: String,
+            _attachments: Vec<assistd_tools::Attachment>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn push_tool_results(
+            &self,
+            _results: Vec<assistd_llm::ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn step(
+            &self,
+            _tools: Vec<serde_json::Value>,
+            tx: mpsc::Sender<assistd_llm::LlmEvent>,
+        ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
+            let _ = tx
+                .send(assistd_llm::LlmEvent::Delta {
+                    text: "stuck".into(),
+                })
+                .await;
+            std::future::pending::<()>().await;
+            Ok(assistd_llm::StepOutcome::Final)
+        }
+
+        async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+    }
+
+    impl assistd_llm::LlmBackend for StuckBackend {}
+
+    #[tokio::test]
+    async fn graceful_shutdown_waits_for_in_flight_stream() {
+        let state = state_with_backend(Arc::new(SlowBackend {
+            deltas: 3,
+            pause: Duration::from_millis(50),
+        }));
+        let server = TestServer::start(state).await;
+        let (_write, mut reader) = open_connection(
+            &server.path,
+            &[r#"{"type":"query","id":"s1","text":"go"}"#],
+            true,
+        )
+        .await;
+
+        let first = read_event(&mut reader).await.expect("first Delta");
+        assert_eq!(first, delta("s1", "d0"));
+
+        let stopping = tokio::spawn(server.stop());
+        let rest = read_until_terminal(&mut reader).await;
+        assert_eq!(rest, [delta("s1", "d1"), delta("s1", "d2"), done("s1")]);
+
+        stopping.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_aborts_after_grace_timeout() {
+        let state = state_with_backend(Arc::new(StuckBackend));
+        let server = TestServer::start(state).await;
+        let (_write, mut reader) = open_connection(
+            &server.path,
+            &[r#"{"type":"query","id":"s2","text":"hang"}"#],
+            true,
+        )
+        .await;
+        read_event(&mut reader)
+            .await
+            .expect("expected first Delta from StuckBackend");
+
+        tokio::time::pause();
+        tokio::time::timeout(Duration::from_secs(10), server.stop())
+            .await
+            .expect("server did not exit within 10s of shutdown");
+    }
+
+    /// Collect subscriber events until the stream goes quiet for `idle`.
+    /// Stops early past a cap so a feedback loop fails instead of hanging.
+    async fn drain_subscribe(reader: &mut BufReader<OwnedReadHalf>, idle: Duration) -> Vec<Event> {
+        const CAP: usize = 64;
+        let mut out = Vec::new();
+        while out.len() < CAP {
+            match tokio::time::timeout(idle, read_event(reader)).await {
+                Ok(Some(ev)) => out.push(ev),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn subscribe_receives_each_query_event_from_other_client_once() {
+        let state = test_state();
+        with_server(state.clone(), |path| async move {
+            let (_write_a, mut read_a) = open_connection(
+                &path,
+                &[r#"{"type":"subscribe","id":"sub-1","filter":{"kinds":[]}}"#],
+                false,
+            )
+            .await;
+            wait_for_subscribers(&state, 1).await;
+
+            let b_events =
+                send_request_collect_events(&path, r#"{"type":"query","id":"q-1","text":"hello"}"#)
+                    .await;
+            assert_eq!(b_events, [delta("q-1", "hello"), done("q-1")]);
+
+            let a_events = drain_subscribe(&mut read_a, Duration::from_millis(200)).await;
+            let count = |want: &Event| a_events.iter().filter(|e| *e == want).count();
+            assert_eq!(count(&delta("q-1", "hello")), 1, "{a_events:?}");
+            assert_eq!(count(&done("q-1")), 1, "{a_events:?}");
+            assert!(
+                a_events.contains(&Event::new(
+                    "q-1",
+                    EventBody::LastDelta {
+                        text: "hello".into()
+                    }
+                )),
+                "subscriber missed LastDelta: {a_events:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_filter_rejects_unmatched_kinds() {
+        let state = test_state();
+        with_server(state.clone(), |path| async move {
+            let (_write_a, mut read_a) = open_connection(
+                &path,
+                &[r#"{"type":"subscribe","id":"sub-2","filter":{"kinds":["presence"]}}"#],
+                false,
+            )
+            .await;
+            wait_for_subscribers(&state, 1).await;
+
+            send_request_collect_events(&path, r#"{"type":"query","id":"q-2","text":"hi"}"#).await;
+            send_request_collect_events(
+                &path,
+                r#"{"type":"set_presence","id":"sp-1","target":"sleeping"}"#,
+            )
+            .await;
+
+            let a_events = drain_subscribe(&mut read_a, Duration::from_millis(200)).await;
+            let presence = |id: &str, state| Event::new(id, EventBody::Presence { state });
+            assert_eq!(
+                a_events.first(),
+                Some(&presence("sub-2", PresenceState::Active)),
+                "a subscription opens with the current state: {a_events:?}"
+            );
+            assert!(
+                a_events[1..].contains(&presence("sub-2", PresenceState::Sleeping)),
+                "subscriber missed the presence change: {a_events:?}"
+            );
+            assert!(
+                a_events
+                    .iter()
+                    .all(|ev| matches!(&ev.body, EventBody::Presence { .. })),
+                "{a_events:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn client_sees_eof_promptly_after_terminal_event() {
+        with_server(test_state(), |path| async move {
+            let (_write, mut reader) = open_connection(
+                &path,
+                &[r#"{"type":"query","id":"eof-1","text":"ping"}"#],
+                true,
+            )
+            .await;
+            let events = read_until_terminal(&mut reader).await;
+            assert_eq!(events.last(), Some(&done("eof-1")));
+
+            let next = tokio::time::timeout(Duration::from_secs(1), read_event(&mut reader))
+                .await
+                .expect("connection stayed open after terminal event");
+            assert_eq!(next, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_idle_subscriber_without_waiting_out_grace() {
+        let state = test_state();
+        let server = TestServer::start(state.clone()).await;
+        let (_write, mut reader) = open_connection(
+            &server.path,
+            &[r#"{"type":"subscribe","id":"sub-drain","filter":{"kinds":[]}}"#],
+            false,
+        )
+        .await;
+        wait_for_subscribers(&state, 1).await;
+        assert!(matches!(
+            read_event(&mut reader).await,
+            Some(Event {
+                body: EventBody::TaskQueue { .. },
+                ..
+            })
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), server.stop())
+            .await
+            .expect("server held by idle subscriber past drain");
+
+        let greeting_then_eof = async { while read_event(&mut reader).await.is_some() {} };
+        tokio::time::timeout(Duration::from_secs(1), greeting_then_eof)
+            .await
+            .expect("subscriber not released on shutdown");
+    }
+
+    /// Backend whose first step asks for the `gated` tool and whose second
+    /// step ends the turn.
+    #[derive(Debug)]
+    struct GatedToolBackend {
+        stepped: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl assistd_llm::TurnBackend for GatedToolBackend {
+        async fn push_user(
+            &self,
+            _text: String,
+            _attachments: Vec<assistd_tools::Attachment>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn push_tool_results(
+            &self,
+            _results: Vec<assistd_llm::ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn step(
+            &self,
+            _tools: Vec<serde_json::Value>,
+            _tx: mpsc::Sender<assistd_llm::LlmEvent>,
+        ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
+            if self.stepped.swap(true, Ordering::SeqCst) {
+                return Ok(assistd_llm::StepOutcome::Final);
+            }
+            Ok(assistd_llm::StepOutcome::ToolCalls(vec![
+                assistd_llm::ToolCall {
+                    id: "call-1".into(),
+                    name: "gated".into(),
+                    arguments: serde_json::json!({}),
+                },
+            ]))
+        }
+
+        async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+    }
+
+    impl assistd_llm::LlmBackend for GatedToolBackend {}
+
+    /// Tool that runs the production IPC gate on a request the given modes may approve unasked,
+    /// and reports its verdict.
+    #[derive(Debug)]
+    struct GatedTool(assistd_tools::Unattended);
+
+    #[async_trait::async_trait]
+    impl assistd_tools::Tool for GatedTool {
+        fn name(&self) -> &'static str {
+            "gated"
+        }
+
+        fn description(&self) -> Cow<'_, str> {
+            "asks for confirmation".into()
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn invoke(
+            &self,
+            turn: &TurnContext,
+            _args: serde_json::Value,
+        ) -> Result<assistd_tools::ToolOutput, assistd_tools::ToolError> {
+            let approved = assistd_tools::ConfirmationGate::confirm(
+                &assistd_tools::IpcConfirmationGate,
+                turn,
+                assistd_tools::ConfirmationRequest {
+                    tool: "bash".into(),
+                    script: "rm -rf /tmp/x".into(),
+                    matched_pattern: "rm -rf".into(),
+                    always_allow: Vec::new(),
+                    risk: assistd_tools::Risk::Elevated,
+                    unattended: self.0.clone(),
+                    source: assistd_tools::ConfirmSource::Main,
+                },
+            )
+            .await;
+            let approved = approved != Approval::Deny;
+            Ok(assistd_tools::ToolOutput::text(
+                if approved { "approved" } else { "denied" },
+                Duration::ZERO,
+            ))
+        }
+    }
+
+    fn gated_tool_state() -> Arc<AppState> {
+        gated_tool_state_at(assistd_tools::Unattended::Never)
+    }
+
+    fn gated_tool_state_at(unattended: assistd_tools::Unattended) -> Arc<AppState> {
+        let mut tools = assistd_tools::ToolRegistry::new();
+        tools.register(GatedTool(unattended));
+        Arc::new(AppState::new(
+            Config::default(),
+            Arc::new(GatedToolBackend {
+                stepped: AtomicBool::new(false),
+            }),
+            PresenceManager::stub(PresenceTarget::Active),
+            Arc::new(tools),
+            assistd_voice::VoiceManager::new(true),
+        ))
+    }
+
+    fn tool_output(ev: &Event) -> Option<&str> {
+        match &ev.body {
+            EventBody::ToolResult { result, .. } => Some(result.output.as_str()),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dialog_client_answer_reaches_gate_in_spawned_agent_turn() {
+        with_server(gated_tool_state(), |path| async move {
+            let (mut write, mut reader) =
+                open_connection(&path, &[r#"{"type":"query","id":"q1","text":"go"}"#], false).await;
+
+            let mut outputs = Vec::new();
+            let run = async {
+                while let Some(ev) = read_event(&mut reader).await {
+                    if let Event { id, body: EventBody::ConfirmRequest { confirm_id, .. } } = &ev {
+                        assert_eq!(id, "q1");
+                        let answer = format!(
+                            "{{\"type\":\"confirm_response\",\"id\":\"cr\",\"confirm_id\":\"{confirm_id}\",\"allow\":true}}\n"
+                        );
+                        write.write_all(answer.as_bytes()).await.unwrap();
+                    }
+                    if let Some(out) = tool_output(&ev) {
+                        outputs.push(out.to_string());
+                    }
+                    if ev.is_terminal() {
+                        break;
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(10), run)
+                .await
+                .expect("turn must finish once the prompt is answered");
+            assert_eq!(outputs, ["approved"]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accept_edits_frame_approves_a_scoped_edit_without_a_prompt() {
+        with_server(
+            gated_tool_state_at(assistd_tools::Unattended::ScopedEdit),
+            |path| async move {
+                let (_write, mut reader) = open_connection(
+                    &path,
+                    &[
+                        r#"{"type":"query","id":"q1","text":"go"}"#,
+                        r#"{"type":"set_permission_mode","id":"m","mode":"accept_edits"}"#,
+                    ],
+                    false,
+                )
+                .await;
+                let events =
+                    tokio::time::timeout(Duration::from_secs(10), read_until_terminal(&mut reader))
+                        .await
+                        .expect("a routine command must not wait on a prompt");
+                assert!(
+                    !events
+                        .iter()
+                        .any(|ev| matches!(&ev.body, EventBody::ConfirmRequest { .. })),
+                    "{events:?}"
+                );
+                let outputs: Vec<&str> = events.iter().filter_map(tool_output).collect();
+                assert_eq!(outputs, ["approved"]);
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn one_shot_client_eof_denies_prompt_without_waiting() {
+        with_server(gated_tool_state(), |path| async move {
+            let (_write, mut reader) =
+                open_connection(&path, &[r#"{"type":"query","id":"q1","text":"go"}"#], true).await;
+            let events =
+                tokio::time::timeout(Duration::from_secs(10), read_until_terminal(&mut reader))
+                    .await
+                    .expect("a client that closed its write side must not park the turn");
+            let outputs: Vec<&str> = events.iter().filter_map(tool_output).collect();
+            assert_eq!(outputs, ["denied"]);
+        })
+        .await;
+    }
+
+    /// Backend that streams 1 KiB deltas until its channel closes.
+    #[derive(Debug)]
+    struct FloodBackend;
+
+    impl FloodBackend {
+        async fn flood(tx: &mpsc::Sender<assistd_llm::LlmEvent>) {
+            let text = "x".repeat(1024);
+            while tx
+                .send(assistd_llm::LlmEvent::Delta { text: text.clone() })
+                .await
+                .is_ok()
+            {}
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl assistd_llm::TurnBackend for FloodBackend {
+        async fn push_user(
+            &self,
+            _text: String,
+            _attachments: Vec<assistd_tools::Attachment>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn push_tool_results(
+            &self,
+            _results: Vec<assistd_llm::ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn step(
+            &self,
+            _tools: Vec<serde_json::Value>,
+            tx: mpsc::Sender<assistd_llm::LlmEvent>,
+        ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
+            Self::flood(&tx).await;
+            Ok(assistd_llm::StepOutcome::Final)
+        }
+
+        async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+    }
+
+    impl assistd_llm::LlmBackend for FloodBackend {}
+
+    /// Sends a query and returns the connection after its first event has
+    /// arrived, so the caller controls when the client goes away.
+    async fn open_query_and_read_first_event(
+        path: &Path,
+        id: &str,
+    ) -> (Event, BufReader<OwnedReadHalf>, OwnedWriteHalf) {
+        let body = format!(r#"{{"type":"query","id":"{id}","text":"go"}}"#);
+        let (write, mut reader) = open_connection(path, &[&body], false).await;
+        let event = read_event(&mut reader)
+            .await
+            .unwrap_or_else(|| panic!("expected a first event for {id}"));
+        (event, reader, write)
+    }
+
+    #[tokio::test]
+    async fn client_disconnect_mid_turn_releases_the_turn_lock() {
+        with_server(
+            state_with_backend(Arc::new(FloodBackend)),
+            |path| async move {
+                let (first, reader, write) = open_query_and_read_first_event(&path, "gone").await;
+                assert!(
+                    matches!(first.body, EventBody::Delta { .. }),
+                    "got {first:?}"
+                );
+                drop(reader);
+                drop(write);
+
+                let (next, _reader, _write) = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    open_query_and_read_first_event(&path, "after"),
+                )
+                .await
+                .expect("second query queued behind a turn whose client had disconnected");
+                assert!(matches!(next.body, EventBody::Delta { .. }), "got {next:?}");
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn client_closing_mid_stream_is_not_a_connection_error() {
+        let (server, client) = UnixStream::pair().unwrap();
+        let (client_read, mut client_write) = client.into_split();
+        client_write
+            .write_all(b"{\"type\":\"query\",\"id\":\"bye\",\"text\":\"go\"}\n")
+            .await
+            .unwrap();
+        let state = state_with_backend(Arc::new(FloodBackend));
+        let (_drain_tx, drain_rx) = watch::channel(false);
+        let large_frames = Arc::new(Semaphore::new(LARGE_FRAME_SLOTS));
+        let connection = tokio::spawn(handle_connection(server, state, large_frames, drain_rx));
+
+        let mut reader = BufReader::new(client_read);
+        read_hello(&mut reader).await;
+        assert!(read_event(&mut reader).await.is_some());
+        drop(reader);
+        drop(client_write);
+
+        tokio::time::timeout(Duration::from_secs(5), connection)
+            .await
+            .expect("connection outlived its client")
+            .unwrap()
+            .expect("a client hanging up mid-stream must end the connection cleanly");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn write_frame_times_out_when_the_client_stops_reading() {
+        let (server, _client_never_reads) = UnixStream::pair().unwrap();
+        let (_server_read, mut write_half) = server.into_split();
+        let event = Event::new(
+            "stalled",
+            EventBody::Delta {
+                text: "x".repeat(1024),
+            },
+        );
+
+        let err = tokio::time::timeout(EVENT_WRITE_TIMEOUT * 4, async {
+            loop {
+                if let Err(e) = write_frame(&mut write_half, &event).await {
+                    break e;
+                }
+            }
+        })
+        .await
+        .expect("write to a stalled client never failed");
+        assert!(matches!(err, SocketError::WriteTimeout(_)), "got {err:?}");
+    }
+
+    /// Calls `hang` on its first step and answers on the next.
+    #[derive(Debug, Default)]
+    struct HangingCallBackend {
+        called: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl assistd_llm::TurnBackend for HangingCallBackend {
+        async fn push_user(
+            &self,
+            _text: String,
+            _attachments: Vec<assistd_tools::Attachment>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn push_tool_results(
+            &self,
+            _results: Vec<assistd_llm::ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn step(
+            &self,
+            _tools: Vec<serde_json::Value>,
+            tx: mpsc::Sender<assistd_llm::LlmEvent>,
+        ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
+            if !self.called.swap(true, Ordering::SeqCst) {
+                return Ok(assistd_llm::StepOutcome::ToolCalls(vec![
+                    assistd_llm::ToolCall {
+                        id: "c1".into(),
+                        name: "hang".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                ]));
+            }
+            let _ = tx
+                .send(assistd_llm::LlmEvent::Delta {
+                    text: "done".into(),
+                })
+                .await;
+            Ok(assistd_llm::StepOutcome::Final)
+        }
+
+        async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+    }
+
+    impl assistd_llm::LlmBackend for HangingCallBackend {}
+
+    /// Never returns and emits nothing; `dropped` flips when the invocation
+    /// future is torn down.
+    #[derive(Debug)]
+    struct SilentHangingTool {
+        dropped: Arc<AtomicBool>,
+    }
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl assistd_tools::Tool for SilentHangingTool {
+        fn name(&self) -> &'static str {
+            "hang"
+        }
+        fn description(&self) -> Cow<'_, str> {
+            "never returns".into()
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn invoke(
+            &self,
+            _turn: &TurnContext,
+            _args: serde_json::Value,
+        ) -> Result<assistd_tools::ToolOutput, assistd_tools::ToolError> {
+            let _flag = DropFlag(self.dropped.clone());
+            std::future::pending::<()>().await;
+            unreachable!("hanging tool must never resolve")
+        }
+    }
+
+    #[tokio::test]
+    async fn client_hangup_during_a_silent_tool_call_cancels_the_turn() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut tools = assistd_tools::ToolRegistry::new();
+        tools.register(SilentHangingTool {
+            dropped: dropped.clone(),
+        });
+        let state = state_with(Arc::new(HangingCallBackend::default()), Arc::new(tools));
+        with_server(state, |path| async move {
+            let (write, mut reader) =
+                open_connection(&path, &[r#"{"type":"query","id":"h1","text":"go"}"#], true).await;
+            loop {
+                let event = read_event(&mut reader)
+                    .await
+                    .expect("connection closed before the tool call started");
+                if matches!(event.body, EventBody::ToolCall { .. }) {
+                    break;
+                }
+            }
+            drop(reader);
+            drop(write);
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !dropped.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("turn kept running its tool after the client hung up");
+        })
+        .await;
+    }
+}
