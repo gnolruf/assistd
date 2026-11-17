@@ -4,8 +4,9 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::probe::host_path;
 use super::scope::CommandScope;
-use super::{Profile, Protected, SandboxInfo, SandboxPrograms, SharedDirs, host_path};
+use super::{Profile, Protected, SandboxInfo, SandboxPrograms, SharedDirs};
 
 /// A host-profile bwrap sandbox over `shared` whose programs do not exist, so a command
 /// built from it fails to start on every machine.

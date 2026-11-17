@@ -1,35 +1,27 @@
 //! The per-result output budget every tool shares, and rendering a chain's [`CommandOutput`]
 //! within it: binary refused, long streams cut and spilled to a file, an `[exit:N | Mms]` footer.
 
-use std::cmp::Reverse;
 use std::env;
-use std::fs::{DirEntry, Metadata, OpenOptions};
-use std::io::{ErrorKind, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use assistd_config::ToolsOutputConfig;
 use assistd_ipc::Attachment;
 use assistd_utils::text::human_size;
 
+use self::spill::{prune_spills, write_overflow_file};
+use crate::binary::binary_label;
 use crate::command::CommandOutput;
-use crate::commands::cat::sniff_binary;
+
+mod spill;
+
+pub use spill::is_spill_file_name;
 
 /// Stem of the spill files `run` writes.
 const SPILL_STEM: &str = "cmd";
 
 const STDERR_PREFIX: &str = "[stderr] ";
-
-/// Spill files hold raw tool output, so only the daemon's user may read them.
-const OVERFLOW_FILE_MODE: u32 = 0o600;
-
-/// Most spill files kept in an overflow directory; older ones are deleted.
-const MAX_SPILL_FILES: usize = 64;
-
-/// Most spill bytes kept in an overflow directory; older files are deleted.
-const MAX_SPILL_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Limits and destinations for output rendering.
 #[derive(Debug, Clone)]
@@ -283,29 +275,6 @@ impl Truncation {
     }
 }
 
-/// An existing `<stem>-<n>.txt` spill file in an overflow directory.
-#[derive(Debug)]
-struct SpillFile {
-    path: PathBuf,
-    modified: SystemTime,
-    sequence: u64,
-    len: u64,
-}
-
-impl SpillFile {
-    /// `None` unless `entry` is a regular file named like a spill.
-    fn from_dir_entry(entry: &DirEntry) -> Option<Self> {
-        let sequence = spill_sequence(entry.file_name().to_str()?)?;
-        let metadata = entry.metadata().ok().filter(Metadata::is_file)?;
-        Some(Self {
-            path: entry.path(),
-            modified: metadata.modified().ok()?,
-            sequence,
-            len: metadata.len(),
-        })
-    }
-}
-
 /// A rendered chain result.
 #[derive(Debug, Clone)]
 pub struct PresentResult {
@@ -425,42 +394,6 @@ fn terminate_line(text: &mut String) {
     }
 }
 
-/// Why `raw` must not reach the model: a sniffed MIME type (or
-/// `application/octet-stream`) for NUL bytes, `invalid-utf8`, or
-/// `control-chars` above 10% controls. `None` for plain text.
-pub(crate) fn binary_label(raw: &[u8]) -> Option<String> {
-    if raw.is_empty() {
-        return None;
-    }
-
-    if raw.contains(&0u8) {
-        return Some(sniff_binary(raw).unwrap_or_else(|| "application/octet-stream".into()));
-    }
-
-    let Ok(s) = std::str::from_utf8(raw) else {
-        return Some("invalid-utf8".into());
-    };
-
-    let total = s.chars().count();
-    if total == 0 {
-        return None;
-    }
-    let controls = s.chars().filter(|c| is_suspicious_control(*c)).count();
-    if controls * 10 > total {
-        return Some("control-chars".into());
-    }
-
-    None
-}
-
-fn is_suspicious_control(c: char) -> bool {
-    let cp = c as u32;
-    if cp == 0x09 || cp == 0x0A || cp == 0x0D {
-        return false;
-    }
-    cp <= 0x1F || cp == 0x7F
-}
-
 /// Count lines, where an unterminated final line still counts.
 pub(crate) fn count_lines(s: &str) -> usize {
     if s.is_empty() {
@@ -500,78 +433,6 @@ pub(crate) fn truncate_lines_bytes(s: &str, max_lines: usize, max_bytes: usize) 
     s[..cut].to_string()
 }
 
-fn write_overflow_file(raw: &[u8], path: &Path) -> std::io::Result<PathBuf> {
-    OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(OVERFLOW_FILE_MODE)
-        .open(path)?
-        .write_all(raw)?;
-    Ok(path.to_path_buf())
-}
-
-/// Delete the oldest spill files in `dir` until it holds at most [`MAX_SPILL_FILES`] and
-/// [`MAX_SPILL_BYTES`], never touching `newest` (`newest_len` bytes); failures are only logged.
-fn prune_spills(dir: &Path, newest: &Path, newest_len: u64) {
-    let older = match older_spills(dir, newest) {
-        Ok(older) => older,
-        Err(e) => {
-            tracing::warn!("failed to list spill files in {}: {e}", dir.display());
-            return;
-        }
-    };
-    for spill in evicted_spills(older, newest_len) {
-        if let Err(e) = std::fs::remove_file(&spill.path)
-            && e.kind() != ErrorKind::NotFound
-        {
-            tracing::warn!("failed to delete spill file {}: {e}", spill.path.display());
-        }
-    }
-}
-
-/// The spill files in `dir` other than `newest`, newest first.
-fn older_spills(dir: &Path, newest: &Path) -> std::io::Result<Vec<SpillFile>> {
-    let mut spills: Vec<SpillFile> = std::fs::read_dir(dir)?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path() != newest)
-        .filter_map(|entry| SpillFile::from_dir_entry(&entry))
-        .collect();
-    spills.sort_unstable_by_key(|spill| Reverse((spill.modified, spill.sequence)));
-    Ok(spills)
-}
-
-/// The tail of newest-first `older` that does not fit in [`MAX_SPILL_FILES`] and
-/// [`MAX_SPILL_BYTES`] alongside the newest spill of `newest_len` bytes.
-fn evicted_spills(mut older: Vec<SpillFile>, newest_len: u64) -> Vec<SpillFile> {
-    let mut kept_bytes = newest_len;
-    let kept = older
-        .iter()
-        .take(MAX_SPILL_FILES - 1)
-        .take_while(|spill| {
-            kept_bytes = kept_bytes.saturating_add(spill.len);
-            kept_bytes <= MAX_SPILL_BYTES
-        })
-        .count();
-    older.split_off(kept)
-}
-
-/// Whether `file_name` names a spill file: `<stem>-<n>.txt` with a
-/// non-empty stem and `n` ASCII digits that fit in a `u64`.
-pub fn is_spill_file_name(file_name: &str) -> bool {
-    spill_sequence(file_name).is_some()
-}
-
-/// The counter `n` of a spill file named `<stem>-<n>.txt`.
-fn spill_sequence(file_name: &str) -> Option<u64> {
-    let (stem, sequence) = file_name.strip_suffix(".txt")?.rsplit_once('-')?;
-    let digits_only = sequence.bytes().all(|b| b.is_ascii_digit());
-    (!stem.is_empty() && digits_only)
-        .then_some(sequence)?
-        .parse()
-        .ok()
-}
-
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -580,6 +441,7 @@ mod tests {
 
     use assistd_ipc::ImageMime;
 
+    use super::spill::OVERFLOW_FILE_MODE;
     use super::*;
     use crate::fixtures::PNG_BYTES;
 
@@ -606,60 +468,6 @@ mod tests {
             &OutputCap::new(spec.clone()),
             Duration::from_millis(ms),
         )
-    }
-
-    fn sorted_file_names(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        names.sort();
-        names
-    }
-
-    /// A sparse file of `len` bytes, last modified `age_secs` ago.
-    fn write_file_aged(dir: &Path, name: &str, len: u64, age_secs: u64) -> PathBuf {
-        let path = dir.join(name);
-        let file = std::fs::File::create(&path).unwrap();
-        file.set_len(len).unwrap();
-        file.set_modified(SystemTime::now() - Duration::from_secs(age_secs))
-            .unwrap();
-        path
-    }
-
-    #[test]
-    fn binary_label_flags_bytes_the_model_should_not_see() {
-        let mut nul_text = b"plain text".to_vec();
-        nul_text.push(0);
-        let cases: [(&str, &[u8], Option<&str>); 8] = [
-            ("png magic", PNG_BYTES, Some("image/png")),
-            (
-                "NUL without magic",
-                &nul_text[..],
-                Some("application/octet-stream"),
-            ),
-            (
-                "invalid utf-8",
-                &[0xC3, 0x28, b' ', b'h', b'i'][..],
-                Some("invalid-utf8"),
-            ),
-            (
-                "15% controls",
-                b"abcdef\x01\x02\x03ghijklmnopq",
-                Some("control-chars"),
-            ),
-            (
-                "exactly 10% controls is still text",
-                b"abcdefgh\x01\x02ijklmnopqr",
-                None,
-            ),
-            ("tabs and newlines", b"a\tb\nc\td\ne\tf\n", None),
-            ("empty", b"", None),
-            ("multibyte utf-8", "héllo wörld ñ 日本語\n".as_bytes(), None),
-        ];
-        for (case, bytes, expected) in cases {
-            assert_eq!(binary_label(bytes).as_deref(), expected, "{case}");
-        }
     }
 
     #[test]
@@ -864,79 +672,5 @@ mod tests {
         );
         assert_eq!(r.stdout_raw, "ok\n");
         assert_eq!(r.stderr_raw, head);
-    }
-
-    #[test]
-    fn spilling_past_the_file_cap_keeps_only_the_newest_spills() {
-        let dir = tempdir().unwrap();
-        let spec = PresentSpec {
-            max_lines: 1,
-            ..spec_in(dir.path())
-        };
-        let cap = OutputCap::new(spec);
-        let total = MAX_SPILL_FILES + 5;
-
-        for _ in 0..total {
-            let cut = cap.cap("cmd", "a\nb\n".into());
-            assert!(cut.overflow_file.as_deref().is_some_and(Path::exists));
-        }
-
-        let mut expected: Vec<String> = (6..=total).map(|n| format!("cmd-{n}.txt")).collect();
-        expected.sort();
-        assert_eq!(sorted_file_names(dir.path()), expected);
-    }
-
-    #[test]
-    fn is_spill_file_name_accepts_only_stem_dash_counter_dot_txt() {
-        let cases = [
-            ("cmd-1.txt", true),
-            ("mcp-files-12.txt", true),
-            ("cmd-007.txt", true),
-            ("cmd-18446744073709551615.txt", true),
-            ("cmd-18446744073709551616.txt", false),
-            ("notes.txt", false),
-            ("cmd1.txt", false),
-            ("cmd-.txt", false),
-            ("-3.txt", false),
-            ("cmd-+1.txt", false),
-            ("cmd-x.txt", false),
-            ("cmd-1.md", false),
-            ("cmd-1.txt.bak", false),
-        ];
-        for (name, expected) in cases {
-            assert_eq!(is_spill_file_name(name), expected, "{name}");
-        }
-    }
-
-    /// Age decides across stems whose counters are unrelated, and files not
-    /// named like spills are never touched.
-    #[test]
-    fn prune_spills_evicts_the_oldest_until_under_the_byte_cap() {
-        let dir = tempdir().unwrap();
-        let third_of_cap = MAX_SPILL_BYTES / 3;
-        write_file_aged(dir.path(), "notes.txt", 5 * third_of_cap, 50);
-        write_file_aged(dir.path(), "mcp-web-9.txt", third_of_cap, 40);
-        write_file_aged(dir.path(), "cmd-1.txt", third_of_cap, 30);
-        write_file_aged(dir.path(), "mcp-web-10.txt", third_of_cap, 20);
-        let newest = write_file_aged(dir.path(), "cmd-2.txt", third_of_cap, 0);
-
-        prune_spills(dir.path(), &newest, third_of_cap);
-
-        assert_eq!(
-            sorted_file_names(dir.path()),
-            ["cmd-1.txt", "cmd-2.txt", "mcp-web-10.txt", "notes.txt"]
-        );
-    }
-
-    #[test]
-    fn prune_spills_keeps_the_new_spill_even_when_it_alone_exceeds_the_caps() {
-        let dir = tempdir().unwrap();
-        let over_cap = MAX_SPILL_BYTES + 1;
-        write_file_aged(dir.path(), "cmd-1.txt", 10, 0);
-        let newest = write_file_aged(dir.path(), "cmd-2.txt", over_cap, 60);
-
-        prune_spills(dir.path(), &newest, over_cap);
-
-        assert_eq!(sorted_file_names(dir.path()), ["cmd-2.txt"]);
     }
 }

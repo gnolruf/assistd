@@ -2,7 +2,8 @@
 //! (`{}` after `find -exec`, `xargs`'s replace string), and the file `xargs` reads items from.
 
 use super::options::{self, Flag};
-use super::{FEEDS_ARGUMENTS, INPUT_PLACEHOLDER, per_item_runner, wrapper_named};
+use super::wrappers::{per_item_runner, wrapper_named};
+use super::{FEEDS_ARGUMENTS, INPUT_PLACEHOLDER};
 use crate::policy::shell::Word;
 
 /// The `xargs` options that set the replace string.

@@ -124,15 +124,15 @@ pub(crate) async fn run_script(
     policy
         .authorize(turn, tool, "command", &script, review)
         .await?;
-    let cmd = policy
+    let sandboxed = policy
         .sandbox
         .command("bash", vec!["-c".to_string(), script.clone()], home)
         .await
         .map_err(|error| spawn_failed(&error))?;
-    let private_dirs = display_list(&policy.sandbox.private_dirs_named(&cmd, &script));
+    let private_dirs = display_list(&sandboxed.private_dirs_named(&script));
     let run = supervise(
         tool,
-        cmd,
+        sandboxed.command,
         policy.sandbox.confined_spawner(),
         stdin,
         policy.cfg.timeout,

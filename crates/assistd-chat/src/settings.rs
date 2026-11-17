@@ -14,7 +14,8 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use super::input::paste_as_keys;
-use super::{TerminalGuard, TerminalInput, shutdown_signal};
+use super::shutdown_signal;
+use super::terminal::{TerminalGuard, TerminalInput};
 
 mod catalog;
 mod color_picker;

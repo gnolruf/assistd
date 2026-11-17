@@ -1,8 +1,8 @@
 //! Text bash evaluates at run time as arithmetic, a variable name or a
 //! prompt string, where a subscript in a value runs command substitutions.
 
-use super::changed_in;
 use super::options::{self, Flag, OptionSpec, Walked};
+use super::variables::changed_in;
 use crate::policy::shell::{self, Script, Word};
 
 /// Characters of an arithmetic expression other than numbers.

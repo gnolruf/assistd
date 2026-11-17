@@ -2,8 +2,8 @@
 //! Each reports a failure as [`ChatEvent::WireError`] before its terminal event.
 
 use assistd_ipc::{
-    Attachment, EventBody, ImageAttachment, IpcClient, IpcClientError, PermissionMode, PlanMode,
-    Request, RequestBody,
+    Attachment, Event, EventBody, ImageAttachment, IpcClient, IpcClientError, PermissionMode,
+    PlanMode, Request, RequestBody,
 };
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -123,6 +123,15 @@ async fn forward_capabilities(
     ipc: &IpcClient,
     chat_tx: &mpsc::Sender<ChatEvent>,
 ) -> Result<(), IpcClientError> {
+    if let Some(event) = request_capabilities(ipc).await? {
+        let stream = WireStream::Status;
+        let _ = chat_tx.send(ChatEvent::Wire { stream, event }).await;
+    }
+    Ok(())
+}
+
+/// The `Capabilities` event of a `GetCapabilities` reply, `None` when the daemon sent none.
+pub(crate) async fn request_capabilities(ipc: &IpcClient) -> Result<Option<Event>, IpcClientError> {
     let req = Request::new(Uuid::new_v4().to_string(), RequestBody::GetCapabilities);
     let mut capabilities = None;
     ipc.request(req, |event| {
@@ -132,11 +141,7 @@ async fn forward_capabilities(
         Ok::<(), IpcClientError>(())
     })
     .await?;
-    if let Some(event) = capabilities {
-        let stream = WireStream::Status;
-        let _ = chat_tx.send(ChatEvent::Wire { stream, event }).await;
-    }
-    Ok(())
+    Ok(capabilities)
 }
 
 /// Forward the dialog's events to the reducer and `writer_rx`'s requests

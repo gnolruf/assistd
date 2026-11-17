@@ -1,12 +1,10 @@
 //! `assistd chat`: a terminal window onto the running daemon, which owns every service.
 //! One chat may be open per user, since every chat drives the daemon's one session.
 
-use std::fs::{DirBuilder, File, Permissions, TryLockError};
+use std::fs::{File, TryLockError};
 use std::future;
-use std::io::{self, Write};
+use std::io;
 use std::ops::ControlFlow;
-use std::os::fd::{AsFd, OwnedFd};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,38 +12,37 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use assistd_config::{Config, ConfigIssue};
 use assistd_ipc::socket::open_private_lock_file;
-use assistd_ipc::{
-    EventBody, EventKind, IpcClient, IpcClientError, Request, RequestBody, SubscribeFilter,
-};
+use assistd_ipc::{Event, EventBody, IpcClient, IpcClientError, Request, RequestBody};
 use clap::Args;
-use crossterm::event::{self, Event as TermEvent, EventStream, MouseEventKind};
-use crossterm::{cursor, execute, queue, style, terminal};
+use crossterm::event::{Event as TermEvent, EventStream, MouseEventKind};
 use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui_image::picker::{Picker, ProtocolType};
-use rustix::fs::{Mode, OFlags};
 use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::info;
-use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{EnvFilter, fmt};
 use uuid::Uuid;
 
-use self::app::{App, ChatEvent};
+use self::app::{App, ChatEvent, request_capabilities};
+use self::bus::{BusFollower, follow_bus};
+use self::logging::{StderrRedirect, init_file_tracing};
+use self::terminal::{TerminalGuard, TerminalInput, probe_graphics, sync_window_title};
 use self::theme::Theme;
 
 mod app;
+mod bus;
 mod focus;
 mod input;
+mod logging;
 mod markdown;
 mod output;
 mod selection;
 pub mod settings;
 mod tasks;
+mod terminal;
 mod text;
 mod text_editor;
 mod theme;
@@ -59,15 +56,7 @@ const GLYPH_INTERVAL: Duration = Duration::from_millis(150);
 const SCENE_INTERVAL: Duration = Duration::from_millis(30);
 /// Shortest time between two frames, so a burst of events costs one draw.
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
-const BUS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const INSTANCE_LOCK_FILE: &str = "chat.lock";
-/// Owner-only modes for the log directory and the stderr log.
-const LOG_DIR_MODE: u32 = 0o700;
-const LOG_FILE_MODE: u32 = 0o600;
-const WINDOW_TITLE: &str = "assistd";
-/// xterm window-ops sequences that save and restore the terminal's title.
-const PUSH_WINDOW_TITLE: &str = "\x1b[22;0t";
-const POP_WINDOW_TITLE: &str = "\x1b[23;0t";
 
 #[derive(Debug, Args)]
 pub struct ChatArgs {
@@ -121,107 +110,6 @@ impl InstanceLock {
                 Err(e).with_context(|| format!("locking {}", lock_path.display()))
             }
         }
-    }
-}
-
-/// Which input the terminal reports under a [`TerminalGuard`].
-#[derive(Clone, Copy)]
-enum TerminalInput {
-    /// Keys and pastes; the mouse stays with the terminal, which keeps its own text selection.
-    Keyboard,
-    /// Keys, pastes, mouse events and focus changes.
-    KeyboardMouseFocus,
-}
-
-/// Restores the terminal on drop.
-struct TerminalGuard {
-    input: TerminalInput,
-}
-
-impl TerminalGuard {
-    /// Enter raw mode and the alternate screen with modifier-aware key reports
-    /// and bracketed paste, saving the window title, and install a panic hook that restores the
-    /// terminal before the previous hook runs.
-    fn enter(input: TerminalInput) -> Result<Self> {
-        terminal::enable_raw_mode().context("enable_raw_mode")?;
-        if let Err(e) = Self::enable_reports(input) {
-            let _ = terminal::disable_raw_mode();
-            return Err(e).context("EnterAlternateScreen");
-        }
-        let previous_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let _ = Self::cleanup(input);
-            previous_hook(info);
-        }));
-        Ok(Self { input })
-    }
-
-    fn enable_reports(input: TerminalInput) -> io::Result<()> {
-        let mut stdout = io::stdout();
-        queue!(
-            stdout,
-            terminal::EnterAlternateScreen,
-            style::Print(PUSH_WINDOW_TITLE),
-            event::EnableBracketedPaste,
-            event::PushKeyboardEnhancementFlags(
-                event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-            )
-        )?;
-        if let TerminalInput::KeyboardMouseFocus = input {
-            queue!(stdout, event::EnableMouseCapture, event::EnableFocusChange)?;
-        }
-        stdout.flush()
-    }
-
-    fn cleanup(input: TerminalInput) -> io::Result<()> {
-        terminal::disable_raw_mode()?;
-        let mut stdout = io::stdout();
-        if let TerminalInput::KeyboardMouseFocus = input {
-            queue!(
-                stdout,
-                event::DisableFocusChange,
-                event::DisableMouseCapture
-            )?;
-        }
-        queue!(
-            stdout,
-            event::PopKeyboardEnhancementFlags,
-            event::DisableBracketedPaste,
-            style::Print(POP_WINDOW_TITLE),
-            terminal::LeaveAlternateScreen,
-            cursor::Show,
-        )?;
-        stdout.flush()
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = Self::cleanup(self.input);
-    }
-}
-
-/// Points fd 2 at a log file, restoring the original stderr on drop so
-/// errors returned after the TUI exits still reach the terminal.
-struct StderrRedirect {
-    original: OwnedFd,
-}
-
-impl StderrRedirect {
-    fn to_log() -> Result<Self> {
-        let path = log_dir()?.join("chat-stderr.log");
-        let file = open_private_log(&path)
-            .with_context(|| format!("opening stderr log {}", path.display()))?;
-        let original = rustix::io::dup(io::stderr().as_fd()).context("dup stderr")?;
-        rustix::stdio::dup2_stderr(&file)
-            .with_context(|| format!("dup2 stderr → {}", path.display()))?;
-        Ok(Self { original })
-    }
-}
-
-impl Drop for StderrRedirect {
-    fn drop(&mut self) {
-        let _ = rustix::stdio::dup2_stderr(&self.original);
     }
 }
 
@@ -418,55 +306,6 @@ async fn run_tui(ctx: TuiContext, background: &mut JoinSet<()>) -> Result<()> {
     Ok(())
 }
 
-/// Retitle the terminal window after the open session when its title
-/// differs from `shown`, the title last set. Control characters are dropped
-/// so a model-written title cannot end the escape sequence early.
-fn sync_window_title(shown: &mut String, session_title: Option<&str>) -> io::Result<()> {
-    let wanted = session_title.map_or_else(
-        || WINDOW_TITLE.to_string(),
-        |title| {
-            let printable: String = title.chars().filter(|c| !c.is_control()).collect();
-            format!("{WINDOW_TITLE} — {printable}")
-        },
-    );
-    if *shown != wanted {
-        execute!(io::stdout(), terminal::SetTitle(&wanted))?;
-        *shown = wanted;
-    }
-    Ok(())
-}
-
-/// A picker for terminals that can draw images inline; `None` means
-/// `/attach` shows filenames only.
-fn probe_graphics() -> Option<Picker> {
-    match Picker::from_query_stdio() {
-        Ok(p)
-            if matches!(
-                p.protocol_type(),
-                ProtocolType::Kitty | ProtocolType::Sixel | ProtocolType::Iterm2
-            ) =>
-        {
-            info!(
-                "terminal graphics: {:?} (font_size {:?})",
-                p.protocol_type(),
-                p.font_size()
-            );
-            Some(p)
-        }
-        Ok(p) => {
-            info!(
-                "terminal graphics: {:?} → /attach will display filenames only",
-                p.protocol_type()
-            );
-            None
-        }
-        Err(e) => {
-            info!("terminal graphics probe failed ({e}); /attach will display filenames only");
-            None
-        }
-    }
-}
-
 /// Whether the chat acts on `ev`. Mouse capture also reports pointer motion, clicks and
 /// drags, which nothing reads.
 fn is_acted_on(ev: &io::Result<TermEvent>) -> bool {
@@ -521,109 +360,24 @@ async fn get_mcp_unavailable(ipc: &IpcClient) -> Result<Vec<(String, String)>> {
 }
 
 async fn get_capabilities(ipc: &IpcClient) -> Result<StartupCapabilities, IpcClientError> {
-    let req = Request::new(Uuid::new_v4().to_string(), RequestBody::GetCapabilities);
-    let mut capabilities = StartupCapabilities::default();
-    ipc.request(req, |event| {
-        if let EventBody::Capabilities {
-            vision,
-            model_name,
-            auto_mode,
-        } = &event.body
-        {
-            capabilities = StartupCapabilities {
-                vision_enabled: *vision,
-                model_name: model_name.clone(),
-                auto_mode: *auto_mode,
-                ..StartupCapabilities::default()
-            };
-        }
-        Ok::<(), IpcClientError>(())
-    })
-    .await?;
-    Ok(capabilities)
-}
-
-/// What the bus subscription task reports to.
-struct BusFollower {
-    ipc: Arc<IpcClient>,
-    chat_tx: mpsc::Sender<ChatEvent>,
-    /// Notified on every successful subscribe.
-    attached: Arc<Notify>,
-}
-
-/// Follow the daemon's broadcast bus for the daemon's state, session titles and turns this
-/// chat did not start (push-to-talk, continuous listening, other clients).
-/// Reconnects on a fixed delay, reporting the loss and the reconnect to the app;
-/// `start_lost` reports the first subscribe as a reconnect too. Returns when `shutdown` flips.
-async fn follow_bus(follower: BusFollower, mut shutdown: watch::Receiver<bool>, start_lost: bool) {
-    let mut lost = start_lost;
-    loop {
-        tokio::select! {
-            _ = shutdown.changed() => break,
-            () = pump_bus(&follower, &mut lost) => {
-                tokio::select! {
-                    _ = shutdown.changed() => break,
-                    () = tokio::time::sleep(BUS_RECONNECT_DELAY) => {}
-                }
-            }
-        }
-    }
-}
-
-/// Forward bus events until the subscription ends. `lost` says a previous
-/// subscription ended, so a successful subscribe sends `BusRestored`.
-async fn pump_bus(follower: &BusFollower, lost: &mut bool) {
-    let BusFollower {
-        ipc,
-        chat_tx,
-        attached,
-    } = follower;
-    let Some(mut stream) = subscribe_bus(ipc).await else {
-        return;
-    };
-    attached.notify_one();
-    if std::mem::take(lost) && chat_tx.send(ChatEvent::BusRestored).await.is_err() {
-        return;
-    }
-    while let Ok(Some(ev)) = stream.next_event().await {
-        if chat_tx.send(ChatEvent::Bus(ev)).await.is_err() {
-            return;
-        }
-    }
-    *lost = true;
-    let _ = chat_tx.send(ChatEvent::BusLost).await;
-}
-
-async fn subscribe_bus(ipc: &IpcClient) -> Option<assistd_ipc::EventStream> {
-    let req = Request::new(
-        Uuid::new_v4().to_string(),
-        RequestBody::Subscribe {
-            filter: SubscribeFilter {
-                kinds: vec![
-                    EventKind::SessionTitle,
-                    EventKind::Transcription,
-                    EventKind::Presence,
-                    EventKind::VoiceState,
-                    EventKind::ListenState,
-                    EventKind::WakeWordDetected,
-                    EventKind::Delta,
-                    EventKind::ReasoningDelta,
-                    EventKind::ToolCall,
-                    EventKind::ToolResult,
-                    EventKind::Relay,
-                    EventKind::ContextSize,
-                    EventKind::TaskQueue,
-                    EventKind::Readiness,
-                    EventKind::Done,
-                    EventKind::Error,
-                ],
+    let Some(Event {
+        body:
+            EventBody::Capabilities {
+                vision,
+                model_name,
+                auto_mode,
             },
-        },
-    );
-    ipc.one_shot(req)
-        .await
-        .inspect_err(|e| tracing::debug!("bus subscribe failed: {e}"))
-        .ok()
+        ..
+    }) = request_capabilities(ipc).await?
+    else {
+        return Ok(StartupCapabilities::default());
+    };
+    Ok(StartupCapabilities {
+        vision_enabled: vision,
+        model_name,
+        auto_mode,
+        ..StartupCapabilities::default()
+    })
 }
 
 /// Install the SIGINT and SIGTERM handlers; the returned future resolves on the first of
@@ -637,59 +391,6 @@ fn shutdown_signal() -> io::Result<impl Future<Output = ()>> {
             _ = terminate.recv() => info!("received SIGTERM"),
         }
     })
-}
-
-/// The owner-only chat log directory under the XDG state dir, else the
-/// runtime dir. Fails when neither is known or the directory is not a real
-/// directory owned by this user.
-fn log_dir() -> Result<PathBuf> {
-    let dir = dirs::state_dir()
-        .or_else(dirs::runtime_dir)
-        .context("no XDG state or runtime directory for chat logs")?
-        .join("assistd");
-    DirBuilder::new()
-        .recursive(true)
-        .mode(LOG_DIR_MODE)
-        .create(&dir)
-        .with_context(|| format!("creating log dir {}", dir.display()))?;
-    restrict_log_dir(&dir).with_context(|| format!("securing log dir {}", dir.display()))?;
-    Ok(dir)
-}
-
-fn restrict_log_dir(dir: &Path) -> Result<()> {
-    let metadata = std::fs::symlink_metadata(dir)?;
-    anyhow::ensure!(metadata.is_dir(), "not a directory");
-    anyhow::ensure!(
-        metadata.uid() == rustix::process::geteuid().as_raw(),
-        "owned by another user"
-    );
-    if metadata.mode() & 0o077 != 0 {
-        std::fs::set_permissions(dir, Permissions::from_mode(LOG_DIR_MODE))?;
-    }
-    Ok(())
-}
-
-fn open_private_log(path: &Path) -> io::Result<OwnedFd> {
-    let flags =
-        OFlags::WRONLY | OFlags::CREATE | OFlags::APPEND | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let fd = rustix::fs::open(path, flags, Mode::from_raw_mode(LOG_FILE_MODE))?;
-    rustix::fs::fchmod(&fd, Mode::from_raw_mode(LOG_FILE_MODE))?;
-    Ok(fd)
-}
-
-fn init_file_tracing() -> Result<WorkerGuard> {
-    let file_appender = tracing_appender::rolling::daily(log_dir()?, "chat.log");
-    let (writer, guard) = tracing_appender::non_blocking(file_appender);
-
-    fmt()
-        .with_writer(writer)
-        .with_ansi(false)
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
-    Ok(guard)
 }
 
 #[cfg(test)]

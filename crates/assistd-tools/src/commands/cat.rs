@@ -5,14 +5,12 @@ use std::sync::Arc;
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
+use crate::binary::{SNIFF_LEN, sniff_binary};
 use crate::chain::OUTPUT_MAX;
 use crate::chain::Word;
 use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::commands::{read_regular_file, read_regular_head};
 use crate::policy::{ConfirmationGate, FileScope, ReadPolicy, SandboxInfo};
-
-/// How much of a file's head [`sniff_binary`] looks at for a NUL byte.
-pub(crate) const SNIFF_LEN: usize = 8192;
 
 /// `cat [-bn] [FILE]...`: concatenate files, or echo stdin if none are
 /// given. Binary files are rejected so their bytes stay out of the context,
@@ -162,21 +160,6 @@ fn parse_flags(argv: &[Word]) -> Result<(Flags, Vec<&Word>), String> {
         }
     }
     Ok((flags, files))
-}
-
-/// `Some(mime)` if the bytes look binary: a recognised non-text magic
-/// number, or a NUL byte in the first 8 KB (GNU grep's heuristic).
-pub(crate) fn sniff_binary(bytes: &[u8]) -> Option<String> {
-    if let Some(t) = infer::get(bytes) {
-        let mime = t.mime_type();
-        if !mime.starts_with("text/") {
-            return Some(mime.to_string());
-        }
-    }
-    if bytes[..bytes.len().min(SNIFF_LEN)].contains(&0u8) {
-        return Some("application/octet-stream".to_string());
-    }
-    None
 }
 
 fn describe(head: &[u8], size: u64, path: Option<&str>) -> Vec<u8> {
