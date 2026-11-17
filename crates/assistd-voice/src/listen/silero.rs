@@ -26,7 +26,7 @@ pub struct SileroVad {
 }
 
 impl SileroVad {
-    /// Load `config.vad_model`, downloading it first if it is not cached.
+    /// Load the model, downloading it first if it is not cached.
     pub async fn load(config: &TranscriptionConfig) -> Result<Self, TranscriptionError> {
         let model = ensure_model(config).await?;
         let detector =

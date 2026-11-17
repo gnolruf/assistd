@@ -32,9 +32,8 @@ it shows the normal icon.
 
 If `listen-toggle` says listening is disabled in config, both `enabled`
 keys above must be `true`. Otherwise the daemon log says why listening
-is unavailable: the Silero VAD model (`voice.transcription.vad_model`)
-or the keyword model could not be downloaded or read, or the keyword
-model cannot spell the phrase.
+is unavailable: the Silero VAD model or the keyword model could not be
+downloaded or read, or the keyword model cannot spell the phrase.
 
 ### How it works
 

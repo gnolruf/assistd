@@ -13,12 +13,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use thiserror::Error;
 use url::{Host, Url};
 
-use crate::defaults::{DEFAULT_MCP_ENABLED, DEFAULT_MCP_REQUEST_TIMEOUT_SECS};
+use crate::defaults::nz64;
 use crate::errors::McpServerNameError;
 use crate::settings::{DescribeSettings, describe_fields};
 
 /// Model Context Protocol client settings.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct McpConfig {
     /// When `false`, no server in `servers` is connected.
@@ -30,15 +30,6 @@ impl DescribeSettings for McpConfig {
     describe_fields! {
         enabled => ("enabled", "Connects the MCP servers listed below"),
         servers => ("servers", "MCP servers to run or reach by URL; edit in config.toml"),
-    }
-}
-
-impl Default for McpConfig {
-    fn default() -> Self {
-        Self {
-            enabled: DEFAULT_MCP_ENABLED,
-            servers: Vec::new(),
-        }
     }
 }
 
@@ -498,7 +489,7 @@ fn is_loopback_host(host: &Host<&str>) -> bool {
 }
 
 fn default_request_timeout_secs() -> NonZeroU64 {
-    DEFAULT_MCP_REQUEST_TIMEOUT_SECS
+    nz64(30)
 }
 
 #[cfg(test)]

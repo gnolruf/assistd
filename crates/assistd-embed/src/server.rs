@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use assistd_config::EmbeddingConfig;
+use assistd_config::{EmbeddingConfig, NonBlankString};
 use assistd_utils::child_server::{ApiKey, ChildServerSpec, remove_llama_env};
 use tokio::process::Command;
 
@@ -12,13 +12,19 @@ use tokio::process::Command;
 #[derive(Debug)]
 pub struct EmbedServerSpec {
     cfg: EmbeddingConfig,
+    server_binary: NonBlankString,
     api_key: ApiKey,
 }
 
 impl EmbedServerSpec {
-    /// A spec whose server accepts only requests bearing `api_key`.
-    pub fn new(cfg: EmbeddingConfig, api_key: ApiKey) -> Self {
-        Self { cfg, api_key }
+    /// A spec that runs `server_binary` as a server accepting only requests
+    /// bearing `api_key`.
+    pub fn new(cfg: EmbeddingConfig, server_binary: NonBlankString, api_key: ApiKey) -> Self {
+        Self {
+            cfg,
+            server_binary,
+            api_key,
+        }
     }
 }
 
@@ -28,7 +34,7 @@ impl ChildServerSpec for EmbedServerSpec {
     }
 
     fn command(&self) -> Command {
-        let mut cmd = Command::new(self.cfg.server_binary.as_str());
+        let mut cmd = Command::new(self.server_binary.as_str());
         cmd.args(self.cfg.custom_args.as_slice());
         push_managed_args(&mut cmd, &self.cfg, &self.api_key);
         remove_llama_env(&mut cmd);
@@ -39,7 +45,7 @@ impl ChildServerSpec for EmbedServerSpec {
     }
 
     fn listen_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.cfg.host.get(), self.cfg.port.get())
+        self.cfg.listen_addr()
     }
 
     fn ready_timeout(&self) -> Duration {
@@ -59,7 +65,7 @@ fn push_managed_args(cmd: &mut Command, cfg: &EmbeddingConfig, api_key: &ApiKey)
         .arg("-ngl")
         .arg(cfg.gpu_layers.to_string())
         .arg("--host")
-        .arg(cfg.host.to_string())
+        .arg(cfg.listen_addr().ip().to_string())
         .arg("--port")
         .arg(cfg.port.to_string());
 }

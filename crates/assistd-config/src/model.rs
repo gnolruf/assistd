@@ -1,16 +1,14 @@
 //! Chat model and llama-server process configuration.
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 
 use crate::custom_args::{CustomArgs, ModelServer};
-use crate::defaults::{
-    DEFAULT_MODEL_CONTEXT_LENGTH, DEFAULT_MODEL_GPU_LAYERS, DEFAULT_MODEL_HOST, DEFAULT_MODEL_NAME,
-    DEFAULT_MODEL_PORT, DEFAULT_MODEL_READY_TIMEOUT_SECS, DEFAULT_MODEL_SERVER_BINARY,
-};
+use crate::defaults::{nz16, nz32, nz64};
 use crate::settings::{DescribeSettings, describe_fields};
-use crate::values::{LoopbackAddr, NonBlankString};
+use crate::values::NonBlankString;
 
 /// The agent's model and the local server process that serves it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -20,12 +18,11 @@ pub struct ModelConfig {
     pub name: NonBlankString,
     /// Context window length in tokens.
     pub context_length: NonZeroU32,
-    /// Server binary path, or a name on `$PATH`.
+    /// Server binary path, or a name on `$PATH`; the embedding server runs
+    /// it too.
     pub server_binary: NonBlankString,
-    /// Bind host; loopback because the per-launch API key travels over
-    /// plain HTTP.
-    pub host: LoopbackAddr,
-    /// Bind port.
+    /// Port the server binds on `127.0.0.1`; loopback because the per-launch
+    /// API key travels over plain HTTP.
     pub port: NonZeroU16,
     /// Layers offloaded to the GPU; values above the model's layer count
     /// offload every layer.
@@ -47,8 +44,7 @@ impl DescribeSettings for ModelConfig {
             "Tokens the model can see at once, prompt and reply together"
         ),
         server_binary => ("llama-server binary", "llama-server path, or a name on $PATH", advanced),
-        host => ("server address", "Address the model server binds; must be loopback", advanced),
-        port => ("server port", "Port the model server binds", advanced),
+        port => ("server port", "Loopback port the model server binds", advanced),
         gpu_layers => (
             "layers offloaded to GPU",
             "Layers offloaded to the GPU; above the model's count offloads all",
@@ -73,22 +69,26 @@ impl ModelConfig {
     pub fn context_budget(&self) -> u32 {
         u32::try_from(u64::from(self.context_length.get()) * 9 / 10).unwrap_or(u32::MAX)
     }
+
+    /// Where the server listens: `port` on `127.0.0.1`.
+    pub fn listen_addr(&self) -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, self.port.get()))
+    }
 }
 
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            name: DEFAULT_MODEL_NAME
+            name: "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
                 .parse()
                 .expect("the default model name is not blank"),
-            context_length: DEFAULT_MODEL_CONTEXT_LENGTH,
-            server_binary: DEFAULT_MODEL_SERVER_BINARY
+            context_length: nz32(8192),
+            server_binary: "llama-server"
                 .parse()
                 .expect("the default server binary is not blank"),
-            host: DEFAULT_MODEL_HOST,
-            port: DEFAULT_MODEL_PORT,
-            gpu_layers: DEFAULT_MODEL_GPU_LAYERS,
-            ready_timeout_secs: DEFAULT_MODEL_READY_TIMEOUT_SECS,
+            port: nz16(8385),
+            gpu_layers: 9999,
+            ready_timeout_secs: nz64(300),
             custom_args: CustomArgs::default(),
         }
     }

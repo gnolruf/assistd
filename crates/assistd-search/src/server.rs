@@ -44,7 +44,10 @@ impl SearxngServerSpec {
             cmd.env_remove(name);
         }
         cmd.env("SEARXNG_SETTINGS_PATH", self.settings.path())
-            .env("SEARXNG_BIND_ADDRESS", self.cfg.host.to_string())
+            .env(
+                "SEARXNG_BIND_ADDRESS",
+                self.cfg.listen_addr().ip().to_string(),
+            )
             .env("SEARXNG_PORT", self.cfg.port.to_string())
             .env("SEARXNG_SECRET", &self.secret);
     }
@@ -76,7 +79,7 @@ impl ChildServerSpec for SearxngServerSpec {
     }
 
     fn listen_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.cfg.host.get(), self.cfg.port.get())
+        self.cfg.listen_addr()
     }
 
     fn health_path(&self) -> &'static str {

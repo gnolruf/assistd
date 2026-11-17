@@ -2,7 +2,6 @@
 
 use std::collections::HashSet;
 
-use assistd_config::TrayIconsConfig;
 use assistd_ipc::{
     Event, EventBody, ListenPhase, PresenceState, QueueItem, StartupReadiness, TaskQueueSnapshot,
     TaskRunState, VoiceCaptureState,
@@ -167,15 +166,15 @@ impl TrayTracker {
     }
 }
 
-/// The configured icon for `state`; a config error always shows `dialog-error`.
-pub(super) fn icon_name_for(state: TrayState, icons: &TrayIconsConfig) -> &str {
+/// The freedesktop icon-theme name shown for `state`.
+pub(super) fn icon_name_for(state: TrayState) -> &'static str {
     match state {
         TrayState::ConfigError => "dialog-error",
-        TrayState::Disconnected => icons.disconnected.as_str(),
-        TrayState::Generating => icons.generating.as_str(),
-        TrayState::Listening => icons.listening.as_str(),
-        TrayState::Active => icons.active.as_str(),
-        TrayState::Sleeping => icons.sleeping.as_str(),
+        TrayState::Disconnected => "network-offline",
+        TrayState::Generating => "system-run",
+        TrayState::Listening => "audio-input-microphone",
+        TrayState::Active => "user-available",
+        TrayState::Sleeping => "user-offline",
     }
 }
 

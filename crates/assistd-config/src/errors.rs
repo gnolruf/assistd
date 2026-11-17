@@ -1,6 +1,5 @@
 //! Errors from loading, editing and validating configuration.
 
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use assistd_utils::hf::InvalidHfId;
@@ -33,13 +32,6 @@ pub enum ConfigError {
         path: PathBuf,
         #[source]
         source: toml_edit::TomlError,
-    },
-
-    #[error("{} sets `{key}`, which was removed: {replacement}; delete it", path.display())]
-    Removed {
-        path: PathBuf,
-        key: &'static str,
-        replacement: &'static str,
     },
 
     #[error("cannot set `{key}`: {reason}")]
@@ -218,11 +210,6 @@ pub struct IntegerRangeError {
     pub min: u32,
     pub max: u32,
 }
-
-/// An address refused by [`crate::values::LoopbackAddr`].
-#[derive(Debug, Error)]
-#[error("{0} is not a loopback address (127.0.0.0/8 or ::1)")]
-pub struct LoopbackAddrError(pub IpAddr);
 
 /// A string refused by [`crate::values::NonBlankString`].
 #[derive(Debug, Error)]

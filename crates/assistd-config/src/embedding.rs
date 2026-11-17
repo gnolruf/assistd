@@ -1,6 +1,7 @@
 //! Embedding-server and semantic-search configuration.
 
 use std::fmt;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU16, NonZeroU64};
 use std::str::FromStr;
 
@@ -8,18 +9,14 @@ use assistd_utils::hf::HfFileId;
 use serde::{Deserialize, Serialize};
 
 use crate::custom_args::{CustomArgs, EmbeddingServer};
-use crate::defaults::{
-    DEFAULT_EMBEDDING_AUTO_INJECT, DEFAULT_EMBEDDING_ENABLED, DEFAULT_EMBEDDING_GPU_LAYERS,
-    DEFAULT_EMBEDDING_HOST, DEFAULT_EMBEDDING_MIN_SIMILARITY, DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_EMBEDDING_PORT, DEFAULT_EMBEDDING_READY_TIMEOUT_SECS, DEFAULT_EMBEDDING_SERVER_BINARY,
-    DEFAULT_EMBEDDING_TOP_K,
-};
+use crate::defaults::{bounded, nz16, nz64, unit};
 use crate::errors::EmbeddingModelError;
 use crate::settings::{DescribeSettings, describe_fields};
-use crate::values::{Bounded, HfFile, LoopbackAddr, NonBlankString};
+use crate::values::{Bounded, HfFile};
 use crate::voice::UnitInterval;
 
-/// Dedicated embedding server and semantic-recall settings.
+/// Semantic-recall settings and the embedding server behind them, which runs
+/// `model.server_binary`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct EmbeddingConfig {
@@ -28,14 +25,11 @@ pub struct EmbeddingConfig {
     /// `--hf-repo` value, `<owner>/<repo>:<quant>`. The suffix must be a
     /// quant tag; a `.gguf` filename fails with "no GGUF files found".
     pub model: EmbeddingModel,
-    /// Server binary path, or a name on `$PATH`.
-    pub server_binary: NonBlankString,
-    /// Bind host; loopback because the per-launch API key travels over
-    /// plain HTTP.
-    pub host: LoopbackAddr,
-    /// Bind port. Must differ from `model.port` when enabled.
+    /// Port the server binds on `127.0.0.1`. Must differ from `model.port`
+    /// when enabled.
     pub port: NonZeroU16,
-    /// `-ngl` count. `0` keeps it on CPU.
+    /// `-ngl` count. `0` keeps it on CPU, where it never contends with the
+    /// agent's model for VRAM.
     pub gpu_layers: u32,
     /// Last-ditch cap, in seconds, on becoming healthy; the wait never trips
     /// while the model is still downloading or loading.
@@ -61,15 +55,9 @@ impl DescribeSettings for EmbeddingConfig {
     describe_fields! {
         enabled => ("enabled", "Enables semantic recall of past chats"),
         model => ("embedding model", "Embedding model, as owner/repo:quant"),
-        server_binary => ("llama-server binary", "llama-server path, or a name on $PATH", advanced),
-        host => (
-            "server address",
-            "Address the embedding server binds; must be loopback",
-            advanced
-        ),
         port => (
             "server port",
-            "Port the embedding server binds; must differ from model.port",
+            "Loopback port the embedding server binds; must differ from model.port",
             advanced
         ),
         gpu_layers => (
@@ -103,22 +91,25 @@ impl DescribeSettings for EmbeddingConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            enabled: DEFAULT_EMBEDDING_ENABLED,
-            model: DEFAULT_EMBEDDING_MODEL
+            enabled: true,
+            model: "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M"
                 .parse()
                 .expect("the default embedding model parses"),
-            server_binary: DEFAULT_EMBEDDING_SERVER_BINARY
-                .parse()
-                .expect("the default server binary is not blank"),
-            host: DEFAULT_EMBEDDING_HOST,
-            port: DEFAULT_EMBEDDING_PORT,
-            gpu_layers: DEFAULT_EMBEDDING_GPU_LAYERS,
-            ready_timeout_secs: DEFAULT_EMBEDDING_READY_TIMEOUT_SECS,
+            port: nz16(8386),
+            gpu_layers: 0,
+            ready_timeout_secs: nz64(300),
             custom_args: CustomArgs::default(),
-            top_k: DEFAULT_EMBEDDING_TOP_K,
-            auto_inject: DEFAULT_EMBEDDING_AUTO_INJECT,
-            min_similarity: DEFAULT_EMBEDDING_MIN_SIMILARITY,
+            top_k: bounded(5),
+            auto_inject: true,
+            min_similarity: unit(0.55),
         }
+    }
+}
+
+impl EmbeddingConfig {
+    /// Where the server listens: `port` on `127.0.0.1`.
+    pub fn listen_addr(&self) -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, self.port.get()))
     }
 }
 

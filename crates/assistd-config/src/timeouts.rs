@@ -1,10 +1,6 @@
 //! Deadlines on operations that cross a process boundary.
 
-use crate::defaults::{
-    CONFIRMATION_PROMPT_SECS, DEFAULT_TIMEOUT_DISPATCH_ENVELOPE_SECS,
-    DEFAULT_TIMEOUT_PRESENCE_DROWSE_SECS, DEFAULT_TIMEOUT_PRESENCE_SLEEP_SECS,
-    DEFAULT_TIMEOUT_STREAM_INACTIVITY_SECS, DEFAULT_TIMEOUT_TOOL_CALL_SECS,
-};
+use crate::defaults::CONFIRMATION_PROMPT_SECS;
 
 /// Safety-valve deadlines, in seconds, on operations that cross a process
 /// boundary. Not read from TOML; a struct so tests can shorten them.
@@ -29,11 +25,11 @@ pub struct TimeoutsConfig {
 impl Default for TimeoutsConfig {
     fn default() -> Self {
         Self {
-            presence_sleep_secs: DEFAULT_TIMEOUT_PRESENCE_SLEEP_SECS,
-            presence_drowse_secs: DEFAULT_TIMEOUT_PRESENCE_DROWSE_SECS,
-            dispatch_envelope_secs: DEFAULT_TIMEOUT_DISPATCH_ENVELOPE_SECS,
-            stream_inactivity_secs: DEFAULT_TIMEOUT_STREAM_INACTIVITY_SECS,
-            tool_call_secs: DEFAULT_TIMEOUT_TOOL_CALL_SECS,
+            presence_sleep_secs: 30,
+            presence_drowse_secs: 10,
+            dispatch_envelope_secs: 600,
+            stream_inactivity_secs: 30,
+            tool_call_secs: 300,
         }
     }
 }

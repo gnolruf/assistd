@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use assistd_config::defaults::{nz32, nz64, temperature};
-use assistd_config::{ChatConfig, LoopbackAddr, ModelConfig, TimeoutsConfig};
+use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::StatusKind;
 use assistd_llm::{
     HealthSnapshot, HealthWaitError, LlamaClient, LlamaClientError, LlmBackend, LlmError, LlmEvent,
@@ -344,7 +344,6 @@ fn client_spec(port: u16) -> ClientCfg {
             max_response_tokens: nz32(256),
             max_reasoning_tokens: nz32(128),
             request_timeout_secs: nz64(5),
-            summary_temperature: temperature(0.3),
             top_p: None,
             top_k: None,
             min_p: None,
@@ -355,7 +354,6 @@ fn client_spec(port: u16) -> ClientCfg {
         model: ModelConfig {
             name: "test-model".parse().unwrap(),
             context_length: nz32(12_000),
-            host: LoopbackAddr::LOCALHOST,
             port: NonZeroU16::new(port).expect("bound port is never 0"),
             ..ModelConfig::default()
         },

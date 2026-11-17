@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::defaults::{DEFAULT_TASKS_KEPT_RUNS, DEFAULT_TASKS_RESUME_AFTER_IDLE_SECS};
+use crate::defaults::bounded;
 use crate::settings::{DescribeSettings, choice_setting, describe_fields};
 use crate::values::Bounded;
 
@@ -63,8 +63,8 @@ impl Default for TasksConfig {
     fn default() -> Self {
         Self {
             interruption: TaskInterruption::default(),
-            resume_after_idle_secs: DEFAULT_TASKS_RESUME_AFTER_IDLE_SECS,
-            kept_runs: DEFAULT_TASKS_KEPT_RUNS,
+            resume_after_idle_secs: bounded(120),
+            kept_runs: bounded(50),
         }
     }
 }

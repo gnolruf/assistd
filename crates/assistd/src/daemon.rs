@@ -4,7 +4,6 @@
 use std::collections::HashSet;
 use std::fs::DirBuilder;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
@@ -354,7 +353,7 @@ fn build_slot_stash(
     slots: watch::Receiver<NonZeroU32>,
 ) -> Result<Arc<SlotStash>> {
     let slot_stash = SlotStash::new(
-        SocketAddr::new(config.model.host.get(), config.model.port.get()),
+        config.model.listen_addr(),
         Some(api_key),
         config.model.name.to_string(),
         slot_dir,
@@ -439,7 +438,7 @@ fn build_vision_revalidator(
     health_probe: &Arc<dyn LlmHealthProbe>,
 ) -> Result<Arc<VisionRevalidator>> {
     let control = LlamaServerControl::new(
-        SocketAddr::new(config.model.host.get(), config.model.port.get()),
+        config.model.listen_addr(),
         Some(api_key),
         Some(Arc::clone(health_probe)),
     )

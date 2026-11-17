@@ -2,7 +2,6 @@
 //! frees GPU resources on demand and auto-wakes when a query arrives.
 
 use std::fmt;
-use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -178,12 +177,8 @@ impl PresenceManager {
         slot_dir: SlotDir,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>, PresenceError> {
-        let control = LlamaServerControl::new(
-            SocketAddr::new(model.host.get(), model.port.get()),
-            Some(&api_key),
-            None,
-        )
-        .map_err(PresenceError::Control)?;
+        let control = LlamaServerControl::new(model.listen_addr(), Some(&api_key), None)
+            .map_err(PresenceError::Control)?;
 
         let current_inner_shutdown: InnerShutdownSlot = Arc::new(StdMutex::new(None));
         let tasks = TaskTracker::new();
@@ -710,15 +705,14 @@ impl PresenceManager {
             name: "stub/model".parse().expect("stub model name"),
             context_length: nz32(1024),
             server_binary: "/does/not/exist".parse().expect("stub server binary"),
-            host: assistd_config::LoopbackAddr::LOCALHOST,
             port: nz16(1),
             gpu_layers: 1,
             ready_timeout_secs: nz64(1),
             ..ModelConfig::default()
         };
         let api_key = ApiKey::generate().expect("stub api key");
-        let control = LlamaServerControl::new(SocketAddr::new(model.host.get(), 1), None, None)
-            .expect("dummy control");
+        let control =
+            LlamaServerControl::new(model.listen_addr(), None, None).expect("dummy control");
         Arc::new(Self {
             lifecycle: StdMutex::new(lifecycle),
             transition: AsyncMutex::new(()),

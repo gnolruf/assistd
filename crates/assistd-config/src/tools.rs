@@ -7,10 +7,7 @@ use std::str::FromStr;
 use assistd_utils::path::tilde_remainder;
 use serde::{Deserialize, Serialize};
 
-use crate::defaults::{
-    DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB, DEFAULT_TOOLS_MAX_LINES,
-    DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS, DEFAULT_WRITABLE_PATHS, default_tools_dir,
-};
+use crate::defaults::{nz32, nz64};
 use crate::errors::{NoDefaultDirError, WritablePathError};
 use crate::settings::{DescribeSettings, choice_setting, describe_fields};
 use crate::values::{AbsoluteDir, NonEmpty};
@@ -82,7 +79,7 @@ impl Default for ToolsScratchConfig {
     fn default() -> Self {
         Self {
             dir: None,
-            retention_days: DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS,
+            retention_days: 30,
         }
     }
 }
@@ -135,8 +132,8 @@ impl DescribeSettings for ToolsOutputConfig {
 impl Default for ToolsOutputConfig {
     fn default() -> Self {
         Self {
-            max_lines: DEFAULT_TOOLS_MAX_LINES,
-            max_kb: DEFAULT_TOOLS_MAX_KB,
+            max_lines: nz32(200),
+            max_kb: nz32(4),
             overflow_dir: None,
         }
     }
@@ -210,7 +207,7 @@ impl DescribeSettings for ToolsBashConfig {
 impl Default for ToolsBashConfig {
     fn default() -> Self {
         Self {
-            timeout_secs: DEFAULT_BASH_TIMEOUT_SECS,
+            timeout_secs: nz64(30),
             sandbox: BashSandboxMode::default(),
             bwrap_extra_args: Vec::new(),
         }
@@ -240,7 +237,7 @@ impl DescribeSettings for ToolsWriteConfig {
 impl Default for ToolsWriteConfig {
     fn default() -> Self {
         Self {
-            writable_paths: DEFAULT_WRITABLE_PATHS
+            writable_paths: ["~/Documents", "~/Downloads"]
                 .map(|path| WritablePath(path.to_owned()))
                 .to_vec()
                 .try_into()
@@ -295,4 +292,11 @@ fn resolve_tools_dir(
         .map(|dir| dir.as_path().to_path_buf())
         .or_else(|| default_tools_dir(leaf))
         .ok_or(NoDefaultDirError { key })
+}
+
+/// `$XDG_RUNTIME_DIR/assistd/<leaf>`, or `$XDG_CACHE_HOME/assistd/<leaf>`, or
+/// `$HOME/.cache/assistd/<leaf>`; `None` when none of the three is known.
+fn default_tools_dir(leaf: &str) -> Option<PathBuf> {
+    let base = dirs::runtime_dir().or_else(dirs::cache_dir)?;
+    Some(base.join("assistd").join(leaf))
 }

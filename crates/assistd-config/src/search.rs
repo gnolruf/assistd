@@ -1,18 +1,16 @@
 //! Configuration for the local SearXNG instance web search goes through.
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU16, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::defaults::{
-    DEFAULT_SEARCH_COMMAND, DEFAULT_SEARCH_ENABLED, DEFAULT_SEARCH_ENGINES, DEFAULT_SEARCH_HOST,
-    DEFAULT_SEARCH_PORT, DEFAULT_SEARCH_READY_TIMEOUT_SECS,
-};
+use crate::defaults::{nz16, nz64};
 use crate::errors::SearchCommandError;
 use crate::settings::{DescribeSettings, describe_fields};
-use crate::values::{LoopbackAddr, NonBlankString, NonEmpty};
+use crate::values::{NonBlankString, NonEmpty};
 
 /// A daemon-supervised SearXNG instance.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -21,21 +19,21 @@ pub struct SearchConfig {
     /// When `false`, no instance starts and web search is unavailable.
     pub enabled: bool,
     /// The entry point to run. It must honour the `SEARXNG_*` variables assistd
-    /// sets, serve `host:port` from its own process group in the foreground,
+    /// sets, serve `127.0.0.1:port` from its own process group in the foreground,
     /// and answer `GET /healthz` with 200. Containers cannot: their socket is
     /// held outside that group, so the instance never becomes ready.
     pub command: SearchCommand,
-    /// Bind host; loopback because the instance has no authentication.
-    pub host: LoopbackAddr,
-    /// Bind port. When enabled, must differ from `model.port` and from an
-    /// enabled embedding server's `embedding.port`.
+    /// Port the instance binds on `127.0.0.1`; loopback because it has no
+    /// authentication. When enabled, must differ from `model.port` and from
+    /// an enabled embedding server's `embedding.port`.
     pub port: NonZeroU16,
     /// Longest, in seconds, a freshly spawned instance may take to answer
     /// its health check before the attempt counts as failed.
     pub ready_timeout_secs: NonZeroU64,
     /// SearXNG engines to search with; only these load, each enabled even if
     /// SearXNG ships it disabled or inactive. A name SearXNG does not know
-    /// is logged and skipped.
+    /// is logged and skipped. The default two answer automated queries from
+    /// a home connection; most others meet them with CAPTCHAs or refusals.
     pub engines: NonEmpty<SearchEngine>,
 }
 
@@ -44,12 +42,11 @@ impl DescribeSettings for SearchConfig {
         enabled => ("enabled", "Enables web search through a local SearXNG instance"),
         command => (
             "SearXNG command",
-            "SearXNG entry point; must serve host:port in the foreground"
+            "SearXNG entry point; must serve the port below in the foreground"
         ),
-        host => ("server address", "Address SearXNG binds; must be loopback", advanced),
         port => (
             "server port",
-            "Port SearXNG binds; must differ from the model and embedding ports",
+            "Loopback port SearXNG binds; must differ from the model and embedding ports",
             advanced
         ),
         ready_timeout_secs => (
@@ -64,19 +61,25 @@ impl DescribeSettings for SearchConfig {
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
-            enabled: DEFAULT_SEARCH_ENABLED,
-            command: DEFAULT_SEARCH_COMMAND
+            enabled: false,
+            command: "searxng-run"
                 .parse()
                 .expect("the default search command parses"),
-            host: DEFAULT_SEARCH_HOST,
-            port: DEFAULT_SEARCH_PORT,
-            ready_timeout_secs: DEFAULT_SEARCH_READY_TIMEOUT_SECS,
-            engines: DEFAULT_SEARCH_ENGINES
+            port: nz16(8387),
+            ready_timeout_secs: nz64(60),
+            engines: ["bing", "yahoo"]
                 .map(default_engine)
                 .to_vec()
                 .try_into()
                 .expect("the default search engines are not empty"),
         }
+    }
+}
+
+impl SearchConfig {
+    /// Where the instance listens: `port` on `127.0.0.1`.
+    pub fn listen_addr(&self) -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, self.port.get()))
     }
 }
 

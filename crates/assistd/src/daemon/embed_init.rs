@@ -1,11 +1,10 @@
 //! Embedding subsystem wiring for the daemon: handles requests use from
 //! startup, and the embedding server that comes up behind them afterwards.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_config::Config;
+use assistd_config::{Config, NonBlankString};
 use assistd_core::AppState;
 use assistd_embed::{
     EmbedServerSpec, Embedder, EmbedderHandle, LlamaEmbedder, spawn_embedder_task,
@@ -38,6 +37,7 @@ pub(super) struct EmbeddingHandles {
 /// What starting the embedding server in the background still needs.
 pub(super) struct EmbeddingStartup {
     config: assistd_config::EmbeddingConfig,
+    server_binary: NonBlankString,
     api_key: ApiKey,
     embed_wake: Arc<Notify>,
 }
@@ -155,6 +155,7 @@ pub(super) fn prepare(
     };
     let startup = EmbeddingStartup {
         config: config.embedding.clone(),
+        server_binary: config.model.server_binary.clone(),
         api_key: api_key.clone(),
         embed_wake,
     };
@@ -178,7 +179,7 @@ async fn start_and_record(
     if model_settled.wait_for(|settled| *settled).await.is_err() {
         return None;
     }
-    let running = match start_server(&startup.config, &startup.api_key, stages.server).await {
+    let running = match start_server(&startup, stages.server).await {
         Ok((server, embedder)) => {
             info!(
                 "embedding: ready (model={}, dim={}, port={})",
@@ -263,11 +264,16 @@ struct StartFailure {
 }
 
 async fn start_server(
-    config: &assistd_config::EmbeddingConfig,
-    api_key: &ApiKey,
+    startup: &EmbeddingStartup,
     server_shutdown: watch::Receiver<bool>,
 ) -> Result<(ChildServer, Arc<dyn Embedder>), StartFailure> {
-    let spec = EmbedServerSpec::new(config.clone(), api_key.clone());
+    let EmbeddingStartup {
+        config,
+        server_binary,
+        api_key,
+        ..
+    } = startup;
+    let spec = EmbedServerSpec::new(config.clone(), server_binary.clone(), api_key.clone());
     let server = ChildServer::start(spec, server_shutdown)
         .await
         .map_err(|e| StartFailure {
@@ -275,7 +281,7 @@ async fn start_server(
             server: None,
         })?;
     match LlamaEmbedder::new(
-        SocketAddr::new(config.host.get(), config.port.get()),
+        config.listen_addr(),
         config.model.to_string(),
         assistd_embed::REQUEST_TIMEOUT,
         Some(api_key),

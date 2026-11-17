@@ -78,18 +78,6 @@ fn defaults_validate() {
 }
 
 #[test]
-fn non_loopback_server_hosts_do_not_parse() {
-    for source in [
-        "[model]\nhost = \"0.0.0.0\"\n",
-        "[embedding]\nenabled = false\nhost = \"::\"\n",
-        "[search]\nhost = \"192.168.1.2\"\n",
-    ] {
-        let err = toml::from_str::<Config>(source).expect_err("a wildcard host must not parse");
-        assert!(err.to_string().contains("loopback"), "{source}: {err}");
-    }
-}
-
-#[test]
 fn relative_writable_paths_do_not_parse() {
     for entry in [".", "docs", "~alice/notes", "./tmp"] {
         let source = format!("[tools.write]\nwritable_paths = [\"/tmp\", \"{entry}\"]\n");

@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{self, Write};
-use std::net::IpAddr;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,8 +12,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use assistd_config::{
-    ChatConfig, HfFile, LoopbackAddr, ModelConfig, NonBlankString, SttEncoder, SynthesisConfig,
-    TimeoutsConfig, TranscriptionConfig, VoiceFamily,
+    ChatConfig, HfFile, ModelConfig, NonBlankString, SttEncoder, SynthesisConfig, TimeoutsConfig,
+    TranscriptionConfig, VoiceFamily,
 };
 use assistd_llm::{LlamaClient, LlmBackend, LlmEvent, LlmResult};
 use assistd_utils::time::saturating_millis;
@@ -69,10 +68,7 @@ struct Args {
     /// cold-cache penalty; the median across all runs is the headline.
     #[arg(long, default_value_t = 5)]
     iterations: usize,
-    /// llama-server host.
-    #[arg(long, default_value = "127.0.0.1", value_parser = parse_loopback)]
-    llama_host: LoopbackAddr,
-    /// llama-server port.
+    /// llama-server port on `127.0.0.1`.
     #[arg(long, default_value = "8080")]
     llama_port: NonZeroU16,
     /// Model name sent to `/v1/chat/completions`. llama-server usually
@@ -133,7 +129,6 @@ impl LlmSettings {
             },
             model: ModelConfig {
                 name: args.model.clone(),
-                host: args.llama_host,
                 port: args.llama_port,
                 ..ModelConfig::default()
             },
@@ -330,8 +325,7 @@ async fn main() -> Result<()> {
 
     writeln!(
         io::stderr(),
-        "building LLM client → http://{}:{}",
-        args.llama_host,
+        "building LLM client → http://127.0.0.1:{}",
         args.llama_port
     )?;
     let llm_settings = LlmSettings::from_args(&args);
@@ -358,10 +352,6 @@ fn init_tracing(collector: LatencyCollector) {
         .with(collector)
         .with(tracing_subscriber::fmt::layer().with_filter(env_filter))
         .init();
-}
-
-fn parse_loopback(raw: &str) -> Result<LoopbackAddr> {
-    Ok(raw.parse::<IpAddr>()?.try_into()?)
 }
 
 async fn load_pcm(args: &Args) -> Result<Vec<i16>> {
