@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::defaults::DEFAULT_MEMORY_ENABLED;
 use crate::settings::{DescribeSettings, describe_fields};
 
 /// SQLite-backed memory settings.
@@ -25,8 +24,6 @@ impl DescribeSettings for MemoryConfig {
 
 impl Default for MemoryConfig {
     fn default() -> Self {
-        Self {
-            enabled: DEFAULT_MEMORY_ENABLED,
-        }
+        Self { enabled: true }
     }
 }

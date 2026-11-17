@@ -7,14 +7,7 @@ use std::str::FromStr;
 use assistd_utils::hf::HfFileId;
 use serde::{Deserialize, Serialize};
 
-use crate::defaults::{
-    DEFAULT_SILERO_VAD_MODEL, DEFAULT_STT_MODEL, DEFAULT_STT_PREFER_GPU, DEFAULT_STT_THREADS,
-    DEFAULT_STT_VAD_ENABLED, DEFAULT_TTS_ENABLED, DEFAULT_TTS_LENGTH_SCALE,
-    DEFAULT_TTS_MAX_SENTENCE_CHARS, DEFAULT_TTS_PARTIAL_FLUSH_MS, DEFAULT_TTS_VOICE,
-    DEFAULT_WAKE_PHRASE, DEFAULT_WAKEWORD_BARGE_IN, DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS,
-    DEFAULT_WAKEWORD_ENABLED, DEFAULT_WAKEWORD_FOLLOW_UP_MS, DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS,
-    DEFAULT_WAKEWORD_SILENCE_MS, DEFAULT_WAKEWORD_START_ON_LAUNCH, DEFAULT_WAKEWORD_THRESHOLD,
-};
+use crate::defaults::{bounded, nz32, unit};
 use crate::errors::{SttEncoderError, UnitIntervalError, WakePhraseError};
 use crate::settings::{DescribeSettings, choice_setting, describe_fields};
 use crate::values::{AbsoluteDir, Bounded, HfFile, LengthScale};
@@ -65,10 +58,6 @@ pub struct TranscriptionConfig {
     pub threads: NonZeroU32,
     /// Trim silence with Silero VAD before decoding.
     pub vad_enabled: bool,
-    /// Silero VAD ONNX model (v4 to v6) as `<owner>/<repo>[@<revision>]:<file>`;
-    /// trims audio with `vad_enabled` and always decides where wake-word
-    /// listening's utterances start and end.
-    pub vad_model: HfFile,
     /// Model cache directory, absolute or starting with `~/`. `None` uses
     /// `$XDG_CACHE_HOME/assistd/stt/` (or `~/.cache/assistd/stt/`).
     pub model_cache_dir: Option<AbsoluteDir>,
@@ -95,11 +84,6 @@ impl DescribeSettings for TranscriptionConfig {
             "Trim silence with Silero VAD before transcribing",
             advanced
         ),
-        vad_model => (
-            "voice-detection model",
-            "Silero VAD model, as owner/repo[@revision]:file",
-            advanced
-        ),
         model_cache_dir => (
             "model cache folder",
             "Where speech-to-text models download; unset uses the user cache",
@@ -111,15 +95,13 @@ impl DescribeSettings for TranscriptionConfig {
 impl Default for TranscriptionConfig {
     fn default() -> Self {
         Self {
-            model: DEFAULT_STT_MODEL
+            model: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16\
+                    @a6cc4e24ed264a93a17575dad416dacc4238497a:encoder.fp16.onnx"
                 .parse()
                 .expect("the default speech-to-text model parses"),
-            prefer_gpu: DEFAULT_STT_PREFER_GPU,
-            threads: DEFAULT_STT_THREADS,
-            vad_enabled: DEFAULT_STT_VAD_ENABLED,
-            vad_model: DEFAULT_SILERO_VAD_MODEL
-                .parse()
-                .expect("the default VAD model parses"),
+            prefer_gpu: false,
+            threads: nz32(4),
+            vad_enabled: true,
             model_cache_dir: None,
         }
     }
@@ -203,17 +185,17 @@ impl DescribeSettings for WakeWordConfig {
 impl Default for WakeWordConfig {
     fn default() -> Self {
         Self {
-            enabled: DEFAULT_WAKEWORD_ENABLED,
-            start_on_launch: DEFAULT_WAKEWORD_START_ON_LAUNCH,
-            silence_ms: DEFAULT_WAKEWORD_SILENCE_MS,
-            max_utterance_secs: DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS,
-            barge_in: DEFAULT_WAKEWORD_BARGE_IN,
-            command_timeout_ms: DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS,
-            follow_up_ms: DEFAULT_WAKEWORD_FOLLOW_UP_MS,
-            phrase: DEFAULT_WAKE_PHRASE
+            enabled: false,
+            phrase: "hey computer"
                 .parse()
                 .expect("the default wake phrase parses"),
-            threshold: DEFAULT_WAKEWORD_THRESHOLD,
+            threshold: unit(0.25),
+            start_on_launch: false,
+            silence_ms: bounded(800),
+            max_utterance_secs: bounded(30),
+            barge_in: true,
+            command_timeout_ms: bounded(4000),
+            follow_up_ms: bounded(8000),
         }
     }
 }
@@ -439,14 +421,17 @@ impl DescribeSettings for SynthesisConfig {
 impl Default for SynthesisConfig {
     fn default() -> Self {
         Self {
-            enabled: DEFAULT_TTS_ENABLED,
-            voice: DEFAULT_TTS_VOICE.parse().expect("the default voice parses"),
+            enabled: false,
+            voice: "csukuangfj/vits-piper-en_US-lessac-medium\
+                    @83f7470750b36549037551ef7007fa3b4b8697e0:en_US-lessac-medium.onnx"
+                .parse()
+                .expect("the default voice parses"),
             family: VoiceFamily::Vits,
             speaker_id: 0,
             model_cache_dir: None,
-            length_scale: DEFAULT_TTS_LENGTH_SCALE,
-            max_sentence_chars: DEFAULT_TTS_MAX_SENTENCE_CHARS,
-            partial_flush_ms: DEFAULT_TTS_PARTIAL_FLUSH_MS,
+            length_scale: LengthScale::new(1.0).expect("the default length scale is positive"),
+            max_sentence_chars: bounded(400),
+            partial_flush_ms: 750,
             output_device: None,
         }
     }
@@ -465,7 +450,7 @@ mod tests {
         for (edge, expected) in [("0.0", 0.0), ("1.0", 1.0)] {
             let parsed: WakeWordConfig = toml::from_str(&format!("threshold = {edge}\n"))
                 .expect("in-range threshold must parse");
-            assert_eq!(parsed.threshold, crate::defaults::unit(expected));
+            assert_eq!(parsed.threshold, unit(expected));
         }
 
         for bad in ["1.5", "-0.1", "nan"] {

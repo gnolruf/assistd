@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::mem::take;
-use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,6 +43,9 @@ const REASONING_BUDGET_MESSAGE: &str =
 /// Tool-call markup the chat template emits; a summary containing it tried
 /// to act instead of summarizing.
 const TOOL_CALL_MARKUP: &str = "<tool_call>";
+/// Sampling temperature of a summarization call: low, so a summary keeps to
+/// what was said.
+const SUMMARY_TEMPERATURE: f32 = 0.3;
 /// The slot the main backend and those sharing it with a [`SlotStash`] use.
 const SHARED_SLOT: u32 = 0;
 
@@ -68,7 +70,7 @@ pub struct LlamaClient {
 }
 
 impl LlamaClient {
-    /// Build a client for `model.host:model.port`, sending `api_key` when set. With a `health`
+    /// Build a client for `model.listen_addr()`, sending `api_key` when set. With a `health`
     /// probe, a request made while its child is not serving fails with
     /// [`LlmError::ServerRestarting`] without being sent.
     pub fn new(
@@ -86,10 +88,7 @@ impl LlamaClient {
             )
             .connect_timeout(Duration::from_secs(10))
             .build()?;
-        let base_url = format!(
-            "http://{}",
-            SocketAddr::new(model.host.get(), model.port.get())
-        );
+        let base_url = format!("http://{}", model.listen_addr());
         let history = History::new(chat.system_prompt.clone());
         Ok(Self {
             client,
@@ -878,7 +877,7 @@ impl ContinuationSummarizer<'_> {
         let client = self.client;
         let mut payload = client.base_request(messages);
         offer_tools(&mut payload, tools.to_vec());
-        payload.temperature = client.chat.summary_temperature.get();
+        payload.temperature = SUMMARY_TEMPERATURE;
         payload.max_tokens = client.chat.max_summary_tokens();
         payload.reasoning_budget_tokens = Some(0);
         payload.reasoning_budget_message = None;

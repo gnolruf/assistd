@@ -934,7 +934,7 @@ redirect to the bang's site rather than with results. No client for a
 server on this machine follows redirects, so the daemon never requests
 that URL: the search fails and tells the model to drop the `!!` word.
 
-The instance has no authentication, so `search.host` must be loopback.
+The instance has no authentication, so it binds only `127.0.0.1`.
 `web fetch` never fetches loopback or other non-public addresses, so
 the model cannot reach the search port through it, and sandboxed `bash`
 has no network unless `--share-net` is set; in practice only the

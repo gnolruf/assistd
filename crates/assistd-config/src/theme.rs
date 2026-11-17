@@ -6,7 +6,6 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::defaults::DEFAULT_THEME;
 use crate::errors::{ThemeColorError, ThemeNameError};
 use crate::settings::{DescribeSettings, describe_fields};
 
@@ -155,7 +154,7 @@ impl ThemeConfig {
     /// popular across terminal applications, all for dark backgrounds but
     /// `solarized_light`.
     pub const BUILT_IN: [(&'static str, Self); 16] = [
-        ("assistd", DEFAULT_THEME),
+        ("assistd", ASSISTD),
         ("dracula", DRACULA),
         ("nord", NORD),
         ("gruvbox", GRUVBOX),
@@ -201,7 +200,7 @@ impl DescribeSettings for ThemeConfig {
 
 impl Default for ThemeConfig {
     fn default() -> Self {
-        DEFAULT_THEME
+        ASSISTD
     }
 }
 
@@ -264,6 +263,20 @@ impl From<ThemeName> for String {
 const fn rgb(red: u8, green: u8, blue: u8) -> ThemeColor {
     ThemeColor::Rgb { red, green, blue }
 }
+
+const ASSISTD: ThemeConfig = ThemeConfig {
+    accent: ThemeColor::BLEY,
+    user_message: ThemeColor::DarkGray,
+    assistant_text: ThemeColor::Default,
+    status_text: ThemeColor::DarkGray,
+    code: ThemeColor::DarkGray,
+    border: ThemeColor::DarkGray,
+    success: ThemeColor::Green,
+    error: ThemeColor::Red,
+    warning: ThemeColor::Yellow,
+    link: ThemeColor::Blue,
+    selection: ThemeColor::Default,
+};
 
 const GRUVBOX: ThemeConfig = ThemeConfig {
     accent: rgb(0xfe, 0x80, 0x19),

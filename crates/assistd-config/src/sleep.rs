@@ -1,13 +1,7 @@
 //! Sleep and idle policy configuration.
 
-use std::num::NonZeroU64;
-
 use serde::{Deserialize, Serialize};
 
-use crate::defaults::{
-    DEFAULT_GPU_HEADROOM_MB, DEFAULT_GPU_MONITOR_ENABLED, DEFAULT_GPU_POLL_SECS,
-    DEFAULT_IDLE_TO_DROWSY_MINS, DEFAULT_IDLE_TO_SLEEP_MINS,
-};
 use crate::settings::{DescribeSettings, describe_fields};
 
 /// Sleep/idle policy settings.
@@ -23,8 +17,6 @@ pub struct SleepConfig {
     /// Poll NVML: sleep when another process crowds the model's VRAM, and
     /// refuse a wake the model would not fit. Inert without an NVIDIA GPU.
     pub gpu_monitor_enabled: bool,
-    /// NVML poll interval in seconds.
-    pub gpu_poll_secs: NonZeroU64,
     /// Free VRAM, in MiB, to keep beside the model. Another process growing
     /// while less is free puts the daemon to sleep, and a wake that would
     /// leave less is refused. `0` keeps no margin and never sleeps for it.
@@ -48,7 +40,6 @@ impl DescribeSettings for SleepConfig {
             "enabled",
             "Sleep when other processes crowd the model's VRAM (NVIDIA only)"
         ),
-        gpu_poll_secs => ("check interval (s)", "Seconds between VRAM checks"),
         gpu_headroom_mb => (
             "free VRAM to keep (MiB)",
             "Free VRAM to keep beside the model; 0 keeps no margin"
@@ -63,11 +54,10 @@ impl DescribeSettings for SleepConfig {
 impl Default for SleepConfig {
     fn default() -> Self {
         Self {
-            idle_to_drowsy_mins: DEFAULT_IDLE_TO_DROWSY_MINS,
-            idle_to_sleep_mins: DEFAULT_IDLE_TO_SLEEP_MINS,
-            gpu_monitor_enabled: DEFAULT_GPU_MONITOR_ENABLED,
-            gpu_poll_secs: DEFAULT_GPU_POLL_SECS,
-            gpu_headroom_mb: DEFAULT_GPU_HEADROOM_MB,
+            idle_to_drowsy_mins: 30,
+            idle_to_sleep_mins: 120,
+            gpu_monitor_enabled: true,
+            gpu_headroom_mb: 500,
             gpu_auto_wake: false,
         }
     }

@@ -1,5 +1,5 @@
-//! assistd configuration schema. An omitted key takes its value from
-//! [`defaults`]; an unknown key is a [`ConfigIssue`], and a value its
+//! assistd configuration schema. An omitted key takes its value from its
+//! table's `Default`; an unknown key is a [`ConfigIssue`], and a value its
 //! field's type refuses is a parse error.
 
 pub mod chat;
@@ -33,8 +33,8 @@ pub use embedding::{EmbeddingConfig, EmbeddingModel};
 pub use errors::{
     AbsoluteDirError, BlankStringError, ConfigError, ConfigIssue, CustomArgsError,
     DecimalRangeError, EmbeddingModelError, EmptyListError, HfFileError, IntegerRangeError,
-    LoopbackAddrError, McpServerNameError, NoDefaultDirError, SearchCommandError, SttEncoderError,
-    ThemeColorError, ThemeNameError, UnitIntervalError, WakePhraseError, WritablePathError,
+    McpServerNameError, NoDefaultDirError, SearchCommandError, SttEncoderError, ThemeColorError,
+    ThemeNameError, UnitIntervalError, WakePhraseError, WritablePathError,
 };
 pub use mcp::{
     McpAuth, McpConfig, McpHeaders, McpHttpTransport, McpOAuthClient, McpServerConfig,
@@ -42,7 +42,7 @@ pub use mcp::{
 };
 pub use memory::MemoryConfig;
 pub use model::ModelConfig;
-pub use notifications::{NotificationsConfig, TrayIconsConfig};
+pub use notifications::NotificationsConfig;
 pub use search::{SearchCommand, SearchConfig, SearchEngine};
 pub use settings::{
     Consumer, DescribeSettings, ListItem, SettingInfo, SettingKind, SettingValue, setting_info,
@@ -57,8 +57,8 @@ pub use tools::{
 };
 pub use top::Config;
 pub use values::{
-    AbsoluteDir, Bounded, HfFile, LengthScale, LoopbackAddr, NonBlankString, NonEmpty,
-    PresencePenalty, Temperature,
+    AbsoluteDir, Bounded, HfFile, LengthScale, NonBlankString, NonEmpty, PresencePenalty,
+    Temperature,
 };
 pub use voice::{
     SttEncoder, SynthesisConfig, TranscriptionConfig, UnitInterval, VoiceConfig, VoiceFamily,

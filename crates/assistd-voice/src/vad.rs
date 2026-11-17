@@ -12,6 +12,10 @@ use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
 use crate::transcribe::TranscriptionError;
 
+/// Silero VAD v6.2, pinned to one commit.
+const MODEL: &str =
+    "Tinysoft/silero-vad-6.2@3034960e5d3beb943b860ec0ea1a857bdae4ae96:silero_vad.onnx";
+
 /// Samples per Silero window at 16 kHz: 32 ms.
 pub const WINDOW_SAMPLES: usize = 512;
 
@@ -105,13 +109,13 @@ impl SpeechDetector {
     }
 }
 
-/// Download `config.vad_model` if missing and return its path.
+/// Download the Silero model into `config`'s cache if missing and return its path.
 pub async fn ensure_model(config: &TranscriptionConfig) -> Result<PathBuf, TranscriptionError> {
     let cache_dir = config.model_cache_dir.as_ref().map_or_else(
         || download::default_cache_dir("stt"),
         |dir| Ok(dir.as_path().to_path_buf()),
     )?;
-    Ok(download::ensure_cached_id(config.vad_model.id(), &cache_dir).await?)
+    Ok(download::ensure_cached(MODEL, &cache_dir).await?)
 }
 
 /// Whole samples in `secs` of audio, rounded.

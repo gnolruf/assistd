@@ -47,7 +47,7 @@ guides have the config snippets.
   both need `[voice.synthesis] enabled = true` to have any effect.
 - **`assistd tray`** shows a StatusNotifierItem icon (active, sleeping,
   listening, generating, or disconnected) and reconnects if the daemon
-  restarts. Icon names are set under `[notifications.icons]`.
+  restarts.
 
 ## Verifying the setup
 

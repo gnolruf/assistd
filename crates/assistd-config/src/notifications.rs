@@ -1,58 +1,13 @@
-//! Tray notification and tray icon configuration.
+//! Tray notification configuration.
 
 use serde::{Deserialize, Serialize};
 
-use crate::defaults::{
-    DEFAULT_NOTIFICATIONS_AUTO_HIDE_MS, DEFAULT_NOTIFICATIONS_BRIEF_WHEN_AWAY,
-    DEFAULT_NOTIFICATIONS_ENABLED, DEFAULT_TRAY_ICON_ACTIVE, DEFAULT_TRAY_ICON_DISCONNECTED,
-    DEFAULT_TRAY_ICON_GENERATING, DEFAULT_TRAY_ICON_LISTENING, DEFAULT_TRAY_ICON_SLEEPING,
-};
+use crate::defaults::bounded;
 use crate::settings::{DescribeSettings, describe_fields};
-use crate::values::{Bounded, NonBlankString};
-
-/// freedesktop icon-theme names the tray icon shows per state. Custom artwork under `~/.local/share/icons/<theme>/` is found by
-/// its file name without the extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct TrayIconsConfig {
-    /// The daemon is awake and idle.
-    pub active: NonBlankString,
-    /// The daemon is drowsy, asleep, or loading the model.
-    pub sleeping: NonBlankString,
-    /// The wake phrase was heard, or a push-to-talk capture is underway.
-    pub listening: NonBlankString,
-    /// A turn is in flight.
-    pub generating: NonBlankString,
-    /// The daemon socket is unreachable.
-    pub disconnected: NonBlankString,
-}
-
-impl DescribeSettings for TrayIconsConfig {
-    describe_fields! {
-        #![consumer(Tray)]
-        active => ("awake", "Tray icon while awake and idle"),
-        sleeping => ("sleeping", "Tray icon while drowsy, asleep or loading the model"),
-        listening => ("listening", "Tray icon while hearing a query"),
-        generating => ("generating", "Tray icon while a turn is in flight"),
-        disconnected => ("disconnected", "Tray icon while the daemon is unreachable"),
-    }
-}
-
-impl Default for TrayIconsConfig {
-    fn default() -> Self {
-        Self {
-            active: icon_name(DEFAULT_TRAY_ICON_ACTIVE),
-            sleeping: icon_name(DEFAULT_TRAY_ICON_SLEEPING),
-            listening: icon_name(DEFAULT_TRAY_ICON_LISTENING),
-            generating: icon_name(DEFAULT_TRAY_ICON_GENERATING),
-            disconnected: icon_name(DEFAULT_TRAY_ICON_DISCONNECTED),
-        }
-    }
-}
+use crate::values::Bounded;
 
 /// Desktop notifications from `assistd tray` showing a turn's activity, tool
-/// calls and reply, plus the tray icon's names. No notification is sent while
-/// the chat has keyboard focus.
+/// calls and reply. No notification is sent while the chat has keyboard focus.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct NotificationsConfig {
@@ -63,8 +18,6 @@ pub struct NotificationsConfig {
     /// Ask for a short plain-text reply to a voice turn while the chat is
     /// unfocused or closed.
     pub brief_when_away: bool,
-    /// Used by the tray icon whether or not notifications are enabled.
-    pub icons: TrayIconsConfig,
 }
 
 impl DescribeSettings for NotificationsConfig {
@@ -80,7 +33,6 @@ impl DescribeSettings for NotificationsConfig {
             "brief voice replies when away",
             "Ask for short replies to voice turns while the chat is unfocused"
         ),
-        icons => nested,
     }
 }
 
@@ -95,16 +47,9 @@ impl NotificationsConfig {
 impl Default for NotificationsConfig {
     fn default() -> Self {
         Self {
-            enabled: DEFAULT_NOTIFICATIONS_ENABLED,
-            auto_hide_ms: DEFAULT_NOTIFICATIONS_AUTO_HIDE_MS,
-            brief_when_away: DEFAULT_NOTIFICATIONS_BRIEF_WHEN_AWAY,
-            icons: TrayIconsConfig::default(),
+            enabled: true,
+            auto_hide_ms: bounded(3000),
+            brief_when_away: true,
         }
     }
-}
-
-fn icon_name(default: &str) -> NonBlankString {
-    default
-        .parse()
-        .expect("the default icon names are not blank")
 }

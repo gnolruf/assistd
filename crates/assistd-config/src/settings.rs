@@ -13,8 +13,8 @@ use crate::theme::{ThemeColor, ThemeConfig, ThemeName};
 use crate::tools::WritablePath;
 use crate::top::Config;
 use crate::values::{
-    AbsoluteDir, Bounded, HfFile, LengthScale, LoopbackAddr, NonBlankString, NonEmpty,
-    PresencePenalty, Temperature,
+    AbsoluteDir, Bounded, HfFile, LengthScale, NonBlankString, NonEmpty, PresencePenalty,
+    Temperature,
 };
 use crate::voice::{SttEncoder, UnitInterval, WakePhrase};
 
@@ -272,7 +272,7 @@ macro_rules! setting_values {
 setting_values!(Toggle: bool);
 setting_values!(Integer: u32, u64, NonZeroU16, NonZeroU32, NonZeroU64);
 setting_values!(Decimal: UnitInterval, Temperature, PresencePenalty, LengthScale);
-setting_values!(Text: String, SearchCommand, NonBlankString, LoopbackAddr, AbsoluteDir);
+setting_values!(Text: String, SearchCommand, NonBlankString, AbsoluteDir);
 setting_values!(Text: HfFile, SttEncoder, EmbeddingModel, WakePhrase);
 
 /// Implements [`SettingValue`] for an enum as a choice between its variants'

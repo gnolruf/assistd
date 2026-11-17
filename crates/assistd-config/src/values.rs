@@ -2,7 +2,6 @@
 //! rule so a value that parses is valid.
 
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -12,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{
     AbsoluteDirError, BlankStringError, DecimalRangeError, EmptyListError, HfFileError,
-    IntegerRangeError, LoopbackAddrError,
+    IntegerRangeError,
 };
 
 /// A sampling temperature: an `f32` in `0.0..=2.0`; never NaN.
@@ -167,44 +166,6 @@ impl<const MIN: u32, const MAX: u32> TryFrom<u32> for Bounded<MIN, MAX> {
 impl<const MIN: u32, const MAX: u32> From<Bounded<MIN, MAX>> for u32 {
     fn from(value: Bounded<MIN, MAX>) -> Self {
         value.0
-    }
-}
-
-/// A loopback address, `127.0.0.0/8` or `::1`, for a server whose traffic
-/// must stay on this machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "IpAddr", into = "IpAddr")]
-pub struct LoopbackAddr(IpAddr);
-
-impl LoopbackAddr {
-    pub const LOCALHOST: Self = Self(IpAddr::V4(Ipv4Addr::LOCALHOST));
-
-    pub const fn get(self) -> IpAddr {
-        self.0
-    }
-}
-
-impl fmt::Display for LoopbackAddr {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl TryFrom<IpAddr> for LoopbackAddr {
-    type Error = LoopbackAddrError;
-
-    fn try_from(addr: IpAddr) -> Result<Self, Self::Error> {
-        if addr.is_loopback() {
-            Ok(Self(addr))
-        } else {
-            Err(LoopbackAddrError(addr))
-        }
-    }
-}
-
-impl From<LoopbackAddr> for IpAddr {
-    fn from(addr: LoopbackAddr) -> Self {
-        addr.0
     }
 }
 

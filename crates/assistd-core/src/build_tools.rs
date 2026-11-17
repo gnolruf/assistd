@@ -1,7 +1,6 @@
 //! `build_tools`: assembles the tool registries from config and the subsystem handles.
 
 use std::fs::{DirBuilder, DirEntry, Permissions};
-use std::net::SocketAddr;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -343,10 +342,7 @@ fn web_access(
     let search = config
         .search
         .enabled
-        .then(|| {
-            let addr = SocketAddr::new(config.search.host.get(), config.search.port.get());
-            SearxngClient::new(addr, web_search)
-        })
+        .then(|| SearxngClient::new(config.search.listen_addr(), web_search))
         .transpose()?;
     let approved_hosts = ApprovalGate::new(
         Arc::clone(gate),

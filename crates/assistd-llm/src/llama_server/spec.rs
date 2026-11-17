@@ -49,7 +49,7 @@ impl ChildServerSpec for LlamaServerSpec {
     }
 
     fn listen_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.model.host.get(), self.model.port.get())
+        self.model.listen_addr()
     }
 
     fn ready_timeout(&self) -> Duration {
@@ -69,7 +69,7 @@ fn push_managed_args(cmd: &mut Command, model: &ModelConfig, api_key: &ApiKey, s
         .arg("-ngl")
         .arg(model.gpu_layers.to_string())
         .arg("--host")
-        .arg(model.host.to_string())
+        .arg(model.listen_addr().ip().to_string())
         .arg("--port")
         .arg(model.port.to_string())
         .arg("-c")

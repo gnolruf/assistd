@@ -30,18 +30,6 @@ const CONFIG_DIR_MODE: u32 = 0o700;
 const CONFIG_FILE_MODE: u32 = 0o600;
 const GROUP_OR_WORLD_READABLE: u32 = 0o044;
 const SAMPLE_CONFIG: &str = include_str!("../../../config/config.sample.toml");
-/// Keys a config may no longer set, each with what replaced it.
-const REMOVED_KEYS: &[(&str, &str)] = &[
-    (
-        "tools.bash.allowed_programs",
-        "the command classifier now decides which programs run unasked; \
-         answer \"always allow\" to approve others, kept in allowed_programs.toml",
-    ),
-    (
-        "tools.bash.destructive_patterns",
-        "the command classifier and path guards now decide which commands ask",
-    ),
-];
 
 /// Top-level assistd configuration, deserialized from `config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -123,8 +111,7 @@ impl Config {
     }
 
     /// Deserializes the TOML file at `path`, beside an issue for each key the
-    /// schema does not know, then [`Self::issues`]. Fails with
-    /// [`ConfigError::Removed`] on a removed key.
+    /// schema does not know, then [`Self::issues`].
     pub fn load_with_issues(path: &Path) -> Result<(Self, Vec<ConfigIssue>), ConfigError> {
         let content = fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
@@ -134,16 +121,6 @@ impl Config {
         let config: Self = toml::from_str(&content).map_err(parse_error)?;
         let raw: toml::Table = toml::from_str(&content).map_err(parse_error)?;
         let unknown = config.unknown_keys(&raw)?;
-        if let Some(&(key, replacement)) = REMOVED_KEYS
-            .iter()
-            .find(|(removed, _)| unknown.iter().any(|key| key == removed))
-        {
-            return Err(ConfigError::Removed {
-                path: path.to_path_buf(),
-                key,
-                replacement,
-            });
-        }
         config.warn_if_credentials_exposed(path);
         let issues = config.issues_after_unknown_keys(&unknown);
         Ok((config, issues))
@@ -488,26 +465,6 @@ mod tests {
         assert!(!with_env.exposes_mcp_secrets(0o600));
         let without_env: Config = toml::from_str(MCP_SERVER_WITHOUT_ENV).unwrap();
         assert!(!without_env.exposes_mcp_secrets(0o644));
-    }
-
-    #[test]
-    fn a_removed_key_fails_to_load() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("config.toml");
-        fs::write(&path, "[tools.bash]\nallowed_programs = [\"ls\"]\n").unwrap();
-
-        let err = Config::load_with_issues(&path).unwrap_err();
-
-        assert!(
-            matches!(
-                err,
-                ConfigError::Removed {
-                    key: "tools.bash.allowed_programs",
-                    ..
-                }
-            ),
-            "{err}"
-        );
     }
 
     #[test]

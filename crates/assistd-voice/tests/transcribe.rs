@@ -15,8 +15,6 @@ use assistd_voice::{SherpaTranscriber, Transcriber};
 
 const CPU_MODEL_ID: &str = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8\
      @1ab9323565ddb038682214b292f588070a538ce2:encoder.int8.onnx";
-const VAD_MODEL_ID: &str =
-    "Tinysoft/silero-vad-6.2@3034960e5d3beb943b860ec0ea1a857bdae4ae96:silero_vad.onnx";
 const SPEECH_URL: &str =
     "https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav";
 
@@ -68,7 +66,6 @@ async fn make_transcriber(vad: bool) -> SherpaTranscriber {
     let config = TranscriptionConfig {
         model: CPU_MODEL_ID.parse().unwrap(),
         vad_enabled: vad,
-        vad_model: VAD_MODEL_ID.parse().unwrap(),
         ..TranscriptionConfig::default()
     };
     SherpaTranscriber::load_cpu(&config)

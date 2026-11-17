@@ -152,8 +152,8 @@ needs confirmation asks first.
 config in an editable panel, one section at a time, with
 its detailed keys behind an "advanced" toggle. A saved change takes
 effect when the program that reads the key restarts, and saving names
-which: the daemon for most keys, the tray for its notifications and
-icons, the chat for its theme (`/settings` applies a theme as it
+which: the daemon for most keys, the tray for its notifications,
+the chat for its theme (`/settings` applies a theme as it
 closes). Saving refuses to replace a file that was edited elsewhere
 since the panel opened, and offers to reload or overwrite it.
 

@@ -15,6 +15,7 @@ use crate::presence::PresenceManager;
 use crate::recovery::spawn_supervised;
 use crate::vram::{VramLedger, VramSnapshot};
 
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
 /// Whether the monitor caused the current `Sleeping` state; only its own
@@ -52,7 +53,7 @@ pub fn spawn_monitor(
     let ledger = ledger?;
     info!(
         target: "assistd::gpu_monitor",
-        poll_secs = cfg.gpu_poll_secs,
+        poll_secs = POLL_INTERVAL.as_secs(),
         headroom_mb = ledger.headroom_mb(),
         auto_wake = cfg.gpu_auto_wake,
         "GPU contention monitor enabled"
@@ -70,7 +71,7 @@ async fn run_monitor(
     presence: Arc<PresenceManager>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let mut tick = tokio::time::interval(Duration::from_secs(cfg.gpu_poll_secs.get()));
+    let mut tick = tokio::time::interval(POLL_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut sub = presence.subscribe();
