@@ -41,6 +41,7 @@ mod wakeword;
 mod wire;
 
 pub(super) use agents::AgentPanel;
+pub(super) use connection::request_capabilities;
 pub(super) use modal::TypeAheadGuard;
 pub(super) use plan_mode::{ChatMode, PlanChoice, PlanReview};
 use wakeword::WakeWordStream;

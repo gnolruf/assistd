@@ -7,38 +7,25 @@ use std::mem;
 use std::path::Path;
 
 use super::options::{self, Flag, OptionSpec, Walked};
+use super::paths::{
+    ANY_PATH_CHARS, below, every_entry_of, is_harmless_target, is_relative, is_stdin_path,
+    joined_path, spelled, static_path, static_prefix,
+};
 use super::placeholder::{self, Placeholder, XARGS_ARG_FILE_OPTIONS};
 use super::programs::{self, EditProgram, Operands, ReadOnlyProgram, Targets, Wrapper};
+use super::variables::{
+    changed_git_variable, changed_sensitive_variable, changes, exported_variable,
+};
+use super::wrappers::{Candidate, commands, is_command_line, per_item_runner, run_as_wrapper};
 use super::{
-    Candidate, FEEDS_ARGUMENTS, KEYWORDS, MAX_NESTED_SCRIPTS, SAFE_BUILTINS, basename, changed_in,
-    changed_sensitive_variable, command_start, commands, evaluated, is_assignment, is_command_line,
-    is_harmless_target, is_stdin_path, is_subcommand, per_item_runner, program, short_options,
+    FEEDS_ARGUMENTS, KEYWORDS, MAX_NESTED_SCRIPTS, SAFE_BUILTINS, basename, command_start,
+    evaluated, is_subcommand, program, short_options,
 };
 use crate::policy::allowlist::{Allowlist, ApprovalScope, ProgramApproval, Verdict};
 use crate::policy::shell::{self, Script, SimpleCommand, Word};
 
 /// Builtins that change the working directory, after which relative targets are unknown.
 const CHANGES_DIRECTORY: &[&str] = &["cd", "popd", "pushd"];
-
-/// Wrappers that are reserved words, so quoting one runs a program of that name instead.
-const WRAPPER_KEYWORDS: &[&str] = &["coproc", "time"];
-
-/// Characters after which the text of a word is only known at run time.
-const DYNAMIC_CHARS: &[char] = &['$', '`', '*', '?', '[', '{', '('];
-
-/// The spellings of `$HOME` a path may start with.
-const HOME_VARIABLES: &[&str] = &["${HOME}", "$HOME"];
-
-/// Variables a script may export without leaving it unvetted, besides `LC_*`: the locale,
-/// time zone, terminal and colour settings, which run nothing.
-const HARMLESS_EXPORTS: &[&str] = &["LANG", "LANGUAGE", "NO_COLOR", "TERM", "TZ"];
-
-/// Builtins that export the names they declare when given `-x`.
-const EXPORTING_DECLARATIONS: &[&str] = &["declare", "local", "readonly", "typeset"];
-
-/// Characters that start an expansion whose value may name any path, `..` and absolute paths
-/// included; a glob only matches existing entries below its directory.
-const ANY_PATH_CHARS: &[char] = &['$', '`', '{'];
 
 /// `cd`'s options, which it reads up to its directory.
 const CD_OPTIONS: OptionSpec = OptionSpec {
@@ -1103,11 +1090,6 @@ fn unvettable_throughout(script: &Script) -> Result<(), String> {
     evaluated::in_script(script).map_or(Ok(()), Err)
 }
 
-/// Whether `path` resolves against a working directory.
-fn is_relative(path: &str) -> bool {
-    !path.starts_with(['/', '~'])
-}
-
 /// `arg` as a path, or the directory a glob for its every entry lists.
 fn edit_operand(edit: &EditProgram, arg: &Word, home_changed: bool) -> Result<String, String> {
     if let Some(path) = static_path(arg, home_changed) {
@@ -1119,78 +1101,6 @@ fn edit_operand(edit: &EditProgram, arg: &Word, home_changed: bool) -> Result<St
             edit.name, arg.text
         )
     })
-}
-
-/// `word` as a path known before it runs, spelled as [`spelled`] does; `None` when it is only
-/// known at run time.
-fn static_path(word: &Word, home_changed: bool) -> Option<String> {
-    if !word.dynamic {
-        return Some(spelled(word, home_changed));
-    }
-    home_as_tilde(&word.text, home_changed).filter(|path| !path.contains(DYNAMIC_CHARS))
-}
-
-/// `word`'s text with a leading `$HOME` spelled `~` when it may be, and a leading `~` that
-/// bash leaves as written spelled `./~`.
-fn spelled(word: &Word, home_changed: bool) -> String {
-    if word.literal_tilde {
-        return format!("./{}", word.text);
-    }
-    word.dynamic
-        .then(|| home_as_tilde(&word.text, home_changed))
-        .flatten()
-        .unwrap_or_else(|| word.text.clone())
-}
-
-fn home_as_tilde(text: &str, home_changed: bool) -> Option<String> {
-    if home_changed {
-        return None;
-    }
-    HOME_VARIABLES
-        .iter()
-        .find_map(|variable| text.strip_prefix(variable))
-        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
-        .map(|rest| format!("~{rest}"))
-}
-
-/// The directory a path only known at run time lies in, from its text before the first part
-/// only known at run time.
-fn static_prefix(text: &str) -> String {
-    let known = text.find(DYNAMIC_CHARS).map_or(text, |end| &text[..end]);
-    match known.rfind('/') {
-        Some(0) => "/".to_string(),
-        Some(end) => known[..end].to_string(),
-        None => ".".to_string(),
-    }
-}
-
-/// The directory `text` lists every entry of, as `dir/*` or `dir/{*,.*}` do.
-fn every_entry_of(text: &str) -> Option<String> {
-    let (dir, name) = text.rsplit_once('/').unwrap_or((".", text));
-    let selects_all = |pattern: &str| !pattern.is_empty() && pattern.chars().all(|c| c == '*');
-    let all = selects_all(name)
-        || name
-            .strip_prefix('{')
-            .and_then(|list| list.strip_suffix('}'))
-            .is_some_and(|list| list.split(',').any(selects_all));
-    let dir = if dir.is_empty() { "/" } else { dir };
-    (all && !dir.contains(DYNAMIC_CHARS)).then(|| dir.to_string())
-}
-
-/// `name` inside `dir`, with one `/` between them.
-fn joined_path(dir: &str, name: &str) -> String {
-    format!("{}/{name}", dir.trim_end_matches('/'))
-}
-
-/// The relative `path` below `dir`, or as written below the directory the script started in.
-fn below(dir: Option<&str>, path: &str) -> String {
-    dir.map_or_else(|| path.to_string(), |dir| joined_path(dir, path))
-}
-
-/// The wrapper `word` runs as: a reserved-word wrapper only when unquoted.
-fn run_as_wrapper(word: &Word) -> Option<&'static Wrapper> {
-    let name = word.text.as_str();
-    programs::wrapper(name).filter(|_| !(word.quoted && WRAPPER_KEYWORDS.contains(&name)))
 }
 
 /// Whether `position`'s script defined function `name` before reaching its command.
@@ -1211,82 +1121,6 @@ fn joined(args: &[Word]) -> String {
 
 fn sets_hashed_path(arg: &str) -> bool {
     short_options(arg).is_some_and(|cluster| cluster.contains('p'))
-}
-
-/// The first `GIT_*` variable the script may change, which can make `git` run any program.
-fn changed_git_variable(script: &Script) -> Option<&str> {
-    changed_in(script).find(|name| name.starts_with("GIT_"))
-}
-
-/// The first variable the script passes to the programs it runs, other than the
-/// [`HARMLESS_EXPORTS`] and `LC_*`: a program may read one as a command to run (`EDITOR`,
-/// `PAGER`, `CARGO_TARGET_*_RUNNER`), which no list or approval vets.
-fn exported_variable(script: &Script) -> Option<&str> {
-    script
-        .commands
-        .iter()
-        .flat_map(|cmd| exported_names(&cmd.words))
-        .find(|name| !(HARMLESS_EXPORTS.contains(name) || name.starts_with("LC_")))
-}
-
-/// The names one command exports: assignments before a program or after `env`, the operands
-/// of `export` or a `-x` declaration, and every variable after `set -a`.
-fn exported_names(words: &[Word]) -> Vec<&str> {
-    let Some(start) = command_start(words) else {
-        return Vec::new();
-    };
-    let operands = &words[start + 1..];
-    let has_option = |letter: char| {
-        operands
-            .iter()
-            .any(|word| short_options(&word.text).is_some_and(|cluster| cluster.contains(letter)))
-    };
-    let runs_program = !SAFE_BUILTINS.contains(&words[start].text.as_str());
-    let mut names: Vec<&str> = words[..start]
-        .iter()
-        .filter(|word| runs_program && is_assignment(&word.text))
-        .map(exported_name)
-        .collect();
-    let declared = match words[start].text.as_str() {
-        "export" => true,
-        command => EXPORTING_DECLARATIONS.contains(&command) && has_option('x'),
-    };
-    if declared {
-        names.extend(
-            operands
-                .iter()
-                .filter(|word| !word.text.starts_with('-'))
-                .map(exported_name),
-        );
-    }
-    if words[start].text == "set"
-        && (has_option('a') || operands.iter().any(|word| word.text == "allexport"))
-    {
-        names.push("all its variables");
-    }
-    if let Some(env) = words.iter().position(|word| word.text == "env") {
-        names.extend(
-            words[env + 1..]
-                .iter()
-                .filter(|word| is_assignment(&word.text))
-                .map(exported_name),
-        );
-    }
-    names
-}
-
-/// The variable name `word` assigns or declares.
-fn exported_name(word: &Word) -> &str {
-    let name = word
-        .text
-        .split_once('=')
-        .map_or(word.text.as_str(), |(name, _)| name);
-    name.strip_suffix('+').unwrap_or(name)
-}
-
-/// Whether the script may change variable `name`.
-fn changes(script: &Script, name: &str) -> bool {
-    changed_in(script).any(|changed| changed == name)
 }
 
 #[cfg(test)]

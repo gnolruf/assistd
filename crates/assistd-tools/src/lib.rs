@@ -8,6 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+mod binary;
 mod catalog;
 pub mod chain;
 pub mod command;
@@ -38,8 +39,9 @@ pub use policy::{
     ConfirmationGate, ConfirmationRequest, FileScope, HomeAccess, IpcConfirmationGate,
     JUDGE_TIMEOUT, JudgeContext, JudgeModel, JudgedClass, JudgedCommand, NoPendingConfirm,
     NoPendingReview, PromptParking, Protected, Risk, SCRATCH_MARKER, SafetyJudge, SandboxError,
-    SandboxInfo, SandboxPrograms, SandboxRequest, ScopeError, ScratchCap, SearchPath, SharedDirs,
-    StandingApprovals, ToolSandbox, ToolsDisabled, Unattended, Verdict, probe_sandbox,
+    SandboxInfo, SandboxPrograms, SandboxRequest, SandboxedCommand, ScopeError, ScratchCap,
+    SearchPath, SharedDirs, StandingApprovals, ToolSandbox, ToolsDisabled, Unattended, Verdict,
+    probe_sandbox,
 };
 pub use presentation::{OutputCap, PresentSpec};
 pub use quarantine::{Egress, Quarantine, QuarantineError};
