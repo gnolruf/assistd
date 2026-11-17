@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 
 use assistd_config::{SynthesisConfig, VoiceFamily};
-use assistd_utils::hf::download::{self, DownloadError, ensure_cached_id};
 
+use crate::download::{self, DownloadError, ensure_cached_id};
 use crate::tts::error::SpeechError;
 
 /// HTTP status Hugging Face returns for a file the repo does not have.

@@ -6,11 +6,11 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use assistd_config::VoiceConfig;
-use assistd_utils::hf::download::{self, DownloadError};
 use sentencepiece_rust::SentencePieceProcessor;
 use sherpa_onnx::{KeywordSpotter, KeywordSpotterConfig};
 use thiserror::Error;
 
+use crate::download::{self, DownloadError};
 use crate::vad::{SAMPLE_RATE_HZ, secs_to_samples};
 
 /// The 3.3M-parameter `GigaSpeech` keyword model, pinned to a mirror whose files match

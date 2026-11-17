@@ -430,14 +430,11 @@ dependencies = [
 name = "assistd-utils"
 version = "0.6.0"
 dependencies = [
- "dirs",
- "futures-util",
  "parking_lot 0.13.0",
  "procfs",
  "reqwest",
  "rustix 1.1.6",
  "serde_json",
- "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -453,6 +450,7 @@ dependencies = [
  "assistd-utils",
  "async-trait",
  "cpal",
+ "dirs",
  "futures-util",
  "hound",
  "num-traits",
@@ -466,6 +464,7 @@ dependencies = [
  "sentencepiece-rust",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sherpa-onnx",
  "tempfile",
  "thiserror 2.0.21",

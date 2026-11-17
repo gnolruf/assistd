@@ -1,5 +1,5 @@
 //! Helpers shared across the workspace: backoff and restarts, path, file, HTTP, text,
-//! terminal-escaping and duration utilities, token counting, Hugging Face downloads, readiness and child-server
+//! terminal-escaping and duration utilities, token counting, Hugging Face file IDs, readiness and child-server
 //! supervision.
 
 pub mod backoff;
