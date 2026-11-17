@@ -629,7 +629,8 @@ const READ_ONLY_PROGRAMS: &[ReadOnlyProgram] = &[
         },
     ),
     ReadOnlyProgram {
-        file_options: &[Short('X'), Long("exclude-from"), Long("files0-from")],
+        file_options: &[Short('X'), Long("exclude-from")],
+        operand_lists: &[Long("files0-from")],
         ..ReadOnlyProgram::naming(
             "du",
             OptionSpec {
@@ -688,7 +689,7 @@ const READ_ONLY_PROGRAMS: &[ReadOnlyProgram] = &[
             Primary("-fprint0"),
             Primary("-fprintf"),
         ],
-        file_options: &[Primary("-files0-from")],
+        operand_lists: &[Primary("-files0-from")],
         ..ReadOnlyProgram::naming(
             "find",
             OptionSpec {
@@ -965,7 +966,8 @@ const READ_ONLY_PROGRAMS: &[ReadOnlyProgram] = &[
     ),
     ReadOnlyProgram {
         disqualifiers: &[Short('o'), Long("compress-program"), Long("output")],
-        file_options: &[Long("files0-from"), Long("random-source")],
+        file_options: &[Long("random-source")],
+        operand_lists: &[Long("files0-from")],
         ..ReadOnlyProgram::reading(
             "sort",
             OptionSpec {
@@ -1129,7 +1131,7 @@ const READ_ONLY_PROGRAMS: &[ReadOnlyProgram] = &[
         },
     ),
     ReadOnlyProgram {
-        file_options: &[Long("files0-from")],
+        operand_lists: &[Long("files0-from")],
         ..ReadOnlyProgram::reading(
             "wc",
             OptionSpec {
@@ -1304,6 +1306,8 @@ pub(super) struct ReadOnlyProgram {
     pub disqualifiers: &'static [Flag],
     /// The options naming a file it reads.
     pub file_options: &'static [Flag],
+    /// The options naming a file it reads more operands from.
+    pub operand_lists: &'static [Flag],
     /// The options that make it read every file below a directory operand.
     pub recursive: &'static [Flag],
     pub operands: Operands,
@@ -1319,6 +1323,7 @@ impl ReadOnlyProgram {
             options,
             disqualifiers: &[],
             file_options: &[],
+            operand_lists: &[],
             recursive: &[],
             operands: Operands::Files,
             argument_files: false,
@@ -1341,6 +1346,16 @@ impl ReadOnlyProgram {
             operands: Operands::PatternThenFiles(GREP_PATTERN_OPTIONS),
             ..Self::reading(name, GREP_OPTIONS)
         }
+    }
+
+    /// Whether one of its options names a file it reads.
+    pub(super) fn names_files(&self) -> bool {
+        !(self.file_options.is_empty() && self.operand_lists.is_empty())
+    }
+
+    /// Whether the value of `flag` is a file it reads.
+    pub(super) fn reads_value_of(&self, flag: Flag) -> bool {
+        self.file_options.contains(&flag) || self.operand_lists.contains(&flag)
     }
 }
 

@@ -10,10 +10,9 @@ use super::options::{self, Flag, OptionSpec, Walked};
 use super::placeholder::{self, Placeholder, XARGS_ARG_FILE_OPTIONS};
 use super::programs::{self, EditProgram, Operands, ReadOnlyProgram, Targets, Wrapper};
 use super::{
-    Candidate, FEEDS_ARGUMENTS, KEYWORDS, MAX_NESTED_SCRIPTS, SAFE_BUILTINS, basename,
-    changed_sensitive_variable, changed_variables, command_start, commands, evaluated,
-    is_assignment, is_command_line, is_harmless_target, is_stdin_path, is_subcommand,
-    per_item_runner, program, short_options,
+    Candidate, FEEDS_ARGUMENTS, KEYWORDS, MAX_NESTED_SCRIPTS, SAFE_BUILTINS, basename, changed_in,
+    changed_sensitive_variable, command_start, commands, evaluated, is_assignment, is_command_line,
+    is_harmless_target, is_stdin_path, is_subcommand, per_item_runner, program, short_options,
 };
 use crate::policy::allowlist::{Allowlist, ApprovalScope, ProgramApproval, Verdict};
 use crate::policy::shell::{self, Script, SimpleCommand, Word};
@@ -614,7 +613,7 @@ impl Classifier<'_> {
     ) -> Result<(), String> {
         let name = program.name;
         let reads_operands = !matches!(program.operands, Operands::Unread);
-        if !reads_operands && program.file_options.is_empty() {
+        if !reads_operands && !program.names_files() {
             return Ok(());
         }
         if invocation.fed {
@@ -632,12 +631,15 @@ impl Classifier<'_> {
                 arg.text
             )
         });
-        let listed = args.iter().find_map(|arg| self.argument_file(program, arg));
+        let argument_file = args.iter().find_map(|arg| self.argument_file(program, arg));
+        let listed = listed_operands(program, walked)
+            .filter(|_| reads_operands)
+            .or(argument_file);
         unseen.or(listed).map_or(found_by_command, Err)
     }
 
-    /// Record a read of each value given to one of `program`'s file options; the first other
-    /// value that may become further words at run time is returned.
+    /// Record a read of each file one of `program`'s options names; the first other value that
+    /// may become further words at run time is returned.
     fn option_values<'w>(
         &mut self,
         program: &ReadOnlyProgram,
@@ -649,7 +651,7 @@ impl Classifier<'_> {
             let Some(value) = &given.value else {
                 continue;
             };
-            if program.file_options.contains(&given.flag) {
+            if program.reads_value_of(given.flag) {
                 self.read(value, recursive);
             } else if value.splits && self.may_lie_anywhere(value) {
                 unseen = unseen.or(Some(value));
@@ -718,7 +720,7 @@ impl Classifier<'_> {
         if walked.commands.is_empty() {
             return Ok(());
         }
-        if let Some(list) = walked.values_of(program.file_options).next() {
+        if let Some(list) = walked.values_of(program.operand_lists).next() {
             return Err(format!(
                 "`{}` runs a command on the files `{}` names, only known at run time",
                 program.name, list.text
@@ -945,8 +947,8 @@ fn changed_home_why(path: &str) -> String {
 }
 
 /// Which runs an "always allow" for a program run with `args` covers: those with the same
-/// subcommand as its first argument, or those with only options; `None` when the arguments
-/// make neither certain.
+/// subcommand as its first argument, or those with exactly these options when it is given
+/// nothing else; `None` when the arguments make neither certain.
 fn approval_scope(args: &[Word], invocation: &Invocation) -> Option<ApprovalScope> {
     let known = |arg: &Word| !arg.dynamic && !arg.splits && !invocation.fills(arg);
     match args.first() {
@@ -958,7 +960,8 @@ fn approval_scope(args: &[Word], invocation: &Invocation) -> Option<ApprovalScop
                 && args
                     .iter()
                     .all(|arg| known(arg) && arg.text.starts_with('-'));
-            options_only.then_some(ApprovalScope::OptionsOnly)
+            options_only
+                .then(|| ApprovalScope::Options(args.iter().map(|arg| arg.text.clone()).collect()))
         }
     }
 }
@@ -1016,6 +1019,16 @@ fn vetted_options(
             "`{name} {}` writes files or runs a program",
             given.flag
         ))
+    })
+}
+
+/// Why a read-only program that reads its operands cannot be vetted when a file lists them.
+fn listed_operands(program: &ReadOnlyProgram, walked: &Walked<'_>) -> Option<String> {
+    walked.values_of(program.operand_lists).next().map(|list| {
+        format!(
+            "`{}` reads the files `{}` names, only known at run time",
+            program.name, list.text
+        )
     })
 }
 
@@ -1202,12 +1215,7 @@ fn sets_hashed_path(arg: &str) -> bool {
 
 /// The first `GIT_*` variable the script may change, which can make `git` run any program.
 fn changed_git_variable(script: &Script) -> Option<&str> {
-    script
-        .commands
-        .iter()
-        .flat_map(|cmd| &cmd.words)
-        .flat_map(|word| changed_variables(&word.text))
-        .find(|name| name.starts_with("GIT_"))
+    changed_in(script).find(|name| name.starts_with("GIT_"))
 }
 
 /// The first variable the script passes to the programs it runs, other than the
@@ -1278,12 +1286,7 @@ fn exported_name(word: &Word) -> &str {
 
 /// Whether the script may change variable `name`.
 fn changes(script: &Script, name: &str) -> bool {
-    script
-        .commands
-        .iter()
-        .flat_map(|cmd| &cmd.words)
-        .flat_map(|word| changed_variables(&word.text))
-        .any(|changed| changed == name)
+    changed_in(script).any(|changed| changed == name)
 }
 
 #[cfg(test)]
@@ -1384,6 +1387,15 @@ mod tests {
         "timeout -v 5 dd if=/dev/null of=FILE",
         "find ~/Documents -not -name -exec -delete",
         "find . -exec echo $e -delete",
+        "printf -vHOME %s ~/.ssh; cat ~/id_ed25519",
+        "printf -vPATH %s /tmp/bin; ls",
+        "read -raPATH <<< /tmp/bin; ls",
+        "read 'PATH[0]' <<< /tmp/bin; ls",
+        ": {PATH}>/dev/null; ls",
+        "exec {HOME}< /dev/null; cat ~/id_ed25519",
+        "i='b[$(rm a)]'; : {a[i]}>/dev/null",
+        "sort --files0-from=/tmp/l",
+        "wc --files0-from /tmp/l",
     ];
 
     /// Scripts that hide a command or a write somewhere bash runs one: after operators, in
@@ -1887,7 +1899,8 @@ mod tests {
                 "systemctl status; systemctl show x",
                 &["systemctl status …", "systemctl show …"],
             ),
-            ("systemctl --version -v", &["systemctl [options]"]),
+            ("systemctl --version -v", &["systemctl --version -v"]),
+            ("systemctl", &["systemctl (no arguments)"]),
             ("ip -n dir addr", &[]),
             ("systemctl +nightly status", &[]),
             ("systemctl \"$cmd\"", &[]),
@@ -1916,6 +1929,22 @@ mod tests {
         assert_eq!(class("systemctl status > out"), Class::Edit);
         assert!(matches!(class("systemctl show"), Class::Unvetted { .. }));
         assert_eq!(offered("systemctl show", &approvals), ["systemctl show …"]);
+
+        approvals
+            .approve(&analyze("systemctl --version", None, Some(&approvals)).always_allow)
+            .await
+            .expect("approve");
+        assert_eq!(class("systemctl --version"), Class::ReadOnly);
+        for script in [
+            "systemctl --force",
+            "systemctl --version --force",
+            "systemctl",
+        ] {
+            assert!(
+                matches!(class(script), Class::Unvetted { .. }),
+                "{script:?}"
+            );
+        }
 
         for script in [
             "SYSTEMD_PAGER=sh systemctl status",

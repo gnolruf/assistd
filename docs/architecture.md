@@ -585,8 +585,8 @@ directory holding them always asks too, and the script a shell is given
 "always allow" for the programs on neither list, saved in
 `allowed_programs.toml` beside the config and pinned to the file the
 name resolved to; an approval covers one subcommand (`systemctl status …`),
-or only options when the program was run without positional arguments,
-and counts that run as vetted from then on. Shells, interpreters,
+or exactly the options the program was run with when it was given no
+positional arguments, and counts that run as vetted from then on. Shells, interpreters,
 `sudo`-like wrappers and builtins that shadow a program are never
 offered it, and neither are build tools, compilers, package managers
 and version control (`make`, `cargo`, `npm`, `git`): each runs code

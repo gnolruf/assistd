@@ -130,7 +130,7 @@ async fn an_unvetted_program_asks_the_gate_and_runs_when_approved() {
         req.matched_pattern,
         "`nproc` is on neither the read-only nor the edit list"
     );
-    assert_eq!(req.always_allow, ["nproc [options]"]);
+    assert_eq!(req.always_allow, ["nproc (no arguments)"]);
 }
 
 #[tokio::test]
@@ -317,7 +317,7 @@ async fn always_allow_adds_the_offered_programs_for_good() {
         let [req] = asked.as_slice() else {
             panic!("expected exactly one confirmation, got {asked:?}");
         };
-        assert_eq!(req.always_allow, ["nproc [options]"]);
+        assert_eq!(req.always_allow, ["nproc --all"]);
     }
     let saved = std::fs::read_to_string(&store).expect("approvals saved");
     assert!(saved.contains("name = \"nproc\""), "{saved}");
