@@ -41,7 +41,7 @@ pub use file_scope::{ConfinedRoot, FileScope};
 pub use judge::{JUDGE_TIMEOUT, JudgeModel, JudgedCommand, SafetyJudge, Verdict};
 pub use path_class::{GuardRoots, PathGuards, PathVerdict};
 pub(crate) use path_class::{admits_edit, split_at_existing};
-pub use review::{Action, Analysis, Class, Confirmation, Delete, Effect, analyze, classify};
+pub use review::{Action, Analysis, Class, Confirmation, Effect, analyze, classify};
 pub(crate) use sandbox::{ConfinedSpawner, Guarded, InputBind, is_within_visible_home_entry};
 pub use sandbox::{
     HomeAccess, Protected, ResolvedSandboxMode, SCRATCH_MARKER, SandboxError, SandboxInfo,
@@ -269,9 +269,7 @@ pub(crate) fn guarded_review(
         PathVerdict::Refused(why) => Review::Refuse(why),
         PathVerdict::Sensitive(why) => Review::Ask(Confirmation::Sensitive(why), Unattended::Never),
         PathVerdict::Ordinary(Class::ReadOnly) => Review::Clear,
-        PathVerdict::Ordinary(Class::Edit { .. }) => {
-            edit_review(guards, &effects, edit_scope, excluded)
-        }
+        PathVerdict::Ordinary(Class::Edit) => edit_review(guards, &effects, edit_scope, excluded),
         PathVerdict::Ordinary(Class::Unvetted { why }) => Review::Ask(
             Confirmation::Unvetted {
                 why: why.clone(),

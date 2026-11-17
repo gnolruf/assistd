@@ -10,9 +10,10 @@ const MAX_DEPTH: usize = 64;
 /// Redirection operators other than here-documents, longest first.
 const REDIRECT_OPERATORS: &[&str] = &["&>>", "&>", ">>", ">|", ">&", "<&", "<>", ">", "<"];
 
-/// Reserved words after which bash still reads a reserved word such as `[[` or `case`.
-const BEFORE_RESERVED_WORD: &[&str] = &[
-    "!", "{", "if", "then", "else", "elif", "do", "while", "until", "time",
+/// Reserved words that leave the word after them in command position, where bash still
+/// reads a reserved word such as `[[` or `case`.
+pub(super) const COMMAND_PREFIX_WORDS: &[&str] = &[
+    "!", "{", "if", "then", "else", "elif", "do", "while", "until",
 ];
 
 /// A shell word after quote removal.
@@ -1084,12 +1085,14 @@ fn opens_conditional(words: &[Word]) -> bool {
         .is_some_and(|(last, before)| is_bare(last, "[[") && at_command_start(before))
 }
 
-/// Whether a word after `before` is where bash reads a reserved word.
+/// Whether a word after `before` is where bash reads a reserved word: after only
+/// [`COMMAND_PREFIX_WORDS`], `time` and `time -p`.
 fn at_command_start(before: &[Word]) -> bool {
     before.iter().enumerate().all(|(at, word)| {
-        BEFORE_RESERVED_WORD
+        COMMAND_PREFIX_WORDS
             .iter()
             .any(|keyword| is_bare(word, keyword))
+            || is_bare(word, "time")
             || (is_bare(word, "-p") && at > 0 && is_bare(&before[at - 1], "time"))
     })
 }

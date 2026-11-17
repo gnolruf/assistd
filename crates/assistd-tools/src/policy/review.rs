@@ -1,44 +1,29 @@
 //! Command review: the classifier, the shell-word helpers it shares, and why a script needs the
 //! user's confirmation.
 
+use std::fmt;
+use std::ops::Range;
 use std::path::Path;
-use std::{fmt, mem};
 
 use super::allowlist::ProgramApproval;
 use super::confirm::Risk;
 use super::path_class::{admits_edit, canonical_existing};
-use super::shell::{self, Script, Word};
+use super::shell::{self, COMMAND_PREFIX_WORDS, Script, Word};
 
 mod classify;
 mod evaluated;
+mod options;
 mod placeholder;
+mod programs;
 
-pub use classify::{Action, Analysis, Class, Delete, Effect, analyze, classify};
+pub use classify::{Action, Analysis, Class, Effect, analyze, classify};
 
 /// How many scripts deep (`eval`, `trap`, …) the classifier looks before
 /// calling a script unvetted.
 const MAX_NESTED_SCRIPTS: usize = 16;
 
-/// Reserved words that leave the word after them in command position.
-const COMMAND_PREFIX_WORDS: &[&str] = &[
-    "!", "{", "if", "then", "else", "elif", "do", "while", "until",
-];
-
-/// Builtins and programs that run a command given as their arguments, with
-/// the number of operands before that command.
-const WRAPPERS: &[(&str, usize)] = &[
-    ("builtin", 0),
-    ("command", 0),
-    ("coproc", 0),
-    ("env", 0),
-    ("exec", 0),
-    ("nice", 0),
-    ("nohup", 0),
-    ("stdbuf", 0),
-    ("time", 0),
-    ("timeout", 1),
-    ("xargs", 0),
-];
+/// How many wrappers deep a command may sit before what it runs is called unvetted.
+const MAX_WRAPPERS: usize = 16;
 
 /// Reserved words, which run nothing themselves when unquoted.
 const KEYWORDS: &[&str] = &[
@@ -59,35 +44,13 @@ const SAFE_BUILTINS: &[&str] = &[
 /// name (`env -S 'rm -rf ~'`).
 const SHELL_SYNTAX: &str = ";&|()<>`$";
 
-/// Wrapper options that take the next word as their value. Only documented
-/// value options belong here: a flag listed by mistake hides the command.
-const VALUE_OPTIONS: &[(&str, &[&str])] = &[
-    ("env", &["-u", "--unset", "-C", "--chdir"]),
-    ("nice", &["-n", "--adjustment"]),
-    (
-        "stdbuf",
-        &["-i", "-o", "-e", "--input", "--output", "--error"],
-    ),
-    ("timeout", &["-s", "--signal", "-k", "--kill-after"]),
-    (
-        "xargs",
-        &[
-            "-a",
-            "--arg-file",
-            "-d",
-            "--delimiter",
-            "-E",
-            "-I",
-            "-L",
-            "-n",
-            "--max-args",
-            "-P",
-            "--max-procs",
-            "-s",
-            "--max-chars",
-            "--process-slot-var",
-        ],
-    ),
+/// `command`'s options that make it describe a command instead of running it.
+const COMMAND_DESCRIBES: &[options::Flag] = &[options::Flag::Short('v'), options::Flag::Short('V')];
+
+/// `env`'s options whose value is a command line it runs.
+const COMMAND_LINE_OPTIONS: &[options::Flag] = &[
+    options::Flag::Short('S'),
+    options::Flag::Long("split-string"),
 ];
 
 /// The wrapper that appends arguments read from stdin to its command.
@@ -96,9 +59,6 @@ const FEEDS_ARGUMENTS: &str = "xargs";
 /// Where `find -exec` and [`FEEDS_ARGUMENTS`] put an input item inside
 /// their command.
 const INPUT_PLACEHOLDER: &str = "{}";
-
-/// `find` flags after which it runs a command.
-const FIND_EXEC_FLAGS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
 /// Files a redirection may write without confirmation, besides `/dev/fd/N`
 /// and files under `/tmp` or the scratch directory.
@@ -147,105 +107,110 @@ impl fmt::Display for Confirmation {
     }
 }
 
+/// A word of a simple command that names a command it runs.
 struct Candidate {
     at: usize,
-    may_be_command: bool,
+    /// One past the last of its arguments.
+    end: usize,
+    /// It is a wrapper given no command, so it runs one only when something appends it.
+    awaits_command: bool,
 }
 
-/// Where [`candidates`] is within a command word's arguments.
+/// The commands a simple command runs: its own, and those its wrappers and `find -exec` run.
 #[derive(Default)]
-struct Scan {
-    /// The command word runs a command after this many more operands.
-    pending: Option<usize>,
-    /// Flags after which it runs a command (`find -exec`).
-    exec_flags: Option<&'static [&'static str]>,
-    /// No exec flag has been seen yet, so its arguments are its own.
-    before_exec: bool,
-    value_options: &'static [&'static str],
-    /// The previous word was one of `value_options`.
-    value_next: bool,
-    /// The previous word was an option that may take this one as its value.
-    after_option: bool,
+struct Commands {
+    candidates: Vec<Candidate>,
+    /// Why the first wrapper whose options hide what it runs does so.
+    hidden: Option<String>,
 }
 
-impl Scan {
-    fn enter(&mut self, word: &Word, next: Option<&Word>) {
-        self.pending = wrapper_operands(word, next);
-        self.value_options = if word.dynamic_name {
-            &[]
-        } else {
-            value_options(&program(&word.text))
-        };
-        if let Some(flags) = exec_flags(word) {
-            self.exec_flags = Some(flags);
-            self.before_exec = true;
+impl Commands {
+    /// Note the command that `span` of `words` is, and the commands it runs in turn.
+    fn follow(&mut self, words: &[Word], span: Range<usize>, depth: usize) {
+        let word = &words[span.start];
+        let args = span.start + 1..span.end;
+        let candidate = self.candidates.len();
+        self.candidates.push(Candidate {
+            at: span.start,
+            end: span.end,
+            awaits_command: false,
+        });
+        if depth > MAX_WRAPPERS {
+            self.hidden
+                .get_or_insert_with(|| format!("`{}` is wrapped too deeply to vet", word.text));
+        } else if let Some(wrapper) = wrapper_named(word) {
+            let awaits_command = self.follow_wrapper(wrapper, words, args, depth);
+            self.candidates[candidate].awaits_command = awaits_command;
+        } else if let Some(finder) = per_item_runner(word) {
+            let walked = options::walk(finder, &words[args.clone()]);
+            for command in walked.commands.iter().filter(|command| !command.is_empty()) {
+                let span = args.start + command.start..args.start + command.end;
+                self.follow(words, span, depth + 1);
+            }
         }
     }
 
-    /// Classify the argument `word` at `at`; `None` when it can be neither
-    /// a command nor one of its arguments.
-    fn classify(&mut self, at: usize, word: &Word, next: Option<&Word>) -> Option<Candidate> {
-        if self
-            .exec_flags
-            .is_some_and(|flags| flags.contains(&word.text.as_str()))
-        {
-            self.before_exec = false;
-            self.pending = Some(0);
-            self.after_option = false;
-            return None;
+    /// Follow `wrapper`, given the `args` of `words`, to the command after its operands and to
+    /// each command line an option gives it; whether it has neither.
+    fn follow_wrapper(
+        &mut self,
+        wrapper: &programs::Wrapper,
+        words: &[Word],
+        args: Range<usize>,
+        depth: usize,
+    ) -> bool {
+        let own = &words[args.clone()];
+        let walked = options::walk(&wrapper.options, own);
+        if let Some(option) = walked.unlisted {
+            self.hidden.get_or_insert_with(|| {
+                format!(
+                    "`{} {}` is not a vetted option, so what it runs cannot be told",
+                    wrapper.name, option.text
+                )
+            });
+            return false;
         }
-        if self.before_exec || mem::take(&mut self.value_next) {
-            return None;
+        if wrapper.name == "command" && walked.gives(COMMAND_DESCRIBES) {
+            return false;
         }
-        if !word.quoted && word.text == "--" {
-            self.pending = self.pending.map(|_| 0);
-            self.after_option = false;
-            return None;
+        let mut runs = false;
+        for given in &walked.options {
+            if !COMMAND_LINE_OPTIONS.contains(&given.flag) {
+                continue;
+            }
+            runs = true;
+            match given.value_at {
+                Some(line) => {
+                    let line = args.start + line;
+                    self.follow(words, line..line + 1, depth + 1);
+                }
+                None => {
+                    self.hidden.get_or_insert_with(|| {
+                        format!(
+                            "`{} {}` may run a command the lists cannot see",
+                            wrapper.name, given.flag
+                        )
+                    });
+                }
+            }
         }
-        let option = !word.dynamic && word.text.starts_with('-');
-        let operand = !option && !self.after_option && !is_assignment(&word.text);
-        let may_be_command = match self.pending {
-            Some(operands) if operand && operands > 0 => {
-                self.pending = Some(operands - 1);
-                false
-            }
-            Some(_) if operand => {
-                self.enter(word, next);
-                true
-            }
-            _ => {
-                self.pending.is_some_and(|operands| {
-                    operands == 0 || (self.after_option && is_command_line(word))
-                }) && !option
-                    && !is_assignment(&word.text)
-            }
-        };
-        self.value_next = option && self.value_options.contains(&word.text.as_str());
-        self.after_option = option
-            && !self.value_next
-            && !word.text.contains('=')
-            && (word.text.len() == 2 || word.text.starts_with("--"));
-        Some(Candidate { at, may_be_command })
+        let command = walked
+            .operands
+            .iter()
+            .filter(|&&at| !is_assignment(&own[at].text))
+            .nth(wrapper.operands);
+        if let Some(&command) = command {
+            self.follow(words, args.start + command..args.end, depth + 1);
+        }
+        !runs && command.is_none()
     }
 }
 
-/// The words of a simple command that may name a command it runs:
-/// `start`, and the words after a wrapper or `find -exec`. Later words are
-/// that command's arguments, still checked against patterns.
-fn candidates(words: &[Word], start: usize) -> Vec<Candidate> {
-    let mut out = vec![Candidate {
-        at: start,
-        may_be_command: true,
-    }];
-    let mut scan = Scan::default();
-    scan.enter(&words[start], words.get(start + 1));
-    if scan.pending.is_none() && scan.exec_flags.is_none() {
-        return out;
-    }
-    for (at, word) in words.iter().enumerate().skip(start + 1) {
-        out.extend(scan.classify(at, word, words.get(at + 1)));
-    }
-    out
+/// The commands the simple command `words` runs, its own starting at `start`.
+fn commands(words: &[Word], start: usize) -> Commands {
+    let mut found = Commands::default();
+    found.follow(words, start..words.len(), 0);
+    found
 }
 
 /// A word that reads as a subcommand (`build`, `run-tests`) rather than a
@@ -317,17 +282,11 @@ fn changed_sensitive_variable(script: &Script) -> Option<&str> {
 /// (`declare -n ref=NAME`), or a `${NAME:=…}` default.
 fn changed_variables(text: &str) -> impl Iterator<Item = &str> {
     let whole = shell::is_name(text).then_some(text);
-    let (assigned, value) = match text.split_once('=') {
-        Some((name, value)) => {
-            let name = name.strip_suffix('+').unwrap_or(name);
-            let name = name.split_once('[').map_or(name, |(base, _)| base);
-            (
-                shell::is_name(name).then_some(name),
-                shell::is_name(value).then_some(value),
-            )
-        }
-        None => (None, None),
-    };
+    let assigned = assigned_name(text);
+    let value = text
+        .split_once('=')
+        .map(|(_, value)| value)
+        .filter(|value| shell::is_name(value));
     let defaults = text.match_indices("${").filter_map(|(at, _)| {
         let rest = &text[at + 2..];
         let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
@@ -362,21 +321,21 @@ fn command_start(words: &[Word]) -> Option<usize> {
     None
 }
 
-/// How many operands `word` reads before the command it runs, if it is a
-/// wrapper.
-fn wrapper_operands(word: &Word, next: Option<&Word>) -> Option<usize> {
-    if word.dynamic_name {
-        return None;
-    }
-    let program = program(&word.text);
-    let program = program.as_str();
-    if program == "command" && next.is_some_and(|n| matches!(n.text.as_str(), "-v" | "-V")) {
-        return None;
-    }
-    WRAPPERS
-        .iter()
-        .find(|&&(w, _)| w == program)
-        .map(|&(_, operands)| operands)
+/// The wrapper `word` names when it is in command position.
+fn wrapper_named(word: &Word) -> Option<&'static programs::Wrapper> {
+    (!word.dynamic_name)
+        .then(|| programs::wrapper(&program(&word.text)))
+        .flatten()
+}
+
+/// The options of the program `word` names, when it runs a command once for each item it
+/// finds, as `find -exec` does.
+fn per_item_runner(word: &Word) -> Option<&'static options::OptionSpec> {
+    (!word.dynamic_name)
+        .then(|| programs::read_only(&program(&word.text)))
+        .flatten()
+        .map(|program| &program.options)
+        .filter(|options| options.runs_commands())
 }
 
 /// A literal word holding a whole command line (`env -S 'rm -rf ~'`),
@@ -388,45 +347,16 @@ fn is_command_line(word: &Word) -> bool {
             .contains(|c: char| c.is_whitespace() || SHELL_SYNTAX.contains(c))
 }
 
-fn exec_flags(word: &Word) -> Option<&'static [&'static str]> {
-    (!word.dynamic_name && program(&word.text) == "find").then_some(FIND_EXEC_FLAGS)
-}
-
-fn value_options(program: &str) -> &'static [&'static str] {
-    VALUE_OPTIONS
-        .iter()
-        .find(|&&(p, _)| p == program)
-        .map_or(&[], |&(_, options)| options)
-}
-
-/// The first of `env`'s options with a value attached (`-Sx`, `-iS`,
-/// `--split-string=x`), any of which may hide an `-S` command line.
-fn env_attached_option(args: &[Word]) -> Option<&str> {
-    let value_options = value_options("env");
-    let mut value_next = false;
-    for arg in args {
-        let text = arg.text.as_str();
-        if mem::take(&mut value_next) {
-            continue;
-        }
-        if !text.starts_with('-') || text == "--" {
-            return None;
-        }
-        if text.contains('=') || (!text.starts_with("--") && text.len() > 2) {
-            return Some(text);
-        }
-        value_next = value_options.contains(&text);
-    }
-    None
+/// The variable `word` assigns, as `NAME=…`, `NAME+=…` or `NAME[…]=…`.
+fn assigned_name(word: &str) -> Option<&str> {
+    let (name, _) = word.split_once('=')?;
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let name = name.split_once('[').map_or(name, |(base, _)| base);
+    shell::is_name(name).then_some(name)
 }
 
 fn is_assignment(word: &str) -> bool {
-    word.split_once('=').is_some_and(|(name, _)| {
-        let name = name.strip_suffix('+').unwrap_or(name);
-        let name = name.split_once('[').map_or(name, |(base, _)| base);
-        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    })
+    assigned_name(word).is_some()
 }
 
 fn is_stdin_path(path: &str) -> bool {

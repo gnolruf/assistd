@@ -434,15 +434,11 @@ fn hidden_from_bash_note(raw_path: &str, dir: &Path, sharing_hint: &str) -> Stri
 /// Writing `path` as an edit under the path guards: refused when catastrophic, always asked
 /// when sensitive, and unattended in accept-edits mode inside `cfg`'s writable prefixes.
 fn review_write(guards: &PathGuards, path: &Path, cfg: &WritePolicyCfg) -> Review {
-    let written = path.display().to_string();
     let analysis = Analysis {
-        class: Class::Edit {
-            writes: vec![written.clone()],
-            deletes: Vec::new(),
-        },
+        class: Class::Edit,
         effects: vec![Effect {
             action: Action::Write,
-            path: written,
+            path: path.display().to_string(),
             recursive: false,
         }],
         carried: Vec::new(),

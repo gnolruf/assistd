@@ -572,7 +572,8 @@ write or delete the literal paths they name, or redirections to a
 literal path), or unvetted (anything else: another program, a path
 from a variable, substitution or brace expansion, which may lie anywhere,
 a command only known at run time, a changed `PATH`/`LD_*`/`GIT_*`, a
-disqualifying option such as `sort -o` or `find -exec`, a redirection
+disqualifying option such as `sort -o` or `find -exec`, an option the
+lists do not hold for its program, a redirection
 from bash's `/dev/tcp` or `/dev/udp`). The path guards
 then resolve every target: destroying `$HOME`, a personal folder or a
 git work tree is refused in every mode, and touching credentials, an

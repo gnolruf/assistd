@@ -111,6 +111,19 @@ echo "${arr[@]}""#,
     r"find . -name x -ok rm {} \;",
     r"find . -name a -print -exec echo {} \; -exec rm {} \;",
     "timeout -s KILL 1 rm a",
+    "timeout -v 1 rm a",
+    "timeout --foreground 1 shred a",
+    "timeout -k 1 --preserve-status 1 rm a",
+    "timeout -- 1 rm a",
+    "nice -5 rm a",
+    "nice --adjustment 5 shred a",
+    "stdbuf --output=L -e0 rm a",
+    "env -i -u HOME rm a",
+    "env -S 'rm a'",
+    "env --ignore-environment --chdir . shred a",
+    "xargs -r -n1 -a a rm",
+    "command -p rm a",
+    "time -p rm a",
     "stdbuf -o0 shred a",
     "nice -- rm a",
     "env -- rm a",
@@ -288,6 +301,12 @@ const READ_ONLY_FORMS: &[&str] = &[
     "find . -fprintf found %p",
     "find sub -type f -fls listing",
     "find . -name a -exec cat {} +",
+    "find . -not -name -exec -delete",
+    r"find . -name a -exec echo + -delete \;",
+    "find . -name a -exec echo {} + -delete",
+    "find -- . -delete",
+    "sort -S 1M -T . a",
+    "sort -ko a",
     "uniq a out",
     "split a",
     "dd if=a of=out",
@@ -421,6 +440,22 @@ const READ_FORMS: &[&str] = &[
     "exec 3< /dev/tcp/127.0.0.1/9",
     r#": < "/dev/tcp/127.0.0.1/9""#,
     "h=127.0.0.1; : < /dev/tcp/$h/9",
+    "grep -e line --exclude-from guarded a",
+    "diff --from-file=guarded a",
+    "diff --to-file guarded a",
+    "sort --random-source=guarded -R a",
+    "sort --files0-from=guarded",
+    "wc --files0-from guarded",
+    "hexdump --format-file=guarded a",
+    r#"p=-fguarded; grep "$p" a"#,
+    r#"p=--file=guarded; grep -- "$p" a"#,
+    r#"p=guarded; grep -e "$p" a"#,
+    r#"n=guarded; head -n "$n" a"#,
+    r#"d=--files0-from=guarded; du -- "$d""#,
+    r#"s='x --files0-from=guarded'; du --time-style="$s""#,
+    "s='x --files0-from=guarded'; du --time-style=$s",
+    r#"o=-fguarded; date -d "$o""#,
+    r#"o=-fguarded; date "$o""#,
 ];
 
 /// Programs that run a command; their shims run the real program.
@@ -652,7 +687,7 @@ fn classified_scripts_run_only_the_programs_their_class_allows() {
             .collect()
     };
     let read_only = of_class(|class| *class == Class::ReadOnly);
-    let edits = of_class(|class| matches!(class, Class::Edit { .. }));
+    let edits = of_class(|class| *class == Class::Edit);
     assert!(
         !read_only.is_empty() && !edits.is_empty(),
         "the classifier found no read-only or no edit script"
