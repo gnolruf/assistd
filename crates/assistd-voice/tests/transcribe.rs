@@ -68,7 +68,7 @@ async fn make_transcriber(vad: bool) -> SherpaTranscriber {
         vad_enabled: vad,
         ..TranscriptionConfig::default()
     };
-    SherpaTranscriber::load_cpu(&config)
+    SherpaTranscriber::load(&config)
         .await
         .expect("transcriber loads")
 }

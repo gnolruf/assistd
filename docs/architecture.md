@@ -722,11 +722,9 @@ worker's stdin and stdout (the worker moves fd 1 to stderr so native libraries
 cannot print into the pipe); audio never crosses it, only transcripts, state
 and replies. The daemon holds proxies behind `VoiceInput`, `VoiceOutput` and
 `ContinuousListener` that forward each call and mirror the worker's capture
-state, listen phase and what it heard into the channels those traits expose,
-and it re-sends GPU availability (presence `Active`, foreign VRAM contention)
-whenever it changes, for the worker's `QueuedTranscriber`. When the worker
-dies, calls in flight fail (speech is dropped and the turn carries on as text;
-a push-to-talk recording fails), the listener reports `Off`, capture and speech
+state, listen phase and what it heard into the channels those traits expose.
+When the worker dies, calls in flight fail (speech is dropped and the turn
+carries on as text; a push-to-talk recording fails), the listener reports `Off`, capture and speech
 go back to `Starting`, and the supervisor restarts it under `RestartPolicy`
 backoff, resuming listening if it was on; while a restart cap is tripped both
 are `Unavailable` between retries five minutes apart. The `VramLedger` counts the worker's VRAM as the daemon's own.
@@ -777,10 +775,13 @@ interrupts the turn and its speech, and the whole utterance becomes the
 next command; unconfirmed speech over a reply is dropped, never wake-gated.
 Transcription runs on CUDA only when `prefer_gpu` is set and the binary
 ships sherpa-onnx's CUDA libraries (`libonnxruntime_providers_cuda.so`
-beside it); the fp16 Parakeet then holds about 2.6 GB of VRAM. A GPU
-transcriber shares the GPU with the model; the `QueuedTranscriber` routes
-to a lazily built CPU transcriber of the same model while presence is not
-`Active` or the `VramLedger` reports another process crowding the GPU.
+beside it). The recognizer is created with the provider string
+`cuda:<options file>`, the file being a memfd named through
+`/proc/self/fd`, whose `arena_extend_strategy=kSameAsRequested` keeps ONNX
+Runtime's arena from rounding each growth up to a power of two; the fp16
+Parakeet holds up to about 2.6 GB of VRAM. A GPU transcriber shares
+the GPU with the model and keeps its VRAM for as long as the worker runs,
+through sleep and while another process crowds the GPU.
 
 A `RequestBody::WakeWord` carries a `WakeWordOp` (`Status`, `TestStart`,
 `TestStop`). A test is a

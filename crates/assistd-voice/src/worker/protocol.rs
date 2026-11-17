@@ -42,11 +42,6 @@ pub(super) enum ToWorker {
         replying: bool,
     },
     OpenFollowUp,
-    /// Whether the GPU is free for transcription, re-sent whenever it changes.
-    Gpu {
-        presence_active: bool,
-        foreign_busy: bool,
-    },
 }
 
 /// What a [`ToWorker::Call`] asks for.
@@ -248,10 +243,6 @@ mod tests {
             },
             ToWorker::SetReplying { replying: true },
             ToWorker::OpenFollowUp,
-            ToWorker::Gpu {
-                presence_active: false,
-                foreign_busy: true,
-            },
         ]);
         round_trips(&messages);
     }

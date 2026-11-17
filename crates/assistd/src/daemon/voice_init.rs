@@ -6,14 +6,12 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use assistd_core::{AppState, Component, VramLedger, spawn_supervised};
+use assistd_core::{AppState, Component, spawn_supervised};
 use assistd_utils::readiness::Readiness;
 use assistd_voice::worker::{VoiceWorkerSpec, supervise};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::info;
-
-use super::voice_probe::PresenceGpuProbe;
 
 /// The running daemon's own image, which stays this build even after the
 /// file on disk is replaced.
@@ -32,14 +30,13 @@ impl VoiceService {
     /// `shutdown` does.
     pub(super) fn spawn(
         state: Arc<AppState>,
-        vram: Option<Arc<VramLedger>>,
         model_settled: watch::Receiver<bool>,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         let task = spawn_supervised(
             "voice_worker",
             Component::Voice,
-            run(state, vram, model_settled, shutdown),
+            run(state, model_settled, shutdown),
         );
         Self { task }
     }
@@ -55,7 +52,6 @@ impl VoiceService {
 
 async fn run(
     state: Arc<AppState>,
-    vram: Option<Arc<VramLedger>>,
     mut model_settled: watch::Receiver<bool>,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -85,13 +81,9 @@ async fn run(
         args: vec![OsString::from(WORKER_SUBCOMMAND)],
         config: config.clone(),
     };
-    let gpu = Arc::new(PresenceGpuProbe::new(
-        state.subsystems.presence.clone(),
-        vram,
-    ));
     let changes = voice.subscribe_readiness();
     tokio::join!(
-        supervise(spec, Arc::clone(voice), gpu, shutdown.clone()),
+        supervise(spec, Arc::clone(voice), shutdown.clone()),
         publish_changes(&state, changes, shutdown),
     );
 }

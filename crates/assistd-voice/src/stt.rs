@@ -2,7 +2,10 @@
 //! sherpa-onnx, on CUDA or the CPU.
 
 use std::fmt;
+use std::fs::File;
+use std::io::{self, Write};
 use std::ops::Range;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,6 +13,7 @@ use assistd_config::{SttEncoder, TranscriptionConfig};
 use assistd_utils::hf::download::{self, DownloadError, ensure_cached_id};
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use rustix::fs::{MemfdFlags, memfd_create};
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig};
 
 use crate::gpu;
@@ -28,6 +32,10 @@ const SEGMENT_OVERLAP_SECS: f32 = 0.1;
 /// Silence inserted between stitched speech segments.
 const SEGMENT_GAP_SECS: f32 = 0.1;
 
+/// CUDA execution-provider options: grow the arena by what each allocation
+/// asks for, where the default rounds every growth up to a power of two.
+const CUDA_PROVIDER_OPTIONS: &str = "arena_extend_strategy=kSameAsRequested\n";
+
 /// The files of a Parakeet transducer on disk.
 #[derive(Debug, Clone)]
 struct ModelFiles {
@@ -35,6 +43,35 @@ struct ModelFiles {
     decoder: PathBuf,
     joiner: PathBuf,
     tokens: PathBuf,
+}
+
+/// Where the recognizer runs. sherpa-onnx takes the CUDA options only as a
+/// file it reads while creating the recognizer, so they sit in a memfd
+/// that lives until then; nothing is written to disk.
+#[derive(Debug)]
+enum Provider {
+    Cpu,
+    Cuda { options: File },
+}
+
+impl Provider {
+    /// CUDA when `prefer_gpu` is set and CUDA is usable, else the CPU.
+    fn choose(prefer_gpu: bool) -> Result<Self, TranscriptionError> {
+        if !use_gpu(prefer_gpu) {
+            return Ok(Self::Cpu);
+        }
+        let options = cuda_options_memfd().map_err(TranscriptionError::CudaOptions)?;
+        Ok(Self::Cuda { options })
+    }
+
+    /// The provider string sherpa-onnx parses: a name, then `:` and the
+    /// path of the options file when there is one.
+    fn sherpa_name(&self) -> String {
+        match self {
+            Self::Cpu => "cpu".into(),
+            Self::Cuda { options } => format!("cuda:/proc/self/fd/{}", options.as_raw_fd()),
+        }
+    }
 }
 
 /// Silero VAD run ahead of decoding, keeping only the speech segments.
@@ -70,13 +107,11 @@ impl SpeechTrimmer {
 pub struct SherpaTranscriber {
     recognizer: Arc<OfflineRecognizer>,
     trimmer: Option<Arc<SpeechTrimmer>>,
-    is_gpu: bool,
 }
 
 impl fmt::Debug for SherpaTranscriber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SherpaTranscriber")
-            .field("is_gpu", &self.is_gpu)
             .field("trimmer", &self.trimmer)
             .finish_non_exhaustive()
     }
@@ -86,15 +121,6 @@ impl SherpaTranscriber {
     /// Download `config`'s models if missing and load them, on CUDA when
     /// `prefer_gpu` is set and CUDA is usable, else on the CPU.
     pub async fn load(config: &TranscriptionConfig) -> Result<Self, TranscriptionError> {
-        Self::load_on(config, use_gpu(config.prefer_gpu)).await
-    }
-
-    /// The same models on the CPU, for while the GPU is busy or asleep.
-    pub async fn load_cpu(config: &TranscriptionConfig) -> Result<Self, TranscriptionError> {
-        Self::load_on(config, false).await
-    }
-
-    async fn load_on(config: &TranscriptionConfig, gpu: bool) -> Result<Self, TranscriptionError> {
         let cache_dir = config.model_cache_dir.as_ref().map_or_else(
             || download::default_cache_dir("stt"),
             |dir| Ok(dir.as_path().to_path_buf()),
@@ -106,8 +132,10 @@ impl SherpaTranscriber {
             None
         };
         let threads = config.threads.get();
+        let prefer_gpu = config.prefer_gpu;
         let (recognizer, trimmer) = tokio::task::spawn_blocking(move || {
-            let recognizer = create_recognizer(&files, gpu, threads)?;
+            let provider = Provider::choose(prefer_gpu)?;
+            let recognizer = create_recognizer(&files, &provider, threads)?;
             let trimmer = vad_model.as_deref().map(SpeechTrimmer::load).transpose()?;
             Ok::<_, TranscriptionError>((recognizer, trimmer))
         })
@@ -115,17 +143,12 @@ impl SherpaTranscriber {
         Ok(Self {
             recognizer: Arc::new(recognizer),
             trimmer: trimmer.map(Arc::new),
-            is_gpu: gpu,
         })
     }
 }
 
 #[async_trait]
 impl Transcriber for SherpaTranscriber {
-    fn is_gpu(&self) -> bool {
-        self.is_gpu
-    }
-
     async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError> {
         if pcm_i16_16k_mono.is_empty() {
             return Err(TranscriptionError::EmptyAudio);
@@ -184,9 +207,15 @@ fn use_gpu(prefer: bool) -> bool {
     }
 }
 
+fn cuda_options_memfd() -> io::Result<File> {
+    let mut options = File::from(memfd_create("assistd-cuda-options", MemfdFlags::CLOEXEC)?);
+    options.write_all(CUDA_PROVIDER_OPTIONS.as_bytes())?;
+    Ok(options)
+}
+
 fn create_recognizer(
     files: &ModelFiles,
-    gpu: bool,
+    provider: &Provider,
     threads: u32,
 ) -> Result<OfflineRecognizer, TranscriptionError> {
     let mut config = OfflineRecognizerConfig::default();
@@ -198,7 +227,7 @@ fn create_recognizer(
     config.model_config.tokens = Some(path_string(&files.tokens));
     config.model_config.model_type = Some("nemo_transducer".into());
     config.model_config.num_threads = i32::try_from(threads).unwrap_or(i32::MAX);
-    config.model_config.provider = Some(if gpu { "cuda" } else { "cpu" }.into());
+    config.model_config.provider = Some(provider.sherpa_name());
     config.decoding_method = Some("greedy_search".into());
     OfflineRecognizer::create(&config).ok_or_else(|| {
         TranscriptionError::ModelLoad(format!(

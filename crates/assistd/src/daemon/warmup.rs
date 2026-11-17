@@ -118,7 +118,6 @@ mod tests {
     use std::time::Duration;
 
     use assistd_config::VoiceConfig;
-    use assistd_voice::NullBusyProbe;
     use assistd_voice::worker::{VoiceWorkerSpec, supervise};
 
     use super::*;
@@ -149,12 +148,7 @@ while read -r _line; do :; done
         };
         let voice = VoiceManager::new(true);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let supervisor = tokio::spawn(supervise(
-            spec,
-            Arc::clone(&voice),
-            Arc::new(NullBusyProbe),
-            shutdown_rx,
-        ));
+        let supervisor = tokio::spawn(supervise(spec, Arc::clone(&voice), shutdown_rx));
         let mut readiness = voice.subscribe_readiness();
         while voice.speech().output().is_err() {
             readiness.changed().await.unwrap();

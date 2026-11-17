@@ -51,8 +51,8 @@ pub struct TranscriptionConfig {
     /// content).
     pub model: SttEncoder,
     /// Transcribe on CUDA when an NVIDIA GPU is present and the binary ships
-    /// sherpa-onnx's CUDA libraries (`libonnxruntime_providers_cuda.so`);
-    /// otherwise, and while the GPU is busy or asleep, on the CPU.
+    /// sherpa-onnx's CUDA libraries (`libonnxruntime_providers_cuda.so`),
+    /// holding the model's VRAM while voice input runs; otherwise on the CPU.
     pub prefer_gpu: bool,
     /// CPU threads for transcription on the CPU, `1..`.
     pub threads: NonZeroU32,
