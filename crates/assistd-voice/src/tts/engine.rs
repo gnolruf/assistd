@@ -25,21 +25,21 @@ const NOISE_SCALE_W: f32 = 0.8;
 
 /// One sentence of mono audio in `-1.0..=1.0`.
 #[derive(Debug, Clone)]
-pub struct Utterance {
+pub(super) struct Utterance {
     pub sample_rate: NonZeroU32,
     pub samples: Vec<f32>,
 }
 
 impl Utterance {
     /// How long the audio takes to play.
-    pub fn duration(&self) -> Duration {
+    pub(super) fn duration(&self) -> Duration {
         let samples = u64::try_from(self.samples.len()).unwrap_or(u64::MAX);
         Duration::from_secs(samples) / self.sample_rate.get()
     }
 }
 
 /// A loaded voice. Synthesis blocks, so call it off the async runtime.
-pub struct SpeechEngine {
+pub(super) struct SpeechEngine {
     tts: OfflineTts,
     frontend: Frontend,
     generation: GenerationConfig,
@@ -65,7 +65,7 @@ enum Frontend {
 impl SpeechEngine {
     /// Load `voice` with sherpa-onnx. Fails when sherpa rejects the files,
     /// `speaker_id` is out of range, or a VITS voice finds no `espeak-ng`.
-    pub fn load(
+    pub(super) fn load(
         voice: &VoiceFiles,
         speaker_id: u32,
         length_scale: f32,
@@ -103,7 +103,7 @@ impl SpeechEngine {
     }
 
     /// Synthesize one sentence; text with nothing to speak gives no samples.
-    pub fn synthesize(&self, sentence: &str) -> Result<Utterance, SpeechError> {
+    pub(super) fn synthesize(&self, sentence: &str) -> Result<Utterance, SpeechError> {
         let rejected = |reason: String| SpeechError::Rejected { reason };
         let text: String = sentence
             .chars()

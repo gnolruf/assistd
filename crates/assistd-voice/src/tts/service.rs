@@ -109,7 +109,7 @@ impl CircuitState {
 /// minute degrade it and `speak` silently drops utterances; a minute after the last failure,
 /// one utterance is let through to re-arm the service or re-open the breaker.
 #[derive(Debug)]
-pub struct SherpaVoiceOutput {
+pub(crate) struct SherpaVoiceOutput {
     engine: Arc<Mutex<SpeechEngine>>,
     playback: Arc<RodioPlaybackWorker>,
     circuit: Arc<Mutex<CircuitState>>,
@@ -118,7 +118,7 @@ pub struct SherpaVoiceOutput {
 impl SherpaVoiceOutput {
     /// Fetch and load the voice, open the audio device, and speak a
     /// health-check sentence.
-    pub async fn start(config: &SynthesisConfig) -> Result<Self, SpeechError> {
+    pub(crate) async fn start(config: &SynthesisConfig) -> Result<Self, SpeechError> {
         let voice = ensure_voice(config).await?;
         tracing::info!(target: "assistd::voice::tts", ?voice, "voice resolved");
         let (speaker_id, length_scale) = (config.speaker_id, config.length_scale.get());

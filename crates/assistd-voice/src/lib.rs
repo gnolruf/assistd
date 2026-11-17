@@ -18,7 +18,7 @@ pub mod mic;
 pub mod sentence;
 pub mod stt;
 pub mod transcribe;
-pub mod tts;
+mod tts;
 pub mod vad;
 pub mod worker;
 
@@ -36,7 +36,7 @@ pub use transcribe::{
     BusyProbe, CpuFallbackFactory, NullBusyProbe, QueuedTranscriber, Transcriber,
     TranscriptionError,
 };
-pub use tts::{SherpaVoiceOutput, SpeechError};
+pub use tts::SpeechError;
 
 /// Push-to-talk voice capture: buffer mic audio between
 /// [`start_recording`](VoiceInput::start_recording) and

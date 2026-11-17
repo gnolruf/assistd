@@ -12,10 +12,10 @@ use tracing::{info, warn};
 
 use crate::listen::{ContinuousListener, MicContinuousListener, NoContinuousListener};
 use crate::mic::capture::{DeviceValidationError, validate};
+use crate::tts::SherpaVoiceOutput;
 use crate::{
-    BusyProbe, CpuFallbackFactory, MicVoiceInput, QueuedTranscriber, SherpaTranscriber,
-    SherpaVoiceOutput, SileroVad, Transcriber, VoiceCapture, VoiceOutput, VoiceOutputController,
-    WakeWordSpotter,
+    BusyProbe, CpuFallbackFactory, MicVoiceInput, QueuedTranscriber, SherpaTranscriber, SileroVad,
+    Transcriber, VoiceCapture, VoiceOutput, VoiceOutputController, WakeWordSpotter,
 };
 
 /// Longest wait between checks for an unplugged `voice.mic_device`.
