@@ -2,7 +2,6 @@
 //! capture with its transcriber and, when enabled, the wake-word listener.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use assistd_config::{SynthesisConfig, VoiceConfig};
@@ -14,38 +13,12 @@ use crate::listen::{ContinuousListener, MicContinuousListener, NoContinuousListe
 use crate::mic::capture::{DeviceValidationError, validate};
 use crate::tts::SherpaVoiceOutput;
 use crate::{
-    BusyProbe, CpuFallbackFactory, MicVoiceInput, QueuedTranscriber, SherpaTranscriber, SileroVad,
-    Transcriber, VoiceCapture, VoiceOutput, VoiceOutputController, WakeWordSpotter,
+    MicVoiceInput, SherpaTranscriber, SileroVad, Transcriber, VoiceCapture, VoiceOutput,
+    VoiceOutputController, WakeWordSpotter,
 };
 
 /// Longest wait between checks for an unplugged `voice.mic_device`.
 const MIC_POLL_CAP: Duration = Duration::from_secs(10);
-
-/// GPU availability as the daemon last reported it; the GPU counts as
-/// unavailable until the first report.
-#[derive(Debug, Default)]
-pub(super) struct ReportedGpu {
-    presence_active: AtomicBool,
-    foreign_busy: AtomicBool,
-}
-
-impl ReportedGpu {
-    pub(super) fn update(&self, presence_active: bool, foreign_busy: bool) {
-        self.presence_active
-            .store(presence_active, Ordering::SeqCst);
-        self.foreign_busy.store(foreign_busy, Ordering::SeqCst);
-    }
-}
-
-impl BusyProbe for ReportedGpu {
-    fn foreign_gpu_busy(&self) -> bool {
-        self.foreign_busy.load(Ordering::SeqCst)
-    }
-
-    fn presence_active(&self) -> bool {
-        self.presence_active.load(Ordering::SeqCst)
-    }
-}
 
 /// Speech output, or why there is none.
 pub(super) async fn start_output(config: &SynthesisConfig) -> Result<Arc<dyn VoiceOutput>, String> {
@@ -73,7 +46,6 @@ pub(super) async fn start_output(config: &SynthesisConfig) -> Result<Arc<dyn Voi
 /// the reason once.
 pub(super) async fn start_capture(
     config: &VoiceConfig,
-    gpu: Arc<ReportedGpu>,
     speech: Arc<VoiceOutputController>,
     capture_lost: mpsc::UnboundedSender<String>,
     on_missing: impl FnOnce(String),
@@ -84,14 +56,14 @@ pub(super) async fn start_capture(
     }
     wait_for_mic_device(config.mic_device.as_deref(), on_missing).await?;
     info!("voice: building mic input ({})", config.transcription.model);
-    let primary = SherpaTranscriber::load(&config.transcription)
-        .await
-        .map_err(|e| {
-            warn!("voice input failed to initialize: {e:#}; PTT commands will error");
-            format!("speech-to-text failed to initialize: {e:#}")
-        })?;
-    let is_gpu = primary.is_gpu();
-    let transcriber = with_cpu_fallback(config, gpu, Arc::new(primary), is_gpu);
+    let transcriber: Arc<dyn Transcriber> = Arc::new(
+        SherpaTranscriber::load(&config.transcription)
+            .await
+            .map_err(|e| {
+                warn!("voice input failed to initialize: {e:#}; PTT commands will error");
+                format!("speech-to-text failed to initialize: {e:#}")
+            })?,
+    );
     let mic = MicVoiceInput::new(transcriber.clone(), config.mic_device.clone());
     let listener = match start_listener(config, &transcriber, speech, capture_lost).await {
         Some(listener) => listener,
@@ -175,31 +147,4 @@ async fn start_listener(
         capture_lost,
     );
     Some(Arc::new(listener))
-}
-
-/// Wrap a GPU transcriber so it falls back to CPU while the GPU is
-/// unavailable; CPU transcribers are returned unchanged.
-fn with_cpu_fallback(
-    config: &VoiceConfig,
-    gpu: Arc<ReportedGpu>,
-    primary: Arc<dyn Transcriber>,
-    is_gpu: bool,
-) -> Arc<dyn Transcriber> {
-    if !is_gpu {
-        info!("voice: CPU transcription active");
-        return primary;
-    }
-    let cpu_config = config.transcription.clone();
-    let cpu_factory: CpuFallbackFactory = Arc::new(move || {
-        let cpu_config = cpu_config.clone();
-        Box::pin(async move {
-            let fallback = SherpaTranscriber::load_cpu(&cpu_config).await?;
-            Ok(Arc::new(fallback) as Arc<dyn Transcriber>)
-        })
-    });
-    info!(
-        "voice: GPU transcription active, shared with the LLM; CPU fallback armed \
-         for sleep and foreign VRAM use"
-    );
-    Arc::new(QueuedTranscriber::new(primary, cpu_factory, gpu))
 }

@@ -10,7 +10,7 @@ use std::time::Duration;
 use assistd_config::VoiceConfig;
 use assistd_ipc::ComponentReadiness;
 use assistd_voice::worker::{VoiceWorkerSpec, supervise};
-use assistd_voice::{NullBusyProbe, VoiceManager, VoiceOutputError, VoiceWorkerError};
+use assistd_voice::{VoiceManager, VoiceOutputError, VoiceWorkerError};
 use rustix::process::{Pid, Signal, kill_process};
 use tokio::sync::watch;
 
@@ -68,12 +68,7 @@ async fn a_worker_killed_mid_speech_fails_the_speech_and_restarts_ready() {
     };
     let voice = VoiceManager::new(true);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let supervisor = tokio::spawn(supervise(
-        spec,
-        Arc::clone(&voice),
-        Arc::new(NullBusyProbe),
-        shutdown_rx,
-    ));
+    let supervisor = tokio::spawn(supervise(spec, Arc::clone(&voice), shutdown_rx));
     wait_for_readiness(&voice, &ComponentReadiness::Ready).await;
 
     let output = voice.speech().output().expect("speech is ready");

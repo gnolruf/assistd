@@ -23,10 +23,7 @@ use tracing::{info, warn};
 use super::link::{Link, StartupReport};
 use super::protocol::{Startup, ToWorker, decode, encode};
 use super::proxy::{WorkerListener, WorkerVoiceInput, WorkerVoiceOutput};
-use crate::{BusyProbe, VoiceCapture, VoiceManager, VoiceOutput};
-
-/// How often GPU availability is checked for a change to send on.
-const GPU_POLL: Duration = Duration::from_millis(250);
+use crate::{VoiceCapture, VoiceManager, VoiceOutput};
 
 /// How long a worker whose stdin closed has to exit before SIGTERM, and
 /// again before SIGKILL.
@@ -92,7 +89,6 @@ struct Session<'a> {
     link: &'a Link,
     voice: &'a VoiceManager,
     proxies: &'a Proxies,
-    gpu: &'a dyn BusyProbe,
 }
 
 impl Session<'_> {
@@ -121,7 +117,6 @@ impl Session<'_> {
             }
             () = write_messages(stdin, outgoing_rx) => SessionEnd::Died,
             () = self.read_messages(&mut stdout, &mut resumes) => SessionEnd::Died,
-            () = self.forward_gpu() => SessionEnd::Died,
             status = group.reap_leader(&mut child) => {
                 warn!(target: "assistd::voice::worker", "voice worker exited: {status:?}");
                 SessionEnd::Died
@@ -181,24 +176,6 @@ impl Session<'_> {
                 .set_speech(readiness_of(startup, Arc::clone(&self.proxies.output))),
         }
     }
-
-    /// Send GPU availability now and on every change; never returns.
-    async fn forward_gpu(&self) {
-        let mut reported = None;
-        let mut ticks = tokio::time::interval(GPU_POLL);
-        loop {
-            ticks.tick().await;
-            let current = (self.gpu.presence_active(), self.gpu.foreign_gpu_busy());
-            if reported != Some(current) {
-                let (presence_active, foreign_busy) = current;
-                self.link.notify(ToWorker::Gpu {
-                    presence_active,
-                    foreign_busy,
-                });
-                reported = Some(current);
-            }
-        }
-    }
 }
 
 /// Run the voice worker `spec` describes until `shutdown` flips, restarting
@@ -208,7 +185,6 @@ impl Session<'_> {
 pub async fn supervise(
     spec: VoiceWorkerSpec,
     voice: Arc<VoiceManager>,
-    gpu: Arc<dyn BusyProbe>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let link = Arc::new(Link::new());
@@ -223,7 +199,6 @@ pub async fn supervise(
         link: &link,
         voice: &voice,
         proxies: &proxies,
-        gpu: gpu.as_ref(),
     };
     let mut policy = RestartPolicy::default();
     loop {

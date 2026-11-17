@@ -45,7 +45,6 @@ mod search_init;
 mod shutdown;
 mod tools_init;
 mod voice_init;
-mod voice_probe;
 mod warmup;
 mod wm_init;
 
@@ -195,7 +194,6 @@ async fn start(
         &state,
         BackgroundStarts {
             vision: vision_revalidator,
-            vram,
             embed: embed_startup,
             search: search_startup,
             mcp: tools.mcp_fleet,
@@ -226,7 +224,6 @@ async fn start(
 
 struct BackgroundStarts {
     vision: Arc<VisionRevalidator>,
-    vram: Option<Arc<VramLedger>>,
     embed: Option<EmbeddingStartup>,
     search: Option<SearchStartup>,
     mcp: Option<Arc<McpFleet>>,
@@ -259,7 +256,6 @@ fn spawn_background_starts(
     );
     let voice = VoiceService::spawn(
         state.clone(),
-        starts.vram,
         model_settled_rx.clone(),
         stages.voice.subscribe(),
     );

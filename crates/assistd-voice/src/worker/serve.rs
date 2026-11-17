@@ -22,7 +22,7 @@ use super::protocol::{
     CaptureRequest, Failure, FromWorker, Outcome, ProtocolError, Request, SpeechRequest, Startup,
     ToWorker, decode, encode, refusal,
 };
-use super::stack::{self, ReportedGpu};
+use super::stack;
 use crate::listen::{ContinuousListener, ListenError};
 use crate::{SpeakingGuard, VoiceCapture, VoiceOutput, VoiceOutputController};
 
@@ -47,7 +47,6 @@ pub enum ServeError {
 #[derive(Debug)]
 struct Worker {
     out: mpsc::UnboundedSender<FromWorker>,
-    gpu: Arc<ReportedGpu>,
     /// Only its recent sentences are used, for barge-in's echo check.
     speech: Arc<VoiceOutputController>,
     output: Result<Arc<dyn VoiceOutput>, String>,
@@ -62,7 +61,6 @@ impl Worker {
         let output = stack::start_output(&config.synthesis).await;
         let worker = Self {
             out,
-            gpu: Arc::new(ReportedGpu::default()),
             speech: VoiceOutputController::new(true),
             output,
             capture: OnceLock::new(),
@@ -80,14 +78,11 @@ impl Worker {
     /// unavailable, then as ready once it is plugged in and capture builds.
     async fn start_capture(self: Arc<Self>, config: VoiceConfig) {
         let (capture_lost_tx, capture_lost) = mpsc::unbounded_channel();
-        let capture = stack::start_capture(
-            &config,
-            Arc::clone(&self.gpu),
-            self.speech.clone(),
-            capture_lost_tx,
-            |reason| self.report_capture_unavailable(reason),
-        )
-        .await;
+        let capture =
+            stack::start_capture(&config, self.speech.clone(), capture_lost_tx, |reason| {
+                self.report_capture_unavailable(reason);
+            })
+            .await;
         let startup = startup_of(&capture);
         let capture = self.capture.get_or_init(|| capture);
         self.send(FromWorker::CaptureReadiness { startup });
@@ -161,10 +156,6 @@ impl Worker {
                     capture.listener.open_follow_up();
                 }
             }
-            ToWorker::Gpu {
-                presence_active,
-                foreign_busy,
-            } => self.gpu.update(presence_active, foreign_busy),
         }
     }
 

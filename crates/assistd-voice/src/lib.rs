@@ -32,10 +32,7 @@ pub use manager::{CaptureUnavailable, VoiceCapture, VoiceManager};
 pub use mic::{AudioCaptureError, MicVoiceInput};
 pub use sentence::SentenceBuffer;
 pub use stt::SherpaTranscriber;
-pub use transcribe::{
-    BusyProbe, CpuFallbackFactory, NullBusyProbe, QueuedTranscriber, Transcriber,
-    TranscriptionError,
-};
+pub use transcribe::{Transcriber, TranscriptionError};
 pub use tts::SpeechError;
 
 /// Push-to-talk voice capture: buffer mic audio between

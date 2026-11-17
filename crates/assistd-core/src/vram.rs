@@ -177,11 +177,6 @@ impl VramLedger {
         learned.contended
     }
 
-    /// Whether the last poll found another process crowding the model.
-    pub fn contended(&self) -> bool {
-        self.learned.lock().contended
-    }
-
     pub(crate) fn room_to_wake(&self, snapshot: VramSnapshot) -> Result<(), VramShortfall> {
         self.learned.lock().room_to_wake(snapshot, self.headroom_mb)
     }
