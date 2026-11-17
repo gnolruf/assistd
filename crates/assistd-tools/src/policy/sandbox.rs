@@ -20,11 +20,15 @@ use super::path_class::{GuardRoots, PathGuards};
 use scope::CommandScope;
 
 mod confined;
+#[cfg(any(test, feature = "test-support"))]
+mod inert;
 mod scope;
 mod scratch_cap;
 mod seccomp;
 
 pub(crate) use confined::ConfinedSpawner;
+#[cfg(any(test, feature = "test-support"))]
+pub use inert::inert_sandbox;
 pub use scope::ScopeError;
 pub(crate) use scratch_cap::Guarded;
 pub use scratch_cap::{SCRATCH_MARKER, ScratchCap};
@@ -140,14 +144,6 @@ pub enum ToolsDisabled {
     AbstractSocketsReachable,
 }
 
-/// How subprocesses are wrapped, as resolved once by [`probe_sandbox`].
-#[derive(Debug, Clone)]
-pub enum ResolvedSandboxMode {
-    #[cfg(any(test, feature = "test-support"))]
-    None,
-    Bwrap(SandboxPrograms),
-}
-
 /// The programs a bwrap sandbox starts each command through.
 #[derive(Debug, Clone)]
 pub struct SandboxPrograms {
@@ -163,13 +159,13 @@ pub struct SandboxPrograms {
 /// command.
 #[derive(Debug)]
 pub struct SandboxInfo {
-    pub mode: ResolvedSandboxMode,
+    pub programs: SandboxPrograms,
     /// Extra args appended to the bwrap invocation before `--`, verbatim
     /// unless the command's [`HomeAccess`] is read-only.
     pub extra_args: Vec<String>,
     pub protected: Protected,
     pub shared: SharedDirs,
-    /// Absolute directories unsandboxed commands look programs up in.
+    /// Absolute directories host shells look programs up in.
     host_path: Vec<PathBuf>,
     /// Directories systemd loads user units from, as `systemd-analyze`
     /// reported them at startup.
@@ -241,68 +237,29 @@ pub struct SharedDirs {
 }
 
 impl SandboxInfo {
-    /// A configuration that never wraps.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn none() -> Arc<Self> {
-        Arc::new(Self {
-            mode: ResolvedSandboxMode::None,
-            extra_args: Vec::new(),
-            protected: Protected::default(),
-            shared: SharedDirs::default(),
-            host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
-            unit_dirs: Vec::new(),
-            confined: None,
-            profile: Profile::Host,
-        })
-    }
-
-    /// A configuration that never wraps, with `scratch` as the shared
-    /// scratch directory.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn none_sharing(scratch: PathBuf) -> Arc<Self> {
-        Arc::new(Self {
-            mode: ResolvedSandboxMode::None,
-            extra_args: Vec::new(),
-            protected: Protected::default(),
-            shared: SharedDirs {
-                scratch: Some(scratch),
-                ..SharedDirs::default()
-            },
-            host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
-            unit_dirs: Vec::new(),
-            confined: None,
-            profile: Profile::Host,
-        })
-    }
-
     /// A bwrap sandbox that sees none of the host but its programs, `home`
     /// (writable, and shared as the scratch directory), `read_only` and
     /// `inputs`, with no network and no `AF_UNIX` sockets, so no Unix socket
-    /// made outside it is reachable. `None` when this configuration does not
-    /// wrap.
+    /// made outside it is reachable.
     pub(crate) fn quarantined(
         &self,
         home: PathBuf,
         read_only: Vec<PathBuf>,
         inputs: Vec<InputBind>,
-    ) -> Option<Self> {
-        match self.mode {
-            #[cfg(any(test, feature = "test-support"))]
-            ResolvedSandboxMode::None => None,
-            ResolvedSandboxMode::Bwrap(_) => Some(Self {
-                mode: self.mode.clone(),
-                extra_args: Vec::new(),
-                protected: Protected::default(),
-                shared: SharedDirs {
-                    scratch: Some(home.clone()),
-                    scratch_cap: None,
-                    read_only,
-                },
-                host_path: self.host_path.clone(),
-                unit_dirs: self.unit_dirs.clone(),
-                confined: None,
-                profile: Profile::Quarantine(QuarantineProfile { home, inputs }),
-            }),
+    ) -> Self {
+        Self {
+            programs: self.programs.clone(),
+            extra_args: Vec::new(),
+            protected: Protected::default(),
+            shared: SharedDirs {
+                scratch: Some(home.clone()),
+                scratch_cap: None,
+                read_only,
+            },
+            host_path: self.host_path.clone(),
+            unit_dirs: self.unit_dirs.clone(),
+            confined: None,
+            profile: Profile::Quarantine(QuarantineProfile { home, inputs }),
         }
     }
 
@@ -315,14 +272,8 @@ impl SandboxInfo {
     /// Where commands run under this configuration look up bare program
     /// names.
     pub fn search_path(&self) -> SearchPath {
-        match self.mode {
-            #[cfg(any(test, feature = "test-support"))]
-            ResolvedSandboxMode::None => SearchPath {
-                dirs: self.host_path.clone(),
-            },
-            ResolvedSandboxMode::Bwrap { .. } => SearchPath {
-                dirs: std::env::split_paths(SANDBOX_PATH).collect(),
-            },
+        SearchPath {
+            dirs: std::env::split_paths(SANDBOX_PATH).collect(),
         }
     }
 
@@ -374,16 +325,10 @@ impl SandboxInfo {
     /// The directory host-profile commands start in, as the command built for them names it.
     /// Blocks on the filesystem.
     fn working_dir(&self) -> Option<PathBuf> {
-        match self.mode {
-            #[cfg(any(test, feature = "test-support"))]
-            ResolvedSandboxMode::None => std::env::current_dir().ok(),
-            ResolvedSandboxMode::Bwrap { .. } => {
-                let cmd = self
-                    .build_command("true", Vec::<String>::new(), HomeAccess::Writable)
-                    .ok()?;
-                self.mounts_of(&cmd)?.working_dir
-            }
-        }
+        let cmd = self
+            .build_command("true", Vec::<String>::new(), HomeAccess::Writable)
+            .ok()?;
+        self.mounts_of(&cmd).working_dir
     }
 
     /// The recovery clause of a note about a private directory: where a
@@ -400,11 +345,9 @@ impl SandboxInfo {
 
     /// The tmpfs mounts of `cmd`, built by [`SandboxInfo::command`], that
     /// `script` names a path in: empty directories of its own, sharing
-    /// nothing with other commands or later calls. Empty when unwrapped.
+    /// nothing with other commands or later calls.
     pub fn private_dirs_named(&self, cmd: &ProcCommand, script: &str) -> Vec<PathBuf> {
-        self.mounts_of(cmd)
-            .map(|mounts| mounts.private_dirs_named(script))
-            .unwrap_or_default()
+        self.mounts_of(cmd).private_dirs_named(script)
     }
 
     /// The tmpfs mount that hides the host's `path` from sandboxed
@@ -414,23 +357,16 @@ impl SandboxInfo {
             .command("true", Vec::new(), HomeAccess::Writable)
             .await
             .ok()?;
-        self.mounts_of(&cmd)?.private_dir_of(&path).cloned()
+        self.mounts_of(&cmd).private_dir_of(&path).cloned()
     }
 
-    fn mounts_of(&self, cmd: &ProcCommand) -> Option<Mounts> {
-        match &self.mode {
-            #[cfg(any(test, feature = "test-support"))]
-            ResolvedSandboxMode::None => None,
-            ResolvedSandboxMode::Bwrap(programs) => {
-                Some(Mounts::of(&bwrap_flags(cmd, &programs.bwrap)))
-            }
-        }
+    fn mounts_of(&self, cmd: &ProcCommand) -> Mounts {
+        Mounts::of(&bwrap_flags(cmd, &self.programs.bwrap))
     }
 
-    /// The [`ProcCommand`] that runs `program` with `args`, in bubblewrap with `home` under
-    /// [`ResolvedSandboxMode::Bwrap`]; otherwise with `PATH` limited to
-    /// [`SandboxInfo::search_path`]. Fails when a quarantine input's
-    /// descriptor cannot be duplicated for the command.
+    /// The [`ProcCommand`] that runs `program` with `args` in bubblewrap, with `home` as its
+    /// access to `$HOME`. Fails when the seccomp filter cannot be written, or a quarantine
+    /// input's descriptor cannot be duplicated for the command.
     pub async fn command(
         self: &Arc<Self>,
         program: &str,
@@ -454,33 +390,13 @@ impl SandboxInfo {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        match &self.mode {
-            #[cfg(any(test, feature = "test-support"))]
-            ResolvedSandboxMode::None => Ok(self.unwrapped_command(program, args)),
-            ResolvedSandboxMode::Bwrap(programs) => match &self.profile {
-                Profile::Host => {
-                    let home = std::env::var("HOME").ok();
-                    self.bwrap_command(programs, home, access, program, args)
-                }
-                Profile::Quarantine(quarantine) => {
-                    self.quarantine_command(programs, quarantine, program, args)
-                }
-            },
+        match &self.profile {
+            Profile::Host => {
+                let home = std::env::var("HOME").ok();
+                self.bwrap_command(home, access, program, args)
+            }
+            Profile::Quarantine(quarantine) => self.quarantine_command(quarantine, program, args),
         }
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    fn unwrapped_command<I, S>(&self, program: &str, args: I) -> ProcCommand
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let mut cmd = ProcCommand::new(program);
-        cmd.args(args);
-        if let Ok(path) = std::env::join_paths(&self.host_path) {
-            cmd.env("PATH", path);
-        }
-        cmd
     }
 
     /// Flag order is load-bearing: profile, ancestor self-binds, shared directories, read-only
@@ -490,7 +406,6 @@ impl SandboxInfo {
     /// written.
     fn bwrap_command<I, S>(
         &self,
-        programs: &SandboxPrograms,
         home: Option<String>,
         access: HomeAccess,
         program: &str,
@@ -505,7 +420,7 @@ impl SandboxInfo {
             .as_ref()
             .map(|home| home.locked_command_dirs(access, &self.host_path, &self.protected.dirs))
             .unwrap_or_default();
-        let mut cmd = scoped_bwrap(programs);
+        let mut cmd = scoped_bwrap(&self.programs);
         cmd.args(
             default_bwrap_flags_for(home.as_ref(), access)
                 .iter()
@@ -519,12 +434,12 @@ impl SandboxInfo {
         let filter = load_seccomp_filter(&mut cmd)?;
         cmd.preserved_fds(vec![filter]);
         cmd.args(extra_args_for(&self.extra_args, access));
-        let mounts = Mounts::of(&bwrap_flags(&cmd, &programs.bwrap));
+        let mounts = self.mounts_of(&cmd);
         let home_dir = home.as_ref().map(|home| Path::new(&home.dir));
         if let Some(dir) = host_working_dir(std::env::current_dir().ok(), &mounts, home_dir) {
             cmd.arg("--chdir").arg(dir);
         }
-        run_limited(&mut cmd, programs, program, args);
+        run_limited(&mut cmd, &self.programs, program, args);
         Ok(cmd)
     }
 
@@ -534,7 +449,6 @@ impl SandboxInfo {
     /// Unix socket; no `extra_args`, so the network stays unshared.
     fn quarantine_command<I, S>(
         &self,
-        programs: &SandboxPrograms,
         quarantine: &QuarantineProfile,
         program: &str,
         args: I,
@@ -543,13 +457,13 @@ impl SandboxInfo {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut cmd = scoped_bwrap(programs);
+        let mut cmd = scoped_bwrap(&self.programs);
         cmd.args(quarantine_flags(&quarantine.home));
         cmd.args(shared_flags(&self.shared));
         let mut fds = bind_inputs(&mut cmd, &quarantine.inputs)?;
         fds.push(load_seccomp_filter(&mut cmd)?);
         cmd.preserved_fds(fds);
-        run_limited(&mut cmd, programs, program, args);
+        run_limited(&mut cmd, &self.programs, program, args);
         Ok(cmd)
     }
 }
@@ -1197,7 +1111,7 @@ fn probe_sandbox_with_path(
                 Ok(confined) => {
                     announce_bwrap(&programs.bwrap);
                     return Ok(ToolSandbox::Bwrap(Arc::new(SandboxInfo {
-                        mode: ResolvedSandboxMode::Bwrap(programs),
+                        programs,
                         extra_args,
                         protected,
                         shared,
@@ -1339,7 +1253,7 @@ mod tests {
 
     fn bwrap_info(extra_args: Vec<String>) -> SandboxInfo {
         SandboxInfo {
-            mode: ResolvedSandboxMode::Bwrap(programs()),
+            programs: programs(),
             extra_args,
             protected: Protected::default(),
             shared: SharedDirs::default(),
@@ -1399,7 +1313,7 @@ mod tests {
         }
         assert!(profile.iter().any(|flag| flag == "--unshare-net"));
         let cmd = info
-            .bwrap_command(&programs(), home, HomeAccess::Writable, "make", ["-j4"])
+            .bwrap_command(home, HomeAccess::Writable, "make", ["-j4"])
             .expect("bwrap command");
         assert_eq!(cmd.as_std().get_program(), "/usr/bin/systemd-run");
         let argv = argv_of(&cmd);
@@ -1591,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn unsandboxed_path_keeps_only_absolute_entries() {
+    fn host_path_keeps_only_absolute_entries() {
         assert_eq!(
             host_path(OsStr::new("/usr/bin::.:bin:/bin")),
             [PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
@@ -1655,7 +1569,7 @@ mod tests {
         let writable_mounts = |access: HomeAccess| -> Vec<String> {
             let home = Some(home.to_string_lossy().into_owned());
             let cmd = info
-                .bwrap_command(&programs(), home, access, "true", [""; 0])
+                .bwrap_command(home, access, "true", [""; 0])
                 .expect("bwrap command");
             argv_of(&cmd)
                 .windows(2)
@@ -1785,7 +1699,6 @@ mod tests {
         let argv = argv_of(
             &info
                 .bwrap_command(
-                    &programs(),
                     Some(home.to_string_lossy().into_owned()),
                     HomeAccess::Writable,
                     "true",
@@ -1953,13 +1866,7 @@ mod tests {
         };
         let argv = argv_of(
             &info
-                .bwrap_command(
-                    &programs(),
-                    Some(path_of("")),
-                    HomeAccess::Writable,
-                    "true",
-                    [""; 0],
-                )
+                .bwrap_command(Some(path_of("")), HomeAccess::Writable, "true", [""; 0])
                 .expect("bwrap command"),
         );
         let position_of = |flag: &str, dir: &str| {

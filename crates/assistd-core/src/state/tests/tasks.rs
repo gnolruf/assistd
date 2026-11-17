@@ -139,7 +139,7 @@ async fn queue_order_and_pause_follow_moves_and_cancels_across_a_reload() {
         Config::default(),
         Subsystems::new(
             Arc::new(EchoBackend::new()),
-            PresenceManager::stub(PresenceTarget::Active),
+            stub_presence(PresenceTarget::Active),
             Arc::new(ToolRegistry::default()),
             VoiceManager::new(true),
         ),

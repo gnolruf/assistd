@@ -250,8 +250,11 @@ mod tests {
 
     use super::*;
     use crate::command::{Command, CommandError, CommandInput, Usage};
-    use crate::commands::{register_test_readers, test_see};
+    use crate::commands::{
+        probed_sandbox, register_test_readers, test_registry_in, test_sandbox, test_see,
+    };
     use crate::fixtures::PNG_BYTES;
+    use crate::policy::SharedDirs;
 
     /// Fake command: emits a configurable number of lines.
     #[derive(Debug)]
@@ -299,7 +302,7 @@ mod tests {
 
     fn registry() -> Arc<CommandRegistry> {
         let mut reg = CommandRegistry::new();
-        register_test_readers(&mut reg);
+        register_test_readers(&mut reg, &test_sandbox());
         reg.register(test_see());
         Arc::new(reg)
     }
@@ -386,7 +389,14 @@ mod tests {
         std::fs::write(files.path().join("a.log"), b"ERROR one\ninfo\n").unwrap();
         std::fs::write(files.path().join("b.log"), b"ERROR two\nERROR three\n").unwrap();
         std::fs::write(files.path().join("notes.txt"), b"ERROR ignored\n").unwrap();
-        let tool = tool_with(dir.path(), full_registry());
+        let readable_in_sandbox = SharedDirs {
+            read_only: vec![files.path().to_path_buf()],
+            ..SharedDirs::default()
+        };
+        let Some(sandbox) = probed_sandbox(readable_in_sandbox) else {
+            return;
+        };
+        let tool = tool_with(dir.path(), Arc::new(test_registry_in(&sandbox)));
         let root = files.path().to_string_lossy().into_owned();
 
         let globbed = invoke(&tool, &format!("grep ERROR {root}/*.log | wc -l"));
@@ -449,9 +459,12 @@ mod tests {
     /// return the lines right after the ones shown.
     #[test]
     fn run_overflow_next_page_hint_runs_as_printed() {
+        let Some(sandbox) = probed_sandbox(SharedDirs::default()) else {
+            return;
+        };
         let mut reg = CommandRegistry::new();
         reg.register(Lines(5000));
-        register_test_readers(&mut reg);
+        register_test_readers(&mut reg, &sandbox);
         let dir = fresh_dir();
         let tool = tool_with(dir.path(), Arc::new(reg));
 
@@ -478,10 +491,7 @@ mod tests {
     fn run_refuses_to_read_the_daemon_terminal() {
         let dir = fresh_dir();
         let tool = tool_with(dir.path(), full_registry());
-        let result = invoke(
-            &tool,
-            "echo \"via stdin\" | cat /dev/stdin | head -c 0 || true",
-        );
+        let result = invoke(&tool, "echo \"via stdin\" | cat /dev/stdin || true");
         let stderr = result["stderr"].as_str().unwrap();
         assert!(stderr.contains("not a regular file"), "{result}");
     }

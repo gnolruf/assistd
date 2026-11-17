@@ -19,6 +19,8 @@ pub mod policy;
 pub mod presentation;
 pub mod quarantine;
 pub mod run;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod tool_output;
 mod turn;
 pub mod vision;
@@ -39,8 +41,6 @@ pub use policy::{
     SandboxInfo, SandboxPrograms, SandboxRequest, ScopeError, ScratchCap, SearchPath, SharedDirs,
     StandingApprovals, ToolSandbox, ToolsDisabled, Unattended, Verdict, probe_sandbox,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub use policy::{AlwaysAllowGate, DenyAllGate};
 pub use presentation::{OutputCap, PresentSpec};
 pub use quarantine::{Egress, Quarantine, QuarantineError};
 pub use run::RunTool;

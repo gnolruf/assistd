@@ -65,9 +65,25 @@ Guidelines for AI agents (and humans) working in this repository.
   dependency, check getters, defaults, `Display` strings or log
   text, or enumerate edge cases nobody has hit. One test that
   covers the behaviour beats five that each poke one branch. Don't
-  add test-only helpers, modules, constructors, or features to
-  production code to make something testable; if it can't be
-  tested through its real interface, don't test it.
+  add test-only constructors, variants, parameters, or `cfg`'d
+  branches to production code to make something testable; if it
+  can't be tested through its real interface, don't test it.
+- **Test doubles get a module of their own.** A fake, stub, or
+  fixture goes in a module that holds nothing else: a `#[cfg(test)]`
+  module when one crate's tests use it, a module behind the crate's
+  `test-support` feature when another crate's tests do. A fake
+  server is a `src/bin` target with `required-features`. A double
+  is a type or a free function; it adds no variant, field, method,
+  or trait impl to a production type. `test-support` gates those
+  modules, their re-exports, and integration tests kept out of a
+  plain `cargo test`; nothing else.
+- **Tests don't need the sandbox to run.** CI has no bwrap, and
+  the sandbox has no unwrapped mode. Test process handling on
+  `exec::supervise` with a plain command. Test policy with
+  `inert_sandbox`, whose programs do not exist: a script the policy
+  lets through fails to start and exits 127. A test that must run
+  a real program in the sandbox probes for bwrap and returns early
+  without it; keep those few.
 - **Unit tests live inline.** Put them in a
   `#[cfg(test)] mod tests { ... }` block at the end of the source
   file. A separate `tests.rs` (via `#[cfg(test)] mod tests;`) is

@@ -29,8 +29,6 @@ pub use allowlist::{APPROVALS_FILE, Allowlist, AllowlistError, SearchPath};
 pub use approvals::{
     APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ApprovalGate, Approvals,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub use confirm::{AlwaysAllowGate, DenyAllGate};
 pub use confirm::{
     Approval, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate, ConfirmationRequest,
     IpcConfirmationGate, JudgeContext, JudgedClass, MAX_PENDING_CONFIRMS, NoPendingConfirm,
@@ -42,11 +40,12 @@ pub use judge::{JUDGE_TIMEOUT, JudgeModel, JudgedCommand, SafetyJudge, Verdict};
 pub use path_class::{GuardRoots, PathGuards, PathVerdict};
 pub(crate) use path_class::{admits_edit, split_at_existing};
 pub use review::{Action, Analysis, Class, Confirmation, Effect, analyze, classify};
+#[cfg(any(test, feature = "test-support"))]
+pub use sandbox::inert_sandbox;
 pub(crate) use sandbox::{ConfinedSpawner, Guarded, InputBind, is_within_visible_home_entry};
 pub use sandbox::{
-    HomeAccess, Protected, ResolvedSandboxMode, SCRATCH_MARKER, SandboxError, SandboxInfo,
-    SandboxPrograms, SandboxRequest, ScopeError, ScratchCap, SharedDirs, ToolSandbox,
-    ToolsDisabled, probe_sandbox,
+    HomeAccess, Protected, SCRATCH_MARKER, SandboxError, SandboxInfo, SandboxPrograms,
+    SandboxRequest, ScopeError, ScratchCap, SharedDirs, ToolSandbox, ToolsDisabled, probe_sandbox,
 };
 
 /// Policy for the commands that spawn subprocesses: read-only scripts run unasked with `$HOME`
@@ -65,19 +64,6 @@ pub struct BashPolicyCfg {
     /// Canonical directories below which an edit of ordinary paths runs unasked in
     /// [`assistd_ipc::PermissionMode::AcceptEdits`] and Auto.
     pub edit_scope: Vec<PathBuf>,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl Default for BashPolicyCfg {
-    fn default() -> Self {
-        Self {
-            timeout: Duration::from_secs(30),
-            allowlist: Arc::new(Allowlist::unsaved(SandboxInfo::none().search_path())),
-            protected: Vec::new(),
-            scratch: None,
-            edit_scope: Vec::new(),
-        }
-    }
 }
 
 /// What the policy decided about a script before it runs.

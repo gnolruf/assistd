@@ -725,7 +725,8 @@ mod tests {
     use std::time::Duration;
 
     use assistd_llm::{LlmBackend, ScriptedBackend, SlotDir};
-    use assistd_tools::{Approvals, DenyAllGate};
+    use assistd_tools::test_support::{DenyAllGate, bash_policy, inert_sandbox};
+    use assistd_tools::{Approvals, SharedDirs};
 
     use super::*;
     use crate::agent::AgentSpec;
@@ -758,8 +759,8 @@ mod tests {
                 session: watch::channel(SessionId::new()).1,
             },
             RelayPolicy {
-                sandbox: SandboxInfo::none(),
-                bash: Arc::new(BashPolicyCfg::default()),
+                sandbox: inert_sandbox(SharedDirs::default()),
+                bash: Arc::new(bash_policy()),
                 gate: gate.clone(),
                 hosts: ApprovalGate::new(gate, Arc::new(Approvals::unsaved())),
                 search: None,

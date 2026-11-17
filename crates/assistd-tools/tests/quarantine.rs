@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use assistd_tools::commands::BashPolicyCfg;
 use assistd_tools::policy::{ToolSandbox, probe_sandbox};
+use assistd_tools::test_support::{AlwaysAllowGate, DenyAllGate, bash_policy};
 use assistd_tools::{
-    AlwaysAllowGate, ApprovalGate, Approvals, DenyAllGate, Egress, OutputCap, PresentSpec,
-    Protected, Quarantine, RunTool, SandboxInfo, SandboxRequest, SharedDirs, Tool, TurnContext,
+    ApprovalGate, Approvals, Egress, OutputCap, PresentSpec, Protected, Quarantine, RunTool,
+    SandboxInfo, SandboxRequest, SharedDirs, Tool, TurnContext,
 };
 
 const HOST_ONLY: &str = "host-home-only";
@@ -32,7 +32,7 @@ fn bwrap_sandbox() -> Option<Arc<SandboxInfo>> {
 }
 
 fn run_tool(quarantine: &Quarantine) -> RunTool {
-    let commands = quarantine.commands(&BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
+    let commands = quarantine.commands(&bash_policy(), Arc::new(AlwaysAllowGate));
     let output_cap = Arc::new(OutputCap::new(PresentSpec {
         overflow_dir: quarantine.output_dir(),
         ..PresentSpec::default()

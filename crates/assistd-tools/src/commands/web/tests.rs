@@ -12,9 +12,8 @@ use super::*;
 use crate::TurnContext;
 use crate::command::run_rendered;
 use crate::commands::test_support::{RecordingGate, router_in};
-use crate::policy::{
-    AlwaysAllowGate, Approval, ApprovalGate, Approvals, DenyAllGate, IpcConfirmationGate,
-};
+use crate::policy::{Approval, ApprovalGate, Approvals, IpcConfirmationGate};
+use crate::test_support::{AlwaysAllowGate, DenyAllGate};
 
 /// First byte of a TLS handshake record, which opens every HTTPS connection.
 const TLS_HANDSHAKE: u8 = 0x16;

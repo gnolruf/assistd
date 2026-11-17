@@ -15,20 +15,28 @@ use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use super::{
-    BashCommand, BashPolicyCfg, CatCommand, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand,
-    WebCommand, WmCommand, WriteCommand, WritePolicyCfg, register_readers,
+    BashCommand, CatCommand, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, WebCommand,
+    WmCommand, WriteCommand, WritePolicyCfg, register_readers,
 };
 use crate::TurnContext;
 use crate::command::CommandRegistry;
 use crate::policy::{
-    AlwaysAllowGate, Approval, ApprovalGate, Approvals, ConfirmRouter, ConfirmationGate,
-    ConfirmationRequest, JudgeModel, SafetyJudge, SandboxInfo,
+    Approval, ApprovalGate, Approvals, ConfirmRouter, ConfirmationGate, ConfirmationRequest,
+    JudgeModel, Protected, SafetyJudge, SandboxInfo, SandboxRequest, SharedDirs, ToolSandbox,
+    probe_sandbox,
 };
+use crate::test_support::{AlwaysAllowGate, bash_policy, inert_sandbox};
 use crate::vision::VisionGate;
 
+/// Every command, never asking, over a sandbox that starts nothing.
 pub(crate) fn test_registry() -> CommandRegistry {
+    test_registry_in(&test_sandbox())
+}
+
+/// Every command, never asking, with `sandbox` running what they start.
+pub(crate) fn test_registry_in(sandbox: &Arc<SandboxInfo>) -> CommandRegistry {
     let mut registry = CommandRegistry::new();
-    register_test_readers(&mut registry);
+    register_test_readers(&mut registry, sandbox);
     registry.register(permissive_write());
     registry.register(test_see());
     registry.register(test_screenshot());
@@ -36,20 +44,35 @@ pub(crate) fn test_registry() -> CommandRegistry {
         ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved())),
         None,
     ));
-    registry.register(test_bash());
+    registry.register(test_bash(Arc::clone(sandbox)));
     registry.register(test_wm(Arc::new(NoWindowManager)));
     registry
 }
 
-/// The readers, with the text programs unsandboxed and never asking.
-pub(crate) fn register_test_readers(registry: &mut CommandRegistry) {
-    let gate: Arc<dyn ConfirmationGate> = Arc::new(AlwaysAllowGate);
-    register_readers(
-        registry,
-        &Arc::new(BashPolicyCfg::default()),
-        &SandboxInfo::none(),
-        &gate,
+/// A sandbox sharing nothing, in which every command fails to start.
+pub(crate) fn test_sandbox() -> Arc<SandboxInfo> {
+    inert_sandbox(SharedDirs::default())
+}
+
+/// The bwrap sandbox over `shared`, for a test that must run a real program; `None` when
+/// this machine cannot run one, and the test returns early.
+pub(crate) fn probed_sandbox(shared: SharedDirs) -> Option<Arc<SandboxInfo>> {
+    let probed = probe_sandbox(
+        SandboxRequest::Auto,
+        Vec::new(),
+        Protected::default(),
+        shared,
     );
+    match probed {
+        Ok(ToolSandbox::Bwrap(sandbox)) => Some(sandbox),
+        Ok(ToolSandbox::Disabled(_)) | Err(_) => None,
+    }
+}
+
+/// The readers, never asking, with `sandbox` running the text programs.
+pub(crate) fn register_test_readers(registry: &mut CommandRegistry, sandbox: &Arc<SandboxInfo>) {
+    let gate: Arc<dyn ConfirmationGate> = Arc::new(AlwaysAllowGate);
+    register_readers(registry, &Arc::new(bash_policy()), sandbox, &gate);
 }
 
 /// `write` with an allowlist of `/`, permitting any absolute path without asking.
@@ -57,19 +80,19 @@ pub(crate) fn permissive_write() -> WriteCommand {
     WriteCommand::new(
         Arc::new(WritePolicyCfg::new(vec![PathBuf::from("/")]).expect("non-empty allowlist")),
         Arc::new(AlwaysAllowGate),
-        SandboxInfo::none(),
+        test_sandbox(),
     )
 }
 
 /// `cat` over the host's files, never asking.
 pub(crate) fn test_cat() -> CatCommand {
-    CatCommand::new(SandboxInfo::none(), Arc::new(AlwaysAllowGate))
+    CatCommand::new(test_sandbox(), Arc::new(AlwaysAllowGate))
 }
 
 pub(crate) fn test_see() -> SeeCommand {
     SeeCommand::new(
         VisionGate::new(true),
-        SandboxInfo::none(),
+        test_sandbox(),
         Arc::new(AlwaysAllowGate),
     )
 }
@@ -81,12 +104,8 @@ pub(crate) fn test_screenshot() -> ScreenshotCommand {
     )
 }
 
-pub(crate) fn test_bash() -> BashCommand {
-    BashCommand::new(
-        Arc::new(BashPolicyCfg::default()),
-        SandboxInfo::none(),
-        Arc::new(AlwaysAllowGate),
-    )
+pub(crate) fn test_bash(sandbox: Arc<SandboxInfo>) -> BashCommand {
+    BashCommand::new(Arc::new(bash_policy()), sandbox, Arc::new(AlwaysAllowGate))
 }
 
 pub(crate) fn test_wm(wm: Arc<dyn WindowManager>) -> WmCommand {

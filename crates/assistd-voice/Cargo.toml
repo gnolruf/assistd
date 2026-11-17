@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-test-support = ["assistd-utils/test-support"]
+test-support = []
 
 [dependencies]
 async-trait = { workspace = true }

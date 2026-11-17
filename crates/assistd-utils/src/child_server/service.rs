@@ -30,9 +30,9 @@ pub enum ReadyState {
 /// Dropping it aborts the supervisor task; [`ChildServer::shutdown`] joins it.
 #[derive(Debug)]
 pub struct ChildServer {
-    server: &'static str,
-    task: Option<JoinHandle<()>>,
-    status: ChildServerStatus,
+    pub(super) server: &'static str,
+    pub(super) task: Option<JoinHandle<()>>,
+    pub(super) status: ChildServerStatus,
 }
 
 impl ChildServer {
@@ -55,19 +55,6 @@ impl ChildServer {
         };
         child_server.await_ready().await?;
         Ok(child_server)
-    }
-
-    /// A handle with no supervisor or child, reporting what the returned
-    /// sender scripts. Dropping the sender reads as a stopped supervisor.
-    #[cfg(feature = "test-support")]
-    pub fn scripted(state: ReadyState, pid: Option<u32>) -> (watch::Sender<ReadyState>, Self) {
-        let (ready_tx, status) = ChildServerStatus::scripted(state, pid);
-        let server = Self {
-            server: "scripted",
-            task: None,
-            status,
-        };
-        (ready_tx, server)
     }
 
     async fn await_ready(&mut self) -> Result<(), ChildServerError> {
@@ -151,23 +138,11 @@ impl Drop for ChildServer {
 /// reports serving once the supervisor has stopped.
 #[derive(Debug, Clone)]
 pub struct ChildServerStatus {
-    ready_rx: watch::Receiver<ReadyState>,
-    pid: Arc<Mutex<Option<u32>>>,
+    pub(super) ready_rx: watch::Receiver<ReadyState>,
+    pub(super) pid: Arc<Mutex<Option<u32>>>,
 }
 
 impl ChildServerStatus {
-    /// A status driven by the returned sender, reporting `pid` as the child's.
-    /// Dropping the sender reads as a stopped supervisor.
-    #[cfg(feature = "test-support")]
-    pub fn scripted(state: ReadyState, pid: Option<u32>) -> (watch::Sender<ReadyState>, Self) {
-        let (ready_tx, ready_rx) = watch::channel(state);
-        let status = Self {
-            ready_rx,
-            pid: Arc::new(Mutex::new(pid)),
-        };
-        (ready_tx, status)
-    }
-
     /// Whether the supervisor is running, [`ReadyState::Ready`], and its child
     /// is alive, so the listener that passed the readiness check is still the child's.
     pub fn is_serving(&self) -> bool {
