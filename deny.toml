@@ -30,6 +30,13 @@ ignore = [
     # tokio-rusqlite nor rusqlite_migration supports yet. Exploiting it needs
     # write access to the user's own memory.db. Drop once both support 0.41.
     { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys via rusqlite 0.37, pinned by tokio-rusqlite and rusqlite_migration" },
+    # chrono and chrono-tz are flagged unmaintained, not vulnerable, and no
+    # version clears the flag. croner, oauth2, rmcp and schemars depend on
+    # chrono too, so moving our own timestamps off it would not remove it;
+    # chrono-tz is a dev-dependency for the scheduler's time-zone tests.
+    # Drop once those crates have moved off chrono.
+    { id = "RUSTSEC-2026-0543", reason = "chrono, used directly and required by croner, oauth2, rmcp and schemars" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz, a dev-dependency of assistd-core for time-zone tests" },
 ]
 
 # ---------------------------------------------------------------------------
