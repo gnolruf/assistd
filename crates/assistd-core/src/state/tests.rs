@@ -14,10 +14,10 @@ use assistd_config::Config;
 use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
     Component, ComponentReadiness, EventBody, EventKind, HostName, ImageAttachment, ImageMime,
-    ListenPhase, McpServerState, McpTransportKind, PermissionMode, PlanMode, PlanVerdict,
-    PresenceState, PresenceTarget, QueueItem, RequestBody, StartupComponent, StatusKind,
-    StatusSeverity, SubscribeFilter, TaskId, TaskQueueOp, TaskRequest, TaskRunId, TaskRunState,
-    TaskSpec, VoiceCaptureState,
+    ListenPhase, McpServerState, McpTransportKind, PausedPrompt, PermissionMode, PlanMode,
+    PlanVerdict, PresenceState, PresenceTarget, QueueItem, RequestBody, StartupComponent,
+    StatusKind, StatusSeverity, SubscribeFilter, TaskId, TaskQueueOp, TaskQueueSnapshot,
+    TaskRequest, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{
     EchoBackend, Gate, JournaledStep, LlmBackend, LlmError, ScriptedBackend, Step, StepJournal,
@@ -1456,6 +1456,49 @@ async fn settle_task_runs(state: &Arc<AppState>) {
         .await
         .expect("task run did not end");
     state.transcript.drain_inflight().await;
+}
+
+/// Wait for a snapshot of the task queue that `seen` finds something in.
+async fn await_task_queue<T>(
+    state: &AppState,
+    mut seen: impl FnMut(TaskQueueSnapshot) -> Option<T>,
+) -> T {
+    let admission = &state.turns.deps.admission;
+    let mut changes = admission.task_queue.subscribe();
+    let found = async {
+        loop {
+            if let Some(found) = seen(admission.queue_snapshot()) {
+                return found;
+            }
+            changes.changed().await.expect("the task queue was dropped");
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), found)
+        .await
+        .expect("the task queue never got there")
+}
+
+/// The prompt a paused run in `snapshot` waits on.
+fn paused_prompt(snapshot: TaskQueueSnapshot) -> Option<PausedPrompt> {
+    snapshot.items.into_iter().find_map(|item| match item {
+        QueueItem::Run { prompt, .. } => prompt,
+        QueueItem::UserTurn { .. } => None,
+    })
+}
+
+/// Wait for every run to leave the queue, panicking if one pauses on a prompt other
+/// than `answered`.
+async fn runs_end_unasked(state: &AppState, answered: Option<&str>) {
+    await_task_queue(state, |snapshot| {
+        let ended = snapshot.items.is_empty();
+        if let Some(prompt) = paused_prompt(snapshot)
+            && Some(prompt.confirm_id.as_str()) != answered
+        {
+            panic!("asked the user: {}", prompt.script);
+        }
+        ended.then_some(())
+    })
+    .await;
 }
 
 /// The state of every task run listed beside its session's branch.

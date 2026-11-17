@@ -9,7 +9,7 @@ use thiserror::Error;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc};
 
-use assistd_ipc::{Event, EventBody, EventKind, SubscribeFilter, TaskRunId};
+use assistd_ipc::{Event, EventBody, EventKind, SubscribeFilter};
 
 const EVENTS_BUS_CAPACITY: usize = 256;
 
@@ -52,23 +52,8 @@ impl EventBus {
         self.interest.lock().iter().any(|f| f.matches(kind))
     }
 
-    /// Publish a copy of `event`, an event of task run `run`, wrapped in
-    /// [`EventBody::TaskRun`], if any subscriber wants task-run events.
-    fn publish_task_run(&self, run: TaskRunId, event: &Event) {
-        if self.wants(EventKind::TaskRun) {
-            let _ = self.events.send(Event::new(
-                event.id.clone(),
-                EventBody::TaskRun {
-                    run,
-                    event: Box::new(bus_copy(event)),
-                },
-            ));
-        }
-    }
-
-    /// Publish a copy of `event` if any subscriber wants its kind. A `ToolResult` copy,
-    /// wrapped in a `TaskRun` or not, omits the result's `attachments`, which no
-    /// subscriber reads.
+    /// Publish a copy of `event` if any subscriber wants its kind. A `ToolResult` copy
+    /// omits the result's `attachments`, which no subscriber reads.
     pub fn publish(&self, event: &Event) {
         if event.kind().is_some_and(|kind| self.wants(kind)) {
             let _ = self.events.send(bus_copy(event));
@@ -117,23 +102,12 @@ impl Drop for BusSubscription {
 #[error("the client has gone away")]
 pub struct ClientGone;
 
-/// How an [`EventSink`] wraps the events it is given.
-#[derive(Debug, Clone, Copy)]
-enum Wrap {
-    Bare,
-    /// A task run's events, published wrapped in [`EventBody::TaskRun`].
-    TaskRun(TaskRunId),
-    /// A planning turn's events, sent to the client wrapped in [`EventBody::TaskPlan`].
-    TaskPlan,
-}
-
 /// Where the events of one request or turn go: onto the bus as each is produced, and to
 /// the client that asked, when there is one. A slow client never delays the bus.
 #[derive(Debug, Clone)]
 pub struct EventSink {
     client: Option<mpsc::Sender<Event>>,
     bus: Option<EventBus>,
-    wrap: Wrap,
 }
 
 impl EventSink {
@@ -142,7 +116,6 @@ impl EventSink {
         Self {
             client: Some(client),
             bus: Some(bus),
-            wrap: Wrap::Bare,
         }
     }
 
@@ -151,7 +124,6 @@ impl EventSink {
         Self {
             client: Some(client),
             bus: None,
-            wrap: Wrap::Bare,
         }
     }
 
@@ -160,25 +132,14 @@ impl EventSink {
         Self {
             client: None,
             bus: Some(bus),
-            wrap: Wrap::Bare,
         }
     }
 
-    /// The events of task run `run`, published on `bus` as `TaskRun`.
-    pub fn of_task_run(bus: EventBus, run: TaskRunId) -> Self {
+    /// Events neither published nor sent to a client, for a turn nobody follows.
+    pub fn discarding() -> Self {
         Self {
             client: None,
-            bus: Some(bus),
-            wrap: Wrap::TaskRun(run),
-        }
-    }
-
-    /// The events of a planning turn this sink's request asked for, sent to its client
-    /// as `TaskPlan` and never published.
-    pub fn of_task_plan(&self) -> Self {
-        Self {
-            wrap: Wrap::TaskPlan,
-            ..self.clone()
+            bus: None,
         }
     }
 
@@ -186,40 +147,21 @@ impl EventSink {
     /// by which time the event is already published.
     pub async fn send(&self, event: Event) -> Result<(), ClientGone> {
         self.publish(&event);
-        let Some(client) = &self.client else {
-            return Ok(());
-        };
-        let event = match self.wrap {
-            Wrap::Bare | Wrap::TaskRun(_) => event,
-            Wrap::TaskPlan => Event::new(
-                event.id.clone(),
-                EventBody::TaskPlan {
-                    event: Box::new(event),
-                },
-            ),
-        };
-        client.send(event).await.map_err(|_| ClientGone)
+        match &self.client {
+            Some(client) => client.send(event).await.map_err(|_| ClientGone),
+            None => Ok(()),
+        }
     }
 
     /// Publish `event` without sending it to the client.
     pub fn publish(&self, event: &Event) {
-        let Some(bus) = &self.bus else {
-            return;
-        };
-        match self.wrap {
-            Wrap::Bare => bus.publish(event),
-            Wrap::TaskRun(run) => bus.publish_task_run(run, event),
-            Wrap::TaskPlan => {}
+        if let Some(bus) = &self.bus {
+            bus.publish(event);
         }
     }
 
     /// Whether [`Self::publish`] would reach a subscriber with an event of `kind`.
     pub fn publishes(&self, kind: EventKind) -> bool {
-        let kind = match self.wrap {
-            Wrap::Bare => kind,
-            Wrap::TaskRun(_) => EventKind::TaskRun,
-            Wrap::TaskPlan => return false,
-        };
         self.bus.as_ref().is_some_and(|bus| bus.wants(kind))
     }
 
@@ -237,10 +179,6 @@ fn bus_copy(event: &Event) -> Event {
         EventBody::ToolResult { name, result } => EventBody::ToolResult {
             name: name.clone(),
             result: result.without_attachments(),
-        },
-        EventBody::TaskRun { run, event } => EventBody::TaskRun {
-            run: *run,
-            event: Box::new(bus_copy(event)),
         },
         other => other.clone(),
     };

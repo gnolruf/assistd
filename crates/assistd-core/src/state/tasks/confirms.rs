@@ -148,8 +148,7 @@ impl PromptParking for TaskRunParking {
             host,
             source: req.source,
         };
-        self.pause(prompt.clone()).await;
-        self.announce(prompt).await;
+        self.pause(prompt).await;
         let approval = tokio::select! {
             biased;
             () = lane.cancel.cancelled() => return Approval::Deny,
@@ -164,18 +163,13 @@ impl PromptParking for TaskRunParking {
 }
 
 impl TaskRunParking {
-    async fn announce(&self, prompt: PausedPrompt) {
+    async fn pause(&self, prompt: PausedPrompt) {
         info!(
             target: "assistd::tasks",
             tool = %prompt.tool,
             pattern = %prompt.matched_pattern,
             "task run paused for input"
         );
-        let event = confirm_request(self.lane.request_id.clone(), prompt);
-        let _ = self.lane.events.send(event).await;
-    }
-
-    async fn pause(&self, prompt: PausedPrompt) {
         let lane = &self.lane;
         lane.tasks
             .deps
@@ -235,25 +229,6 @@ impl TaskService {
         Ok(())
     }
 
-    /// The prompt of each paused task run, wrapped as the run's events reach subscribers.
-    pub(in crate::state) fn paused_prompt_events(&self) -> Vec<Event> {
-        self.deps
-            .admission
-            .task_queue
-            .paused_runs()
-            .into_iter()
-            .map(|paused| {
-                Event::new(
-                    paused.request_id.clone(),
-                    EventBody::TaskRun {
-                        run: paused.run,
-                        event: Box::new(confirm_request(paused.request_id, paused.prompt)),
-                    },
-                )
-            })
-            .collect()
-    }
-
     /// Add `allowed.host` to its task's allowed hosts, unless already there.
     async fn allow_task_host(&self, allowed: AllowedHost) -> Result<TaskRecord, DispatchError> {
         let _pass = self.scheduler.hold().await;
@@ -264,21 +239,6 @@ impl TaskService {
         record.spec.allowed_hosts.push(allowed.host);
         Ok(self.deps.store.save(Some(record.id), record.spec).await?)
     }
-}
-
-/// The `ConfirmRequest` asking the user to answer `prompt` for the run `request_id` tags.
-fn confirm_request(request_id: String, prompt: PausedPrompt) -> Event {
-    Event::new(
-        request_id,
-        EventBody::ConfirmRequest {
-            confirm_id: prompt.confirm_id,
-            tool: prompt.tool,
-            script: prompt.script,
-            matched_pattern: prompt.matched_pattern,
-            always_allow: Vec::new(),
-            source: prompt.source,
-        },
-    )
 }
 
 /// The approval a `TaskConfirm`'s `allow` and `always` give; `always` alone denies.

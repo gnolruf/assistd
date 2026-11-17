@@ -400,8 +400,8 @@ An admitted run takes the request guard, as a query does, then opens an
 short preamble saying no user is present, and the main agent's full tool
 registry. On lane 0 it is keyed `TaskRun` in the `SlotStash`, and when the run
 ends its slot file is dropped and the main backend's slot restored. It is
-saved as a transcript session of its own, linked from its `task_runs` row, and
-its events reach subscribers wrapped in `EventBody::TaskRun`. The main backend,
+saved as a transcript session of its own, linked from its `task_runs` row; its
+turn's events are sent to no client. The main backend,
 its branch and the active session are never touched. `TaskRequest::Cancel`
 cancels a run the way `InterruptTurn` cancels a turn. A run still going at
 shutdown is recorded as failed. At startup and after each run ends, every task's
@@ -421,9 +421,8 @@ logged on `assistd::policy`, and never reaches the allowlist or the
 `approved_*.toml` files. Once the run has read this machine, each fetch is
 parked instead, whatever its host. Anything else is parked: the run turns `NeedsInput`,
 gives up its lane and request guard (on lane 0 its slot state stays in the
-stash), and broadcasts the prompt as a `TaskRun`-wrapped `ConfirmRequest`; the
-queue snapshot carries it too, as the run's `PausedPrompt`, so a client that
-subscribes later can still answer it. The tool deadline stops while a prompt is
+stash), and the queue snapshot carries the prompt as the run's `PausedPrompt`,
+so a client that subscribes later can still answer it. The tool deadline stops while a prompt is
 parked. `TaskRequest::Confirm` answers it for that prompt alone, except that
 `always` on a host fetch adds the host to the task's `allowed_hosts`, for the
 rest of the run and later ones; the run then waits first in the queue for a lane,
@@ -438,10 +437,12 @@ cancelled and announced as `StatusKind::YieldedToUser`, so its partial output is
 dropped. A tool call in flight finishes first. A relay in flight is cancelled and
 rerun from its arguments, since its effects stay in its quarantine. The yielded run
 waits first in the queue as `Suspended(UserInteraction)`, its slot state stashed.
-Under `after_task` the turn is told `EventBody::Queued` and takes the lane once the run
-ends, ahead of the queue. Under `after_queue` it joins the queue as a user-turn item,
-behind any turns already waiting, which the dispatcher hands the main lane in its
-turn; `TaskQueueOp::CancelTurn` drops it. Every user turn opens the
+Under `after_task` the turn takes the lane once the run ends, ahead of the queue.
+Under `after_queue` it joins the queue as a user-turn item, behind any turns already
+waiting, which the dispatcher hands the main lane in its turn;
+`TaskQueueOp::CancelTurn` drops it. A turn made to wait either way is told
+`EventBody::Queued` with how many items are ahead of it, which the TUI shows in
+place of "Generating…" until the turn has the model. Every user turn opens the
 `UserInteraction`, which holds waiting runs as `Suspended(UserInteraction)`. The
 interaction ends once no turn has arrived for `resume_after_idle_secs` after the
 last reply and its speech finished, or the wake word's follow-up window if longer.
@@ -507,8 +508,8 @@ in Auto, else `Asks`. The result is a `Plan` of the brief with a fresh `PlanId`.
 mode and allowed hosts the request gives, on an isolated backend with the
 task-run system prompt, keyed `TaskRefine` in the `SlotStash`. Only the latest
 refine's backend is kept; a new one ends it. It takes the main lane and
-request guard as a query does, and `InterruptTurn` cancels it; its turn reaches
-the client wrapped in `EventBody::TaskPlan`, and its result as `EventBody::TaskRefined`
+request guard as a query does, and `InterruptTurn` cancels it; its planning turn
+is sent to no client, and its result arrives as `EventBody::TaskRefined`
 with the rewritten `TaskPrompt`, its `Plan` and a `ModeRecommendation`: the
 least permissive mode, Auto only when allowed, under which the fewest of the
 plan's actions would ask, with the actions it covers and those that would still

@@ -160,8 +160,10 @@ impl App {
             | EventBody::Capabilities { .. }
             | EventBody::Status { .. }) => self.on_state_event(state),
             EventBody::ContextSize { tokens, total } => {
+                self.queued_behind = None;
                 self.tokens.on_context_size(tokens, total);
             }
+            EventBody::Queued { behind } => self.queued_behind = Some(behind),
             session @ (EventBody::BranchInfo { .. }
             | EventBody::BranchSwitched { .. }
             | EventBody::SessionTitle { .. }
@@ -182,12 +184,9 @@ impl App {
             | EventBody::UndecodableTask { .. }
             | EventBody::TaskRunRecord { .. }
             | EventBody::TaskRunQueued { .. }
-            | EventBody::TaskRun { .. }
             | EventBody::TaskQueue { .. }
             | EventBody::TaskReply { .. }
-            | EventBody::Queued { .. }
             | EventBody::TaskRefined { .. }
-            | EventBody::TaskPlan { .. }
             | EventBody::TriggerFires { .. }
             | EventBody::McpAuthorizeUrl { .. }
             | EventBody::McpServer { .. }
@@ -198,6 +197,7 @@ impl App {
 
     /// Events that build the current reply in the output pane.
     fn on_turn_event(&mut self, body: EventBody) {
+        self.queued_behind = None;
         match body {
             EventBody::Delta { text } => {
                 self.output.finish_thinking();
@@ -561,6 +561,7 @@ impl App {
         self.output.reset_scroll();
         self.output.begin_assistant();
         self.tokens.reset();
+        self.queued_behind = None;
         self.reply_started_at = Some(Instant::now());
     }
 

@@ -54,9 +54,9 @@ impl StatusService {
                             target: "assistd::subscribe",
                             id = %id,
                             skipped,
-                            "subscriber lagged; resyncing current state and paused prompts"
+                            "subscriber lagged; resending current state"
                         );
-                        if self.resync_lagged(&id, &filter, &tx).await.is_err() {
+                        if self.send_current_state(&id, &filter, &tx).await.is_err() {
                             return;
                         }
                     }
@@ -64,23 +64,6 @@ impl StatusService {
                 },
             }
         }
-    }
-
-    /// Resend what the skipped events may have carried that a subscriber cannot recover
-    /// from later ones: the current state, and the prompts of runs paused for input.
-    async fn resync_lagged(
-        &self,
-        id: &str,
-        filter: &SubscribeFilter,
-        tx: &EventSink,
-    ) -> Result<(), ClientGone> {
-        self.send_current_state(id, filter, tx).await?;
-        if filter.matches(EventKind::TaskRun) {
-            for prompt in self.tasks.paused_prompt_events() {
-                tx.send(prompt).await?;
-            }
-        }
-        Ok(())
     }
 
     /// Send the task queue, presence, listen phase and capture state as they stand, each

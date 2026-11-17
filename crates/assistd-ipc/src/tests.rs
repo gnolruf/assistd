@@ -1143,13 +1143,6 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
             r#"{"id":"r","type":"task_run_queued","task":4,"run":9}"#,
         ),
         (
-            event(EventBody::TaskRun { run: TaskRunId(9), event: Box::new(event(EventBody::ConfirmRequest { confirm_id: "c".into(), tool: "bash".into(), script: "rm x".into(), matched_pattern: "rm".into(), always_allow: Vec::new(), source: ConfirmSource::Task {
-                        task: TaskId(4),
-                        run: TaskRunId(9),
-                    } })) }),
-            r#"{"id":"r","type":"task_run","run":9,"event":{"id":"r","type":"confirm_request","confirm_id":"c","tool":"bash","script":"rm x","matched_pattern":"rm","source":{"agent":"task","task":4,"run":9}}}"#,
-        ),
-        (
             event(EventBody::TaskRefined { prompt: "summarize my inbox".to_string().try_into().unwrap(), plan: sample_plan(), recommended: ModeRecommendation {
                     mode: PermissionMode::AcceptEdits,
                     covers: vec![PlannedAction::Write {
@@ -1160,10 +1153,6 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
                     }],
                 } }),
             format!(r#"{{"id":"r","type":"task_refined","prompt":"summarize my inbox","plan":{SAMPLE_PLAN_WIRE},"recommended":{{"mode":"accept_edits","covers":[{{"kind":"write","under":"/home/u/notes"}}],"still_asks":[{{"kind":"web_host","host":"example.org"}}]}}}}"#).leak(),
-        ),
-        (
-            event(EventBody::TaskPlan { event: Box::new(event(EventBody::Delta { text: "hi".into() })) }),
-            r#"{"id":"r","type":"task_plan","event":{"id":"r","type":"delta","text":"hi"}}"#,
         ),
     ]
 }

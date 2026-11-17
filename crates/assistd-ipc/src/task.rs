@@ -565,8 +565,8 @@ pub enum TaskRequest {
     Delete { task: TaskId },
     /// Turn a task's triggers on or off. Emits the updated `Task`, then `Done`.
     SetEnabled { task: TaskId, enabled: bool },
-    /// Queue a run of `task` on a backend of its own, whose events are broadcast as
-    /// `TaskRun`. Emits `TaskRunQueued`, then `Done`, without waiting for the run.
+    /// Queue a run of `task` on a backend of its own. Emits `TaskRunQueued`, then `Done`,
+    /// without waiting for the run.
     Run { task: TaskId },
     /// Cancel run `run`, dropping its turn; errors when it is not queued or running.
     /// Emits `Done`.
@@ -590,10 +590,9 @@ pub enum TaskRequest {
     },
     /// Explore task prompt `prompt` on a backend of its own and rewrite it as a brief for
     /// an unattended run under `mode` and `allowed_hosts`, or with `feedback` revise the last
-    /// rewrite of it; a new refine ends the previous one. Streams the turn wrapped in
-    /// `TaskPlan`, then emits `TaskRefined` and `Done`. Saves nothing. Errors when `mode` is
-    /// Auto and the daemon does not allow it, or `feedback` is given and the last refine was
-    /// not of `prompt`.
+    /// rewrite of it; a new refine ends the previous one. Emits `TaskRefined`, then
+    /// `Done`. Saves nothing. Errors when `mode` is Auto and the daemon does not allow it, or
+    /// `feedback` is given and the last refine was not of `prompt`.
     Refine {
         prompt: TaskPrompt,
         #[serde(default)]

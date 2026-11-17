@@ -222,24 +222,6 @@ impl EventStream {
         let line = self.inner.next_line().await?;
         Ok(line.as_deref().map(serde_json::from_str).transpose()?)
     }
-
-    /// Collect events through the terminal one; errors with [`IpcClientError::DaemonClosed`] if
-    /// the stream closes first.
-    pub async fn collect(mut self) -> Result<Vec<Event>> {
-        let mut events = Vec::new();
-        loop {
-            match self.next_event().await? {
-                Some(event) => {
-                    let terminal = event.is_terminal();
-                    events.push(event);
-                    if terminal {
-                        return Ok(events);
-                    }
-                }
-                None => return Err(IpcClientError::DaemonClosed),
-            }
-        }
-    }
 }
 
 /// Bidirectional connection: read events as they arrive and send further requests at any time.
@@ -366,27 +348,12 @@ mod tests {
             r#"{"type":"done","id":"r"}"#.into(),
         ]);
         let client = IpcClient::with_path(path);
-        let stream = client.one_shot(query()).await.unwrap();
-        let outcome = stream.collect().await;
+        let mut stream = client.one_shot(query()).await.unwrap();
+        let outcome = stream.next_event().await;
         assert!(
             matches!(outcome, Err(IpcClientError::Json(_))),
             "{outcome:?}"
         );
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn collect_errors_on_premature_close() {
-        let (_dir, path, server) = mock_server(&[Event::new(
-            "r",
-            EventBody::Delta {
-                text: "incomplete".into(),
-            },
-        )]);
-        let client = IpcClient::with_path(path);
-        let stream = client.one_shot(query()).await.unwrap();
-        let err = stream.collect().await.expect_err("expected DaemonClosed");
-        assert!(matches!(err, IpcClientError::DaemonClosed), "{err:?}");
         server.await.unwrap();
     }
 

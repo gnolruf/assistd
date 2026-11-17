@@ -248,6 +248,22 @@ async fn losing_the_bus_mid_turn_frees_the_input_but_keeps_this_chats_own_reply(
 }
 
 #[test]
+fn a_queued_reply_says_what_it_waits_behind_until_its_turn_has_the_model() {
+    let (mut app, _rx) = test_app();
+    start_typed_turn(&mut app, "typed", "typed question");
+    app.on_chat_event(reply(Event::new("typed", EventBody::Queued { behind: 2 })));
+    assert_eq!(app.queued_behind, Some(2));
+
+    let model_request = EventBody::ContextSize {
+        tokens: 10,
+        total: 10,
+    };
+    app.on_chat_event(reply(Event::new("typed", model_request)));
+    assert_eq!(app.queued_behind, None);
+    assert!(app.generating());
+}
+
+#[test]
 fn bus_copies_of_this_chats_query_are_ignored() {
     let (mut app, _rx) = test_app();
     app.remember_own_turn("typed");

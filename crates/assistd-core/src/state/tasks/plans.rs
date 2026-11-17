@@ -16,7 +16,6 @@ use super::TaskService;
 use super::runs::task_system_prompt;
 use crate::bus::EventSink;
 use crate::planner::{PlanAsk, PlanError, Refinement, WorkPermissions};
-use crate::state::turn_driver::TurnDriver;
 use crate::state::{DispatchError, FailedStep};
 
 const EVENT_BUFFER: usize = 32;
@@ -96,7 +95,7 @@ impl TaskService {
     }
 
     /// Refine the asked prompt, or revise its last rewrite, on the main lane, as a user
-    /// turn takes it, streaming the planning turn to `tx` as `TaskPlan` events.
+    /// turn takes it. The planning turn's events go unread.
     async fn refine_prompt(
         &self,
         id: &str,
@@ -112,7 +111,7 @@ impl TaskService {
             () = cancel.cancelled() => return Err(PlanError::Cancelled.into()),
             lane = Arc::clone(&self.deps.admission.agent_turn_lock).lock_owned() => lane,
         };
-        let Some(_awake) = self.wake_for_task_run(id, tx, cancel).await? else {
+        let Some(_awake) = self.wake_for_task_run(Some((id, tx)), cancel).await? else {
             return Err(PlanError::Cancelled.into());
         };
         let (session, plan_ask) = self.planning_session(ask.prompt, ask.feedback).await?;
@@ -120,7 +119,7 @@ impl TaskService {
             mode: ask.mode,
             allowed_hosts: ask.allowed_hosts,
         };
-        let (llm_tx, llm_rx) = mpsc::channel(EVENT_BUFFER);
+        let (llm_tx, mut planning_events) = mpsc::channel(EVENT_BUFFER);
         let planner = &self.deps.planner;
         let planning = planner.refine(
             Arc::clone(&session.backend),
@@ -130,10 +129,8 @@ impl TaskService {
             llm_tx,
             cancel.clone(),
         );
-        let transcript = Arc::clone(&self.deps.transcript);
-        let streaming = TurnDriver::new(id.to_string(), transcript, None, tx.of_task_plan())
-            .drive(llm_rx, cancel);
-        let (refinement, _reply) = tokio::join!(planning, streaming);
+        let unread = async { while planning_events.recv().await.is_some() {} };
+        let (refinement, ()) = tokio::join!(planning, unread);
         drop(lane);
         let refinement = refinement?;
         info!(target: "assistd::tasks", plan = %refinement.plan.id, "task prompt refined");
