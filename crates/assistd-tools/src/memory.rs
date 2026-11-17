@@ -16,13 +16,13 @@ pub const DEFAULT_SEARCH_LIMIT: usize = 50;
 /// Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct MemoryOps {
-    pub store: Arc<dyn MemoryStore>,
+    pub store: Arc<MemoryStore>,
     pub transcripts: Arc<dyn TranscriptStore>,
 }
 
 impl MemoryOps {
     /// Bundle the two stores into one handle.
-    pub fn new(store: Arc<dyn MemoryStore>, transcripts: Arc<dyn TranscriptStore>) -> Self {
+    pub fn new(store: Arc<MemoryStore>, transcripts: Arc<dyn TranscriptStore>) -> Self {
         Self { store, transcripts }
     }
 

@@ -59,10 +59,6 @@ pub enum MemoryError {
     #[error("no unfinished task run with id {0}")]
     TaskRunNotFound(TaskRunId),
 
-    /// The store has no database behind it this run.
-    #[error("memory.db is not open; persistence is disabled this run")]
-    Disabled,
-
     /// A SQLite statement issued by `op` failed.
     #[error("{op}: {source}")]
     Sqlite {

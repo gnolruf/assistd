@@ -40,7 +40,7 @@ pub(crate) mod session_unlock;
 #[derive(Debug)]
 pub(super) struct TaskDeps {
     pub(super) config: Arc<Config>,
-    pub(super) store: Arc<dyn TaskStore>,
+    pub(super) store: Arc<TaskStore>,
     pub(super) transcript: Arc<TranscriptLog>,
     pub(super) admission: Arc<TurnAdmission>,
     pub(super) session_ctx: Arc<SessionContext>,

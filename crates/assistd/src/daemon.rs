@@ -480,13 +480,15 @@ fn build_memory_stack(
     memory: &MemorySubsystem,
     embed: &EmbeddingHandles,
 ) -> MemoryStack {
-    MemoryStack::disabled(config.embedding.clone())
-        .with_memory(memory.memory_store.clone())
-        .with_transcripts(memory.transcript_store.clone())
-        .with_tasks(memory.task_store.clone())
-        .with_embedder(embed.embedder.clone())
-        .with_semantic(embed.semantic_store.clone())
-        .with_embed_wake(embed.embed_wake.clone())
+    MemoryStack::new(
+        memory.memory_store.clone(),
+        memory.transcript_store.clone(),
+        memory.task_store.clone(),
+        config.embedding.clone(),
+    )
+    .with_embedder(embed.embedder.clone())
+    .with_semantic(embed.semantic_store.clone())
+    .with_embed_wake(embed.embed_wake.clone())
 }
 
 async fn replay_history(llm: &dyn LlmBackend, replay: HistoryReplay) {

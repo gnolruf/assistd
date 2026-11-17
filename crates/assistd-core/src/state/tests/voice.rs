@@ -1,16 +1,17 @@
 use super::*;
 
-fn state_with_voice(voice: Arc<MockVoice>) -> Arc<AppState> {
+async fn state_with_voice(voice: Arc<MockVoice>) -> TestState {
     StateParts {
         voice,
         ..StateParts::default()
     }
     .build()
+    .await
 }
 
 #[tokio::test]
 async fn dispatch_ptt_stop_with_text_runs_query() {
-    let state = state_with_voice(MockVoice::new(Ok(()), Ok("hello world".into())));
+    let state = state_with_voice(MockVoice::new(Ok(()), Ok("hello world".into()))).await;
     let (res, events) = dispatch(&state, Request::new("p3", RequestBody::PttStop)).await;
     res.unwrap();
     assert_eq!(
@@ -37,7 +38,7 @@ async fn dispatch_ptt_stop_with_text_runs_query() {
 
 #[tokio::test]
 async fn interrupt_between_ptt_press_and_release_drops_the_prompt() {
-    let state = state_with_voice(MockVoice::new(Ok(()), Ok("hello world".into())));
+    let state = state_with_voice(MockVoice::new(Ok(()), Ok("hello world".into()))).await;
     let (res, _) = dispatch(&state, Request::new("p", RequestBody::PttStart)).await;
     res.unwrap();
     let (res, _) = dispatch(&state, Request::new("int", RequestBody::InterruptTurn)).await;
@@ -89,7 +90,8 @@ async fn ptt_stop_waits_for_a_press_still_opening_the_mic() {
         voice: voice.clone(),
         ..StateParts::default()
     }
-    .build();
+    .build()
+    .await;
     let press = tokio::spawn({
         let state = state.clone();
         async move { dispatch(&state, Request::new("p", RequestBody::PttStart)).await }
@@ -194,7 +196,8 @@ async fn listen_requests_drive_the_listener() {
             listener: listener.clone(),
             ..StateParts::default()
         }
-        .build();
+        .build()
+        .await;
         let (res, events) = dispatch(&state, req).await;
         res.unwrap_or_else(|e| panic!("{label}: {e:#}"));
         assert_eq!(events, expected, "{label}");
@@ -216,7 +219,8 @@ async fn ptt_takes_the_mic_from_listening_and_returns_it_on_release() {
             listener: listener.clone(),
             ..StateParts::default()
         }
-        .build();
+        .build()
+        .await;
 
         let (res, events) = dispatch(&state, Request::new("p", RequestBody::PttStart)).await;
         res.unwrap_or_else(|e| panic!("{label}: {e:#}"));
@@ -245,7 +249,8 @@ async fn dispatch_query_speaks_sentences_in_order_and_drains() {
         speech: recorder.clone(),
         ..StateParts::default()
     }
-    .build();
+    .build()
+    .await;
     recorder.watch_speaking(state.subsystems.voice.speech());
     let (res, _) = dispatch(&state, query("ord", "First. Second. Third. End.")).await;
     res.unwrap();
@@ -351,7 +356,8 @@ async fn partial_flush_speaks_a_stalled_fragment_only_when_enabled() {
             speech: recorder.clone(),
             ..StateParts::default()
         }
-        .build();
+        .build()
+        .await;
         let (res, _) = dispatch(&state, query("pf", "go")).await;
         res.unwrap();
         assert_eq!(recorder.calls(), expected, "partial_flush_ms={flush_ms}");

@@ -1,9 +1,8 @@
-//! SQLite-backed [`TaskStore`] over the `tasks` and `task_runs` tables.
+//! The [`TaskStore`] over the `tasks` and `task_runs` tables.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::types::Type;
 use rusqlite::{ErrorCode, OptionalExtension, Row, Transaction};
@@ -16,7 +15,7 @@ use assistd_ipc::{
 };
 
 use crate::{
-    MemoryError, PrunedRuns, RecoveredQueue, Result, SessionId, TaskRecord, TaskRunEnd, TaskStore,
+    MemoryError, PrunedRuns, RecoveredQueue, Result, SessionId, TaskRecord, TaskRunEnd,
     UndecodableTask, WaitingRun,
 };
 
@@ -44,22 +43,20 @@ const RUN_SUCCEEDED: i64 = 4;
 const RUN_FAILED: i64 = 5;
 const RUN_CANCELLED: i64 = 6;
 
-/// SQLite-backed [`TaskStore`].
+/// Persistent saved tasks and their runs.
 #[derive(Debug, Clone)]
-pub struct SqliteTaskStore {
+pub struct TaskStore {
     handle: SqliteHandle,
 }
 
-impl SqliteTaskStore {
+impl TaskStore {
     /// Store over the shared database handle.
     pub fn new(handle: SqliteHandle) -> Self {
         Self { handle }
     }
-}
 
-#[async_trait]
-impl TaskStore for SqliteTaskStore {
-    async fn list(&self) -> Result<Vec<TaskRecord>> {
+    /// Every task, sorted by name; one whose stored row no longer decodes is left out.
+    pub async fn list(&self) -> Result<Vec<TaskRecord>> {
         self.handle
             .read("task list", |c| {
                 let mut stmt =
@@ -69,7 +66,8 @@ impl TaskStore for SqliteTaskStore {
             .await
     }
 
-    async fn undecodable(&self) -> Result<Vec<UndecodableTask>> {
+    /// The tasks [`Self::list`] leaves out, sorted by stored name.
+    pub async fn undecodable(&self) -> Result<Vec<UndecodableTask>> {
         self.handle
             .read("task undecodable", |c| {
                 c.prepare_cached(&format!("SELECT {TASK_COLUMNS} FROM tasks ORDER BY name"))?
@@ -80,7 +78,8 @@ impl TaskStore for SqliteTaskStore {
             .await
     }
 
-    async fn get(&self, id: TaskId) -> Result<TaskRecord> {
+    /// The task with `id`; [`MemoryError::TaskNotFound`] when there is none.
+    pub async fn get(&self, id: TaskId) -> Result<TaskRecord> {
         self.handle
             .read("task get", move |c| {
                 c.query_row(
@@ -94,7 +93,9 @@ impl TaskStore for SqliteTaskStore {
             .ok_or(MemoryError::TaskNotFound(id))
     }
 
-    async fn save(&self, id: Option<TaskId>, spec: TaskSpec) -> Result<TaskRecord> {
+    /// Insert `spec` as a new task, or replace task `id` with it.
+    /// Fails with [`MemoryError::TaskNameTaken`] or [`MemoryError::TaskNotFound`].
+    pub async fn save(&self, id: Option<TaskId>, spec: TaskSpec) -> Result<TaskRecord> {
         let name = spec.name.to_string();
         let now = now_millis();
         self.handle
@@ -106,8 +107,10 @@ impl TaskStore for SqliteTaskStore {
             .map_err(|error| task_save_error(error, id, name))
     }
 
-    /// Truncates the WAL so the deleted prompt and transcripts leave no trace.
-    async fn delete(&self, id: TaskId) -> Result<Vec<PathBuf>> {
+    /// Remove task `id`, its runs and their transcript sessions, sparing the active session,
+    /// and truncate the WAL so they leave no trace; returns the saved relay answers the deleted
+    /// sessions named, for the caller to delete. [`MemoryError::TaskNotFound`] when there is none.
+    pub async fn delete(&self, id: TaskId) -> Result<Vec<PathBuf>> {
         self.handle
             .write_erasing("task delete", move |tx| {
                 let released_answer_files = delete_run_sessions(tx, id)?;
@@ -121,7 +124,8 @@ impl TaskStore for SqliteTaskStore {
             .ok_or(MemoryError::TaskNotFound(id))
     }
 
-    async fn set_enabled(&self, id: TaskId, enabled: bool) -> Result<TaskRecord> {
+    /// Set whether task `id`'s triggers fire; [`MemoryError::TaskNotFound`] when there is none.
+    pub async fn set_enabled(&self, id: TaskId, enabled: bool) -> Result<TaskRecord> {
         let now = now_millis();
         self.handle
             .try_write(move |tx| {
@@ -141,7 +145,9 @@ impl TaskStore for SqliteTaskStore {
             ))
     }
 
-    async fn set_next_fire(&self, id: TaskId, next_fire: Option<DateTime<Utc>>) -> Result<()> {
+    /// Record `next_fire` as when task `id`'s triggers next fire;
+    /// [`MemoryError::TaskNotFound`] when there is none.
+    pub async fn set_next_fire(&self, id: TaskId, next_fire: Option<DateTime<Utc>>) -> Result<()> {
         let updated = self
             .handle
             .write("task set_next_fire", move |tx| {
@@ -154,7 +160,10 @@ impl TaskStore for SqliteTaskStore {
         Ok(())
     }
 
-    async fn fire(
+    /// In one write, record `next_fire` for task `task` and queue a run of it that
+    /// `trigger` started, unless one is already unfinished; returns the queued run.
+    /// [`MemoryError::TaskNotFound`] when there is no such task.
+    pub async fn fire(
         &self,
         task: TaskId,
         trigger: TaskTrigger,
@@ -175,7 +184,10 @@ impl TaskStore for SqliteTaskStore {
             ))
     }
 
-    async fn queue_unless_unfinished(
+    /// Queue a run of task `task` that `trigger` started, last in the queue, unless one is
+    /// already unfinished; returns the queued run. [`MemoryError::TaskNotFound`] when there
+    /// is no such task.
+    pub async fn queue_unless_unfinished(
         &self,
         task: TaskId,
         trigger: TaskTrigger,
@@ -187,7 +199,9 @@ impl TaskStore for SqliteTaskStore {
             .map_err(missing_task_or("task queue_unless_unfinished", task))
     }
 
-    async fn queue_run(&self, task: TaskId, trigger: TaskTrigger) -> Result<TaskRunId> {
+    /// Record a queued run of task `task` that `trigger` started, last in the queue;
+    /// [`MemoryError::TaskNotFound`] when there is no such task.
+    pub async fn queue_run(&self, task: TaskId, trigger: TaskTrigger) -> Result<TaskRunId> {
         let now = now_millis();
         self.handle
             .try_write(move |tx| insert_queued_run(tx, task, &trigger, now))
@@ -195,7 +209,9 @@ impl TaskStore for SqliteTaskStore {
             .map_err(missing_task_or("task queue_run", task))
     }
 
-    async fn start_run(&self, run: TaskRunId, session: SessionId) -> Result<()> {
+    /// Mark waiting run `run` as running in transcript session `session`;
+    /// [`MemoryError::TaskRunNotFound`] unless it is queued or suspended.
+    pub async fn start_run(&self, run: TaskRunId, session: SessionId) -> Result<()> {
         let now = now_millis();
         let updated = self
             .handle
@@ -218,7 +234,9 @@ impl TaskStore for SqliteTaskStore {
         run_updated(updated, run)
     }
 
-    async fn set_run_needs_input(&self, run: TaskRunId, needs_input: bool) -> Result<()> {
+    /// Mark running run `run` as awaiting input, or awaiting run `run` as running again when
+    /// `needs_input` is false; [`MemoryError::TaskRunNotFound`] unless it was in the other state.
+    pub async fn set_run_needs_input(&self, run: TaskRunId, needs_input: bool) -> Result<()> {
         let (from, to) = if needs_input {
             (RUN_RUNNING, RUN_NEEDS_INPUT)
         } else {
@@ -236,7 +254,13 @@ impl TaskStore for SqliteTaskStore {
         run_updated(updated, run)
     }
 
-    async fn set_run_waiting(&self, run: TaskRunId, reason: Option<SuspendReason>) -> Result<()> {
+    /// Mark waiting run `run` as suspended for `reason`, or as queued again when `None`;
+    /// [`MemoryError::TaskRunNotFound`] unless it is queued or suspended.
+    pub async fn set_run_waiting(
+        &self,
+        run: TaskRunId,
+        reason: Option<SuspendReason>,
+    ) -> Result<()> {
         let (state, reason_code) = match reason {
             Some(reason) => (RUN_SUSPENDED, Some(suspend_reason_code(reason))),
             None => (RUN_QUEUED, None),
@@ -254,7 +278,8 @@ impl TaskStore for SqliteTaskStore {
         run_updated(updated, run)
     }
 
-    async fn reorder_queue(&self, order: Vec<TaskRunId>) -> Result<()> {
+    /// Place the waiting runs in `order` in the queue in that order.
+    pub async fn reorder_queue(&self, order: Vec<TaskRunId>) -> Result<()> {
         self.handle
             .write("task reorder_queue", move |tx| {
                 let mut stmt = tx.prepare_cached(
@@ -268,7 +293,8 @@ impl TaskStore for SqliteTaskStore {
             .await
     }
 
-    async fn set_queue_paused(&self, paused: bool) -> Result<()> {
+    /// Record whether the task queue is paused.
+    pub async fn set_queue_paused(&self, paused: bool) -> Result<()> {
         self.handle
             .write("task set_queue_paused", move |tx| {
                 tx.execute(
@@ -281,7 +307,9 @@ impl TaskStore for SqliteTaskStore {
             .map(drop)
     }
 
-    async fn recover_queue(&self, reason: String) -> Result<RecoveredQueue> {
+    /// Fail every run left running or awaiting input with `reason`, requeue every
+    /// suspended run, and return the queue as it was left.
+    pub async fn recover_queue(&self, reason: String) -> Result<RecoveredQueue> {
         let now = now_millis();
         self.handle
             .write("task recover_queue", move |tx| {
@@ -303,7 +331,9 @@ impl TaskStore for SqliteTaskStore {
             .await
     }
 
-    async fn finish_run(&self, run: TaskRunId, end: TaskRunEnd) -> Result<()> {
+    /// Record how unfinished run `run` ended; [`MemoryError::TaskRunNotFound`] when it has
+    /// already finished or does not exist.
+    pub async fn finish_run(&self, run: TaskRunId, end: TaskRunEnd) -> Result<()> {
         let now = now_millis();
         let (state, failure, reply) = match end {
             TaskRunEnd::Succeeded { reply } => (RUN_SUCCEEDED, None, Some(reply)),
@@ -334,7 +364,8 @@ impl TaskStore for SqliteTaskStore {
         run_updated(updated, run)
     }
 
-    async fn last_finished_runs(&self) -> Result<HashMap<TaskId, TaskRunState>> {
+    /// How each task's latest finished run ended, for every task with one.
+    pub async fn last_finished_runs(&self) -> Result<HashMap<TaskId, TaskRunState>> {
         self.handle
             .read("task last_finished_runs", |c| {
                 c.prepare_cached(
@@ -350,7 +381,9 @@ impl TaskStore for SqliteTaskStore {
             .await
     }
 
-    async fn runs(&self, task: TaskId, limit: u32) -> Result<Vec<TaskRunRecord>> {
+    /// Task `task`'s latest `limit` runs, newest first, leaving out any whose stored row no
+    /// longer decodes; [`MemoryError::TaskNotFound`] when there is no such task.
+    pub async fn runs(&self, task: TaskId, limit: u32) -> Result<Vec<TaskRunRecord>> {
         self.handle
             .read("task runs", move |c| {
                 let exists = c
@@ -370,8 +403,10 @@ impl TaskStore for SqliteTaskStore {
             .ok_or(MemoryError::TaskNotFound(task))
     }
 
+    /// Delete each task's finished runs beyond those it keeps, `default_keep` when it names
+    /// none, with their transcript sessions; a run whose session is `spare` is kept.
     /// Truncates the WAL so the deleted transcripts leave no trace.
-    async fn prune_runs(&self, default_keep: u32, spare: SessionId) -> Result<PrunedRuns> {
+    pub async fn prune_runs(&self, default_keep: u32, spare: SessionId) -> Result<PrunedRuns> {
         self.handle
             .write_erasing("task prune_runs", move |tx| {
                 let pruned = delete_runs_beyond(tx, default_keep, spare)?;
@@ -794,12 +829,12 @@ mod tests {
     };
 
     /// The returned temp dir must outlive the store.
-    async fn fresh() -> (SqliteTaskStore, tempfile::TempDir) {
+    async fn fresh() -> (TaskStore, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
         let handle = SqliteHandle::open(&temp.path().join("memory.db"))
             .await
             .unwrap();
-        (SqliteTaskStore::new(handle), temp)
+        (TaskStore::new(handle), temp)
     }
 
     fn sample_spec(name: &str, prompt: &str) -> TaskSpec {
@@ -841,7 +876,7 @@ mod tests {
         let handle = SqliteHandle::open(&temp.path().join("memory.db"))
             .await
             .unwrap();
-        let tasks = SqliteTaskStore::new(handle.clone());
+        let tasks = TaskStore::new(handle.clone());
         let transcripts = SqliteTranscriptStore::new(handle);
         let task = tasks.save(None, sample_spec("digest", "a")).await.unwrap();
         let user_session = SessionId::new();
@@ -891,7 +926,7 @@ mod tests {
     async fn queue_order_pause_and_interrupted_runs_survive_a_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");
-        let tasks = SqliteTaskStore::new(SqliteHandle::open(&path).await.unwrap());
+        let tasks = TaskStore::new(SqliteHandle::open(&path).await.unwrap());
         let task = tasks
             .save(None, sample_spec("digest", "a"))
             .await
@@ -921,7 +956,7 @@ mod tests {
         tasks.set_queue_paused(true).await.unwrap();
         drop(tasks);
 
-        let reopened = SqliteTaskStore::new(SqliteHandle::open(&path).await.unwrap());
+        let reopened = TaskStore::new(SqliteHandle::open(&path).await.unwrap());
         let recovered = reopened
             .recover_queue("daemon stopped".into())
             .await
@@ -974,7 +1009,7 @@ mod tests {
 
     /// Run task `task` to success in a new session holding one relay answer saved to `answer`.
     async fn finished_run_with_relay(
-        tasks: &SqliteTaskStore,
+        tasks: &TaskStore,
         transcripts: &SqliteTranscriptStore,
         task: TaskId,
         answer: &str,
@@ -1025,7 +1060,7 @@ mod tests {
         let handle = SqliteHandle::open(&temp.path().join("memory.db"))
             .await
             .unwrap();
-        let tasks = SqliteTaskStore::new(handle.clone());
+        let tasks = TaskStore::new(handle.clone());
         let transcripts = SqliteTranscriptStore::new(handle);
         let task = tasks
             .save(None, sample_spec("digest", "a"))
@@ -1075,7 +1110,7 @@ mod tests {
         let handle = SqliteHandle::open(&temp.path().join("memory.db"))
             .await
             .unwrap();
-        let tasks = SqliteTaskStore::new(handle.clone());
+        let tasks = TaskStore::new(handle.clone());
         let transcripts = SqliteTranscriptStore::new(handle.clone());
         let task = tasks
             .save(None, sample_spec("digest", "a"))
@@ -1149,7 +1184,7 @@ mod tests {
         let handle = SqliteHandle::open(&temp.path().join("memory.db"))
             .await
             .unwrap();
-        let tasks = SqliteTaskStore::new(handle.clone());
+        let tasks = TaskStore::new(handle.clone());
         let transcripts = SqliteTranscriptStore::new(handle.clone());
         let kept = tasks.save(None, sample_spec("digest", "a")).await.unwrap();
         let misnamed = tasks.save(None, sample_spec("other", "b")).await.unwrap();

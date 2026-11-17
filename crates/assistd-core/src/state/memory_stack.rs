@@ -7,10 +7,7 @@ use tokio::sync::Notify;
 
 use assistd_config::EmbeddingConfig;
 use assistd_embed::EmbedderHandle;
-use assistd_memory::{
-    MemoryStore, NoMemoryStore, NoSemanticStore, NoTaskStore, NoTranscriptStore, SemanticStore,
-    TaskStore, TranscriptStore,
-};
+use assistd_memory::{MemoryStore, NoSemanticStore, SemanticStore, TaskStore, TranscriptStore};
 use assistd_tools::MemoryOps;
 use assistd_utils::readiness::Readiness;
 
@@ -18,9 +15,9 @@ use assistd_utils::readiness::Readiness;
 /// over them.
 #[derive(Debug)]
 pub struct MemoryStack {
-    pub memory: Arc<dyn MemoryStore>,
+    pub memory: Arc<MemoryStore>,
     pub transcripts: Arc<dyn TranscriptStore>,
-    pub tasks: Arc<dyn TaskStore>,
+    pub tasks: Arc<TaskStore>,
     pub memory_ops: Arc<MemoryOps>,
     pub embedder: Arc<EmbedderHandle>,
     pub semantic: Arc<dyn SemanticStore>,
@@ -30,16 +27,19 @@ pub struct MemoryStack {
 }
 
 impl MemoryStack {
-    /// Construct a stack with every store wired to its no-op placeholder
-    /// and the embedder unavailable.
-    pub fn disabled(embedding_cfg: EmbeddingConfig) -> Self {
-        let memory: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
-        let transcripts: Arc<dyn TranscriptStore> = Arc::new(NoTranscriptStore);
+    /// A stack over the three stores with embedding off: the embedder unavailable
+    /// and a semantic store that finds nothing.
+    pub fn new(
+        memory: Arc<MemoryStore>,
+        transcripts: Arc<dyn TranscriptStore>,
+        tasks: Arc<TaskStore>,
+        embedding_cfg: EmbeddingConfig,
+    ) -> Self {
         let memory_ops = Arc::new(MemoryOps::new(memory.clone(), transcripts.clone()));
         Self {
             memory,
             transcripts,
-            tasks: Arc::new(NoTaskStore),
+            tasks,
             memory_ops,
             embedder: Arc::new(EmbedderHandle::new(Readiness::Unavailable(
                 "embedding not configured".into(),
@@ -48,26 +48,6 @@ impl MemoryStack {
             embed_wake: Arc::default(),
             embedding_cfg,
         }
-    }
-
-    /// Replace the fact store, rebuilding `memory_ops` over it.
-    pub fn with_memory(mut self, memory: Arc<dyn MemoryStore>) -> Self {
-        self.memory = memory.clone();
-        self.memory_ops = Arc::new(MemoryOps::new(memory, self.transcripts.clone()));
-        self
-    }
-
-    /// Replace the transcript store, rebuilding `memory_ops` over it.
-    pub fn with_transcripts(mut self, transcripts: Arc<dyn TranscriptStore>) -> Self {
-        self.transcripts = transcripts.clone();
-        self.memory_ops = Arc::new(MemoryOps::new(self.memory.clone(), transcripts));
-        self
-    }
-
-    /// Replace the task store.
-    pub fn with_tasks(mut self, tasks: Arc<dyn TaskStore>) -> Self {
-        self.tasks = tasks;
-        self
     }
 
     /// Replace the embedder.

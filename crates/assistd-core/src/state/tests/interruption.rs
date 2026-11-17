@@ -135,7 +135,7 @@ impl LlmBackend for LoggedTask {}
 /// A one-lane daemon under `interruption` whose runs get, in order, a task backend
 /// per entry of `tasks`: its name, and the gate its first step waits on, if any.
 struct Harness {
-    state: Arc<AppState>,
+    state: TestState,
     conv: Arc<dyn TranscriptStore>,
     task: TaskId,
     log: LaneLog,

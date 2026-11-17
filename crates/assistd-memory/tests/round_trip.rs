@@ -2,7 +2,7 @@
 
 use assistd_memory::{
     BranchId, HistoryScope, MemoryStore, PersistedMessage, PersistedRole, SessionId, SqliteHandle,
-    SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
+    SqliteTranscriptStore, TranscriptStore,
 };
 
 #[tokio::test]
@@ -15,7 +15,7 @@ async fn turn_persists_across_store_reopen() {
     {
         let handle = SqliteHandle::open(&path).await.unwrap();
         let convs = SqliteTranscriptStore::new(handle.clone());
-        let mems = SqliteMemoryStore::new(handle.clone());
+        let mems = MemoryStore::new(handle.clone());
 
         let session = SessionId::new();
         let main = convs.begin_session_with_main_branch(session).await.unwrap();
@@ -47,7 +47,7 @@ async fn turn_persists_across_store_reopen() {
     {
         let handle = SqliteHandle::open(&path).await.unwrap();
         let convs = SqliteTranscriptStore::new(handle.clone());
-        let mems = SqliteMemoryStore::new(handle.clone());
+        let mems = MemoryStore::new(handle.clone());
 
         let history = convs
             .load_branch(branch, HistoryScope::Whole)

@@ -140,7 +140,8 @@ fn recall_hit(session_id: SessionId, message: i64, similarity: f32, text: &str) 
 async fn auto_recall_runs_once_per_new_session_with_memories_and_past_chat_pointers() {
     let current = SessionId::new();
     let other = SessionId::new();
-    let mut memory = stub_memory();
+    let config = Config::default();
+    let (mut memory, db_dir) = fresh_memory(&config).await;
     memory.embedder = Arc::new(EmbedderHandle::new(Readiness::Ready(Arc::new(
         ConstantEmbedder,
     ))));
@@ -156,7 +157,8 @@ async fn auto_recall_runs_once_per_new_session_with_memories_and_past_chat_point
             memory_hit(2, "shell", "fish", 0.1),
         ],
     });
-    let state = state_over(stub_subsystems(), memory, current);
+    let session_ctx = SessionContext::new(current, None);
+    let state = TestState::new(config, stub_subsystems(), memory, db_dir, session_ctx);
     let recall = async |state: &AppState, query: &str| {
         state.turns.build_semantic_context(query).await.unwrap()
     };

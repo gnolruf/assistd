@@ -1,11 +1,13 @@
 use std::borrow::Cow;
 use std::num::NonZeroU32;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::Utc;
 use parking_lot::Mutex as StdMutex;
+use tempfile::TempDir;
 use tokio::sync::{Notify, watch};
 
 use assistd_config::Config;
@@ -18,20 +20,21 @@ use assistd_ipc::{
     TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{
-    EchoBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall, ToolResultPayload,
-    TurnBackend,
+    EchoBackend, LlmBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall,
+    ToolResultPayload, TurnBackend,
 };
 use assistd_memory::{
     AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit,
-    EmbeddingSpace, FileStamp, HistoryRow, HistoryScope, IndexPass, MemoryHit, MemoryId, MessageId,
-    MessageKind, NoSemanticStore, PersistedMessage, PersistedRole, PersistedToolCall,
-    SemanticStore, SessionId, SessionScope, SqliteHandle, SqliteTaskStore, SqliteTranscriptStore,
+    EmbeddingSpace, FileStamp, HistoryRow, HistoryScope, IndexPass, MemoryHit, MemoryId,
+    MemoryStore, MessageId, MessageKind, NoSemanticStore, PersistedMessage, PersistedRole,
+    PersistedToolCall, SemanticStore, SessionId, SessionScope, SqliteHandle, SqliteTranscriptStore,
     TaskStore, TranscriptStore, UnindexedRows,
 };
 use assistd_tools::{
     Approval, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, ConfirmationGate,
     ConfirmationRequest, IpcConfirmationGate, JudgeContext, JudgedClass, OutputCap, PresentSpec,
-    Risk, RunTool, ToolError, ToolOutput, ToolsDisabled, Unattended, commands::EchoCommand,
+    Risk, RunTool, ToolError, ToolOutput, ToolRegistry, ToolsDisabled, Unattended,
+    commands::EchoCommand,
 };
 use assistd_utils::program::ProgramError;
 use assistd_utils::readiness::Readiness;
@@ -42,6 +45,7 @@ use assistd_voice::{
 use assistd_wm::FocusedWindowContext;
 
 use super::*;
+use crate::PresenceManager;
 use crate::state::context::{format_memory_line, format_window_context_block};
 
 mod branches;
@@ -50,7 +54,52 @@ mod recall;
 mod tasks;
 mod voice;
 
-/// Inputs for an [`AppState`] with no-op memory; every field defaults to an inert stub.
+/// An [`AppState`] and the temp dir holding its database, removed when this drops.
+pub(crate) struct TestState {
+    state: Arc<AppState>,
+    _db_dir: TempDir,
+}
+
+impl TestState {
+    /// A state over `subsystems` and `memory`, whose database is in `db_dir`, on the
+    /// session `session_ctx` points at with one model lane.
+    fn new(
+        config: Config,
+        subsystems: Subsystems,
+        memory: MemoryStack,
+        db_dir: TempDir,
+        session_ctx: SessionContext,
+    ) -> Self {
+        let state = Arc::new(AppState::from_parts(
+            config,
+            subsystems,
+            memory,
+            Arc::new(session_ctx),
+            watch::channel(NonZeroU32::MIN).1,
+        ));
+        Self {
+            state,
+            _db_dir: db_dir,
+        }
+    }
+
+    /// A state over `subsystems` and a new database, on a new, unsaved session.
+    pub(crate) async fn unsaved(config: Config, subsystems: Subsystems) -> Self {
+        let (memory, db_dir) = fresh_memory(&config).await;
+        let session_ctx = SessionContext::new(SessionId::new(), None);
+        Self::new(config, subsystems, memory, db_dir, session_ctx)
+    }
+}
+
+impl Deref for TestState {
+    type Target = Arc<AppState>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+/// Inputs for an [`AppState`] over a new database; every field defaults to an inert stub.
 struct StateParts {
     config: Config,
     backend: Arc<dyn LlmBackend>,
@@ -76,26 +125,23 @@ impl Default for StateParts {
 }
 
 impl StateParts {
-    fn build(self) -> Arc<AppState> {
-        Arc::new(AppState::new(
-            self.config,
+    async fn build(self) -> TestState {
+        let capture = VoiceCapture {
+            input: self.voice,
+            listener: self.listener,
+        };
+        let subsystems = Subsystems::new(
             self.backend,
             PresenceManager::stub(self.presence),
             self.tools,
-            VoiceManager::ready(
-                VoiceCapture {
-                    input: self.voice,
-                    listener: self.listener,
-                },
-                self.speech,
-                true,
-            ),
-        ))
+            VoiceManager::ready(capture, self.speech, true),
+        );
+        TestState::unsaved(self.config, subsystems).await
     }
 }
 
-fn default_state() -> Arc<AppState> {
-    StateParts::default().build()
+async fn default_state() -> TestState {
+    StateParts::default().build().await
 }
 
 fn stub_subsystems() -> Subsystems {
@@ -112,20 +158,19 @@ fn stub_subsystems() -> Subsystems {
     )
 }
 
-/// An [`AppState`] over `subsystems` and `memory`, on the unsaved `session` with one
-/// model lane.
-fn state_over(subsystems: Subsystems, memory: MemoryStack, session: SessionId) -> Arc<AppState> {
-    Arc::new(AppState::from_parts(
-        Config::default(),
-        subsystems,
-        memory,
-        Arc::new(SessionContext::new(session, None)),
-        watch::channel(NonZeroU32::MIN).1,
-    ))
-}
-
-fn stub_memory() -> MemoryStack {
-    MemoryStack::disabled(Config::default().embedding)
+/// A [`MemoryStack`] with embedding off over a new database, and the temp dir holding it.
+async fn fresh_memory(config: &Config) -> (MemoryStack, TempDir) {
+    let db_dir = tempfile::tempdir().unwrap();
+    let handle = SqliteHandle::open(&db_dir.path().join("memory.db"))
+        .await
+        .unwrap();
+    let memory = MemoryStack::new(
+        Arc::new(MemoryStore::new(handle.clone())),
+        Arc::new(SqliteTranscriptStore::new(handle.clone())),
+        Arc::new(TaskStore::new(handle)),
+        config.embedding.clone(),
+    );
+    (memory, db_dir)
 }
 
 /// Dispatch `req` and collect every event it emits.
@@ -236,7 +281,8 @@ async fn assert_request_events(cases: Vec<(PresenceTarget, Request, Vec<Event>, 
             presence: initial,
             ..StateParts::default()
         }
-        .build();
+        .build()
+        .await;
         let (res, events) = dispatch(&state, req).await;
         let ends_in_error = matches!(
             expected.last(),
@@ -255,7 +301,7 @@ async fn assert_request_events(cases: Vec<(PresenceTarget, Request, Vec<Event>, 
 async fn capabilities_report_disabled_tools_before_the_model() {
     let no_bwrap = ToolsDisabled::BwrapMissing(ProgramError::NotOnPath);
     let subsystems = stub_subsystems().with_tools_disabled(Some(no_bwrap));
-    let state = state_over(subsystems, stub_memory(), SessionId::new());
+    let state = TestState::unsaved(Config::default(), subsystems).await;
     let (result, events) = dispatch(&state, Request::new("c", RequestBody::GetCapabilities)).await;
     result.expect("dispatch");
     let [
@@ -286,8 +332,9 @@ async fn capabilities_report_disabled_tools_before_the_model() {
     );
 }
 
-fn state_mid_startup() -> Arc<AppState> {
-    let mut memory = stub_memory();
+async fn state_mid_startup() -> TestState {
+    let config = Config::default();
+    let (mut memory, db_dir) = fresh_memory(&config).await;
     memory.embedder = Arc::new(EmbedderHandle::new(Readiness::Starting));
     let git = McpServerStatus::starting("git".into(), McpTransportKind::Stdio);
     git.set(McpServerState::Unavailable {
@@ -298,12 +345,13 @@ fn state_mid_startup() -> Arc<AppState> {
         McpServerStatus::starting("fs".into(), McpTransportKind::Stdio),
         git,
     ]);
-    state_over(subsystems, memory, SessionId::new())
+    let session_ctx = SessionContext::new(SessionId::new(), None);
+    TestState::new(config, subsystems, memory, db_dir, session_ctx)
 }
 
 #[tokio::test]
 async fn readiness_lists_every_background_subsystem() {
-    let state = state_mid_startup();
+    let state = state_mid_startup().await;
     let (result, events) = dispatch(&state, Request::new("r", RequestBody::GetReadiness)).await;
     result.expect("dispatch");
     let readiness = |component, state| Event::new("r", EventBody::Readiness { component, state });
@@ -336,7 +384,7 @@ async fn readiness_lists_every_background_subsystem() {
 
 #[tokio::test]
 async fn semantic_requests_before_embedding_is_up_say_it_is_starting() {
-    let state = state_mid_startup();
+    let state = state_mid_startup().await;
     let (result, events) = dispatch(
         &state,
         Request::new(
@@ -384,7 +432,8 @@ async fn dispatch_query_failed_step_ends_with_error_only() {
         backend: ToolCallBackend::new("Cut off mid-", "", endless_truncations),
         ..StateParts::default()
     }
-    .build();
+    .build()
+    .await;
     let (res, events) = dispatch(&state, query("q-fail", "go")).await;
 
     let err = res.unwrap_err();
@@ -415,7 +464,8 @@ async fn dispatch_query_refuses_images_without_vision() {
             plan: PlanMode::Off,
         },
     );
-    let (res, events) = dispatch(&default_state(), request).await;
+    let state = default_state().await;
+    let (res, events) = dispatch(&state, request).await;
 
     let err = res.unwrap_err();
     assert!(matches!(err, DispatchError::VisionUnsupported), "{err:?}");
@@ -441,7 +491,8 @@ async fn dispatch_query_refuses_image_whose_content_does_not_match_its_mime() {
             plan: PlanMode::Off,
         },
     );
-    let (res, events) = dispatch(&default_state(), request).await;
+    let state = default_state().await;
+    let (res, events) = dispatch(&state, request).await;
 
     let err = res.unwrap_err();
     assert!(
@@ -493,7 +544,8 @@ async fn dispatch_query_forwards_tool_call_and_result_events() {
         tools: echo_tools(),
         ..StateParts::default()
     }
-    .build();
+    .build()
+    .await;
     let (res, events) = dispatch(&state, query("req-42", "go")).await;
     res.unwrap();
 
@@ -599,7 +651,8 @@ async fn completed_turn_broadcasts_a_generated_session_title() {
         backend: backend.clone(),
         ..StateParts::default()
     }
-    .build();
+    .build()
+    .await;
     let mut bus = state.bus.subscribe(SubscribeFilter::default());
 
     let (res, _) = dispatch(&state, query("req-title", "tell me about cats")).await;
@@ -840,7 +893,8 @@ async fn dispatch_query_tool_call_inhibits_idle_flush() {
         speech: recorder.clone(),
         ..StateParts::default()
     }
-    .build();
+    .build()
+    .await;
     let (res, _) = dispatch(&state, query("tc", "go")).await;
     res.unwrap();
 
@@ -901,7 +955,8 @@ async fn act_runs(plan: PlanMode, answer: Approval, steps: &[(&str, serde_json::
         tools: Arc::new(tools),
         ..StateParts::default()
     }
-    .build();
+    .build()
+    .await;
     let request = Request::new(
         "p",
         RequestBody::Query {
@@ -933,7 +988,7 @@ async fn act_runs(plan: PlanMode, answer: Approval, steps: &[(&str, serde_json::
         pid: None,
         turn: TurnContext::answered_by(Arc::clone(&router)),
     };
-    let dispatched = state.dispatch(request, requester, tx);
+    let dispatched = Arc::clone(&state).dispatch(request, requester, tx);
     let (res, ()) = tokio::join!(dispatched, client);
     res.unwrap();
     runs.load(Ordering::SeqCst)
@@ -1008,11 +1063,11 @@ impl assistd_tools::Tool for HangingTool {
     }
 }
 
-fn state_with_hanging_tool(
+async fn state_with_hanging_tool(
     config: Config,
     entered: Arc<Notify>,
     dropped: Arc<AtomicBool>,
-) -> Arc<AppState> {
+) -> TestState {
     let backend = ToolCallBackend::new(
         "",
         "done.",
@@ -1031,13 +1086,14 @@ fn state_with_hanging_tool(
         ..StateParts::default()
     }
     .build()
+    .await
 }
 
 #[tokio::test]
 async fn interrupt_turn_preempts_hung_tool() {
     let entered = Arc::new(Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
-    let state = state_with_hanging_tool(Config::default(), entered.clone(), dropped.clone());
+    let state = state_with_hanging_tool(Config::default(), entered.clone(), dropped.clone()).await;
 
     let query_state = state.clone();
     let query = tokio::spawn(async move { dispatch(&query_state, query("q", "go")).await });
@@ -1190,7 +1246,7 @@ async fn an_interrupted_reply_is_kept_with_a_marker_in_the_history_and_the_trans
 
 #[tokio::test]
 async fn a_turn_waiting_to_start_does_not_hold_the_daemon_awake() {
-    let state = default_state();
+    let state = default_state().await;
     let earlier_turn = state
         .turns
         .deps
@@ -1233,7 +1289,8 @@ async fn query_turn_outlives_the_dispatch_envelope() {
         tools: Arc::new(tools),
         ..StateParts::default()
     }
-    .build();
+    .build()
+    .await;
 
     let (res, events) = dispatch(&state, query("q", "go")).await;
     res.unwrap();
@@ -1420,31 +1477,24 @@ fn format_memory_line_flattens_forged_lines_in_value() {
 async fn branch_state_with(
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
-) -> (Arc<AppState>, Arc<dyn TranscriptStore>, SessionId, BranchId) {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("memory.db");
-    std::mem::forget(temp);
-    let handle = SqliteHandle::open(&path).await.unwrap();
-    let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle.clone()));
+) -> (TestState, Arc<dyn TranscriptStore>, SessionId, BranchId) {
+    let config = Config::default();
+    let (memory, db_dir) = fresh_memory(&config).await;
+    let conv = memory.transcripts.clone();
     let session = SessionId::new();
     let branch = conv.begin_session_with_main_branch(session).await.unwrap();
-    let ctx = Arc::new(SessionContext::new(session, Some(branch)));
-    let config = Config::default();
     let subsystems = Subsystems::new(
         backend,
         PresenceManager::stub(PresenceTarget::Active),
         tools,
         VoiceManager::new(true),
     );
-    let memory = MemoryStack::disabled(config.embedding.clone()).with_transcripts(conv.clone());
-    let one_slot = watch::channel(NonZeroU32::MIN).1;
-    let state = Arc::new(AppState::from_parts(
-        config, subsystems, memory, ctx, one_slot,
-    ));
+    let session_ctx = SessionContext::new(session, Some(branch));
+    let state = TestState::new(config, subsystems, memory, db_dir, session_ctx);
     (state, conv, session, branch)
 }
 
-async fn fresh_branch_state() -> (Arc<AppState>, Arc<dyn TranscriptStore>, SessionId, BranchId) {
+async fn fresh_branch_state() -> (TestState, Arc<dyn TranscriptStore>, SessionId, BranchId) {
     branch_state_with(
         Arc::new(EchoBackend::new()),
         Arc::new(ToolRegistry::default()),
@@ -1577,7 +1627,7 @@ impl LlmBackend for MainBackend {
 async fn task_state(
     backend: Arc<MainBackend>,
     tools: Arc<ToolRegistry>,
-) -> (Arc<AppState>, Arc<dyn TranscriptStore>, BranchId, TaskId) {
+) -> (TestState, Arc<dyn TranscriptStore>, BranchId, TaskId) {
     task_state_with(Config::default(), backend, tools).await
 }
 
@@ -1586,13 +1636,10 @@ async fn task_state_with(
     config: Config,
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
-) -> (Arc<AppState>, Arc<dyn TranscriptStore>, BranchId, TaskId) {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("memory.db");
-    std::mem::forget(temp);
-    let handle = SqliteHandle::open(&path).await.unwrap();
-    let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle.clone()));
-    let tasks: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::new(handle));
+) -> (TestState, Arc<dyn TranscriptStore>, BranchId, TaskId) {
+    let (memory, db_dir) = fresh_memory(&config).await;
+    let conv = memory.transcripts.clone();
+    let tasks = memory.tasks.clone();
     let session = SessionId::new();
     let branch = conv.begin_session_with_main_branch(session).await.unwrap();
     append_turn(&conv, branch, "hi", "hello").await;
@@ -1613,14 +1660,8 @@ async fn task_state_with(
         tools,
         VoiceManager::new(true),
     );
-    let memory = MemoryStack::disabled(config.embedding.clone())
-        .with_transcripts(conv.clone())
-        .with_tasks(tasks);
-    let ctx = Arc::new(SessionContext::new(session, Some(branch)));
-    let one_slot = watch::channel(NonZeroU32::MIN).1;
-    let state = Arc::new(AppState::from_parts(
-        config, subsystems, memory, ctx, one_slot,
-    ));
+    let session_ctx = SessionContext::new(session, Some(branch));
+    let state = TestState::new(config, subsystems, memory, db_dir, session_ctx);
     state.tasks.start_task_queue().await;
     (state, conv, branch, task)
 }

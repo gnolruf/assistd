@@ -155,8 +155,12 @@ async fn queue_order_and_pause_follow_moves_and_cancels_across_a_reload() {
             Arc::new(ToolRegistry::default()),
             VoiceManager::new(true),
         ),
-        MemoryStack::disabled(state.config.embedding.clone())
-            .with_tasks(Arc::clone(&state.memory.tasks)),
+        MemoryStack::new(
+            Arc::clone(&state.memory.memory),
+            Arc::clone(&state.memory.transcripts),
+            Arc::clone(&state.memory.tasks),
+            state.config.embedding.clone(),
+        ),
         Arc::new(SessionContext::new(SessionId::new(), None)),
         watch::channel(NonZeroU32::MIN).1,
     ));
