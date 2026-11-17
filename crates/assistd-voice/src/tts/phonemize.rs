@@ -21,7 +21,7 @@ const CLAUSE_PUNCTUATION: &[char] = &[',', '.', ';', ':', '!', '?'];
 
 /// Runs `espeak-ng` for one voice, such as `en-us`.
 #[derive(Debug)]
-pub struct Phonemizer {
+pub(super) struct Phonemizer {
     program: PathBuf,
     voice: String,
 }
@@ -43,7 +43,7 @@ enum ClauseEnd {
 
 impl Phonemizer {
     /// Find `espeak-ng` on `$PATH` for `voice`.
-    pub fn new(voice: String) -> Result<Self, String> {
+    pub(super) fn new(voice: String) -> Result<Self, String> {
         let path_env = std::env::var_os("PATH").unwrap_or_default();
         let program = find_program(PROGRAM.as_ref(), &path_env)
             .map_err(|reason| format!("cannot run {PROGRAM} ({reason}); install espeak-ng"))?;
@@ -52,7 +52,7 @@ impl Phonemizer {
 
     /// Phonemes of `text`, one list of codepoints per sentence, with the
     /// clause punctuation Piper voices were trained on.
-    pub fn sentences(&self, text: &str) -> Result<Vec<Vec<i32>>, String> {
+    pub(super) fn sentences(&self, text: &str) -> Result<Vec<Vec<i32>>, String> {
         let mut sentences = Vec::new();
         let mut current = String::new();
         for clause in clauses(text) {

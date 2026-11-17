@@ -27,7 +27,7 @@ const DRAIN_STALL_MARGIN: Duration = Duration::from_secs(5);
 /// queue mutex run on the blocking pool. A stream that stalls is closed by
 /// [`drain`](Self::drain) and reopened by the next [`play`](Self::play).
 #[derive(Debug)]
-pub struct RodioPlaybackWorker {
+pub(super) struct RodioPlaybackWorker {
     device_name: Option<String>,
     /// `None` between a stall and the `play` that reopens the device.
     stream: Mutex<Option<Arc<OutputStream>>>,
@@ -37,7 +37,7 @@ impl RodioPlaybackWorker {
     /// Open the named output device (as listed by `aplay -L`), or the
     /// system default for `None`. A name that isn't found falls back
     /// to the default with a warning.
-    pub async fn start(device_name: Option<String>) -> Result<Self, SpeechError> {
+    pub(super) async fn start(device_name: Option<String>) -> Result<Self, SpeechError> {
         let stream = OutputStream::open(device_name.clone()).await?;
         Ok(Self {
             device_name,
@@ -48,7 +48,7 @@ impl RodioPlaybackWorker {
     /// Queue an utterance. Returns once enqueued; see
     /// [`drain`](Self::drain) to wait for playback. Errors when a stalled
     /// stream cannot be reopened.
-    pub async fn play(&self, utterance: Utterance) -> Result<(), SpeechError> {
+    pub(super) async fn play(&self, utterance: Utterance) -> Result<(), SpeechError> {
         let stream = self.open_stream().await?;
         let channels: ChannelCount = NonZero::new(1u16).expect("1 is non-zero");
         let audio = utterance.duration();
@@ -68,7 +68,7 @@ impl RodioPlaybackWorker {
     /// Wait until the queue has finished playing. Polls because rodio's
     /// `sleep_until_end` holds the queue mutex and would block every later `append`.
     /// Errors, closing the stream, once the queue is five seconds overdue.
-    pub async fn drain(&self) -> Result<(), SpeechError> {
+    pub(super) async fn drain(&self) -> Result<(), SpeechError> {
         let Some(stream) = self.stream.lock().await.clone() else {
             return Ok(());
         };
@@ -84,7 +84,7 @@ impl RodioPlaybackWorker {
 
     /// Drop pending audio. rodio's `Player::clear` also pauses the
     /// player, so `play` must follow or later appends are silent.
-    pub async fn clear(&self) {
+    pub(super) async fn clear(&self) {
         let Some(stream) = self.stream.lock().await.clone() else {
             return;
         };

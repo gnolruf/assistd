@@ -13,7 +13,7 @@ const NOT_FOUND: u16 = 404;
 
 /// A voice's files on disk, by model family.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VoiceFiles {
+pub(super) enum VoiceFiles {
     Vits {
         model: PathBuf,
         tokens: PathBuf,
@@ -27,7 +27,7 @@ pub enum VoiceFiles {
 }
 
 /// Download whichever of the voice's files are missing and return their paths.
-pub async fn ensure_voice(config: &SynthesisConfig) -> Result<VoiceFiles, SpeechError> {
+pub(super) async fn ensure_voice(config: &SynthesisConfig) -> Result<VoiceFiles, SpeechError> {
     let cache_dir = config.model_cache_dir.as_ref().map_or_else(
         || download::default_cache_dir("tts"),
         |dir| Ok(dir.as_path().to_path_buf()),
