@@ -1,7 +1,6 @@
 //! `handle_query`: per-turn agent loop driver.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::{JoinError, JoinHandle};
@@ -12,7 +11,7 @@ use tracing::{Instrument, debug, warn};
 use assistd_config::{Config, EmbeddingConfig};
 use assistd_embed::EmbedderHandle;
 use assistd_ipc::{Attachment, Event, EventBody, ImageAttachment, PlanMode};
-use assistd_llm::{LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
+use assistd_llm::{LlmBackend, LlmError, LlmEvent};
 use assistd_memory::{PersistedMessage, SemanticStore, SessionId};
 use assistd_tools::{ConfirmRouter, HostReads, ToolCatalog, TurnContext};
 use assistd_voice::{
@@ -31,10 +30,10 @@ use super::turn_admission::{MainLaneTurn, TurnAdmission};
 use super::turn_driver::{SpeechPipeline, TurnDriver};
 use super::wire::decode_wire_attachments;
 use super::{DispatchError, FailedStep};
-use crate::Agent;
+use crate::agent::{Agent, AgentSpec};
 use crate::bus::{EventBus, EventSink};
 use crate::planner::Planner;
-use crate::presence::{PresenceLlmHealthProbe, PresenceManager, RequestGuard};
+use crate::presence::{PresenceManager, RequestGuard};
 use crate::recovery::{Component, spawn_supervised};
 use crate::vision::VisionRevalidator;
 
@@ -102,6 +101,7 @@ pub(super) struct TurnDeps {
     pub(super) llm: Arc<dyn LlmBackend>,
     pub(super) presence: Arc<PresenceManager>,
     pub(super) tools: Arc<ToolCatalog>,
+    pub(super) agents: AgentSpec,
     pub(super) planner: Arc<Planner>,
     pub(super) vision_revalidator: Option<Arc<VisionRevalidator>>,
     pub(super) voice: Arc<VoiceManager>,
@@ -378,15 +378,7 @@ impl TurnService {
         if !plan.is_off() {
             return self.deps.planner.user_turn_agent(turn, llm, &tools);
         }
-        let health: Option<Arc<dyn LlmHealthProbe>> = Some(Arc::new(PresenceLlmHealthProbe::new(
-            self.deps.presence.clone(),
-        )));
-        Agent::new(
-            llm,
-            tools,
-            health,
-            Duration::from_secs(self.deps.config.timeouts.tool_call_secs),
-        )
+        self.deps.agents.agent(llm, tools)
     }
 
     fn spawn_speech_worker(

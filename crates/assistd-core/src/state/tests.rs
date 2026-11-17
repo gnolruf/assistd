@@ -20,8 +20,8 @@ use assistd_ipc::{
     TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{
-    EchoBackend, LlmBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall,
-    ToolResultPayload, TurnBackend,
+    EchoBackend, Gate, JournaledStep, LlmBackend, LlmError, ScriptedBackend, Step, StepJournal,
+    ToolCall, TurnBackend,
 };
 use assistd_memory::{
     AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit,
@@ -427,9 +427,9 @@ async fn semantic_requests_before_embedding_is_up_say_it_is_starting() {
 
 #[tokio::test]
 async fn dispatch_query_failed_step_ends_with_error_only() {
-    let endless_truncations = (0..16).map(|_| StepOutcome::Truncated).collect();
+    let endless_truncations = (0..16).map(|_| Step::truncated().saying("Cut off mid-"));
     let state = StateParts {
-        backend: ToolCallBackend::new("Cut off mid-", "", endless_truncations),
+        backend: scripted(endless_truncations, ""),
         ..StateParts::default()
     }
     .build()
@@ -531,13 +531,9 @@ fn run_call(id: &str, command: &str) -> ToolCall {
 
 #[tokio::test]
 async fn dispatch_query_forwards_tool_call_and_result_events() {
-    let backend = ToolCallBackend::new(
+    let backend = scripted(
+        [Step::tool_calls(vec![run_call("call-opaque", "echo hi")])],
         "",
-        "",
-        vec![StepOutcome::ToolCalls(vec![run_call(
-            "call-opaque",
-            "echo hi",
-        )])],
     );
     let state = StateParts {
         backend,
@@ -589,64 +585,9 @@ async fn dispatch_query_forwards_tool_call_and_result_events() {
     assert_eq!(events.last(), Some(&done("req-42")));
 }
 
-/// Answers the title-generation one-shot with a fixed string and records
-/// the [`assistd_llm::OneShotReply`] it was asked for.
-#[derive(Debug)]
-struct TitlingBackend {
-    reply: StdMutex<Option<assistd_llm::OneShotReply>>,
-}
-
-#[async_trait::async_trait]
-impl TurnBackend for TitlingBackend {
-    async fn push_user(
-        &self,
-        _text: String,
-        _attachments: Vec<assistd_ipc::Attachment>,
-    ) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn push_tool_results(
-        &self,
-        _results: Vec<ToolResultPayload>,
-    ) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn step(
-        &self,
-        _tools: Vec<serde_json::Value>,
-        _tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<StepOutcome> {
-        Ok(StepOutcome::Final)
-    }
-
-    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl LlmBackend for TitlingBackend {
-    async fn complete_oneshot(
-        &self,
-        _prompt: String,
-        reply: assistd_llm::OneShotReply,
-    ) -> assistd_llm::LlmResult<String> {
-        *self.reply.lock() = Some(reply);
-        Ok("Cats And Dogs".into())
-    }
-}
-
 #[tokio::test]
 async fn completed_turn_broadcasts_a_generated_session_title() {
-    let backend = Arc::new(TitlingBackend {
-        reply: StdMutex::new(None),
-    });
+    let backend = Arc::new(ScriptedBackend::default().answering_oneshots("Cats And Dogs"));
     let state = StateParts {
         backend: backend.clone(),
         ..StateParts::default()
@@ -674,11 +615,17 @@ async fn completed_turn_broadcasts_a_generated_session_title() {
 
     assert_eq!(id, "req-title");
     assert_eq!(title, "Cats And Dogs");
+    let asked: Vec<_> = backend
+        .seen()
+        .oneshots
+        .into_iter()
+        .map(|(_prompt, reply)| reply)
+        .collect();
     assert_eq!(
-        *backend.reply.lock(),
-        Some(assistd_llm::OneShotReply::Text(
+        asked,
+        [assistd_llm::OneShotReply::Text(
             assistd_llm::Thinking::Disabled
-        )),
+        )],
         "title generation must not spend its budget on reasoning"
     );
 }
@@ -774,73 +721,10 @@ fn config_with_partial_flush(ms: u32) -> Config {
     cfg
 }
 
-/// Scripted backend: a step that returns tool calls or is truncated first
-/// emits `pre_delta`; a `Final` step emits `post_delta`.
-#[derive(Debug)]
-struct ToolCallBackend {
-    pre_delta: &'static str,
-    post_delta: &'static str,
-    outcomes: StdMutex<Vec<StepOutcome>>,
+/// A backend that plays `steps`, then answers `reply`.
+fn scripted(steps: impl IntoIterator<Item = Step>, reply: &str) -> Arc<ScriptedBackend> {
+    Arc::new(ScriptedBackend::new(steps).then_replying(reply))
 }
-
-impl ToolCallBackend {
-    fn new(pre: &'static str, post: &'static str, outcomes: Vec<StepOutcome>) -> Arc<Self> {
-        Arc::new(Self {
-            pre_delta: pre,
-            post_delta: post,
-            outcomes: StdMutex::new(outcomes),
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl TurnBackend for ToolCallBackend {
-    async fn push_user(
-        &self,
-        _text: String,
-        _attachments: Vec<assistd_ipc::Attachment>,
-    ) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn push_tool_results(
-        &self,
-        _results: Vec<ToolResultPayload>,
-    ) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn step(
-        &self,
-        _tools: Vec<serde_json::Value>,
-        tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<StepOutcome> {
-        let outcome = {
-            let mut q = self.outcomes.lock();
-            if q.is_empty() {
-                StepOutcome::Final
-            } else {
-                q.remove(0)
-            }
-        };
-        let text = match &outcome {
-            StepOutcome::ToolCalls(_) | StepOutcome::Truncated => self.pre_delta,
-            StepOutcome::Final => self.post_delta,
-        };
-        tx.send(LlmEvent::Delta { text: text.into() }).await.ok();
-        Ok(outcome)
-    }
-
-    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-}
-
-impl LlmBackend for ToolCallBackend {}
 
 /// Sleeps before returning, spanning the partial-flush window.
 #[derive(Debug)]
@@ -873,14 +757,14 @@ impl assistd_tools::Tool for SleepTool {
 #[tokio::test(start_paused = true)]
 async fn dispatch_query_tool_call_inhibits_idle_flush() {
     let recorder = MockSpeechRecorder::new();
-    let backend = ToolCallBackend::new(
-        "Half a ",
-        "done.",
-        vec![StepOutcome::ToolCalls(vec![ToolCall {
+    let backend = scripted(
+        [Step::tool_calls(vec![ToolCall {
             id: "c1".into(),
             name: "sleep".into(),
             arguments: serde_json::json!({}),
-        }])],
+        }])
+        .saying("Half a ")],
+        "done.",
     );
     let mut tools = ToolRegistry::new();
     tools.register(SleepTool { ms: 300 });
@@ -940,18 +824,15 @@ async fn act_runs(plan: PlanMode, answer: Approval, steps: &[(&str, serde_json::
     tools.register(ActTool {
         runs: Arc::clone(&runs),
     });
-    let steps = steps
-        .iter()
-        .map(|(name, arguments)| {
-            StepOutcome::ToolCalls(vec![ToolCall {
-                id: (*name).into(),
-                name: (*name).into(),
-                arguments: arguments.clone(),
-            }])
-        })
-        .collect();
+    let steps = steps.iter().map(|(name, arguments)| {
+        Step::tool_calls(vec![ToolCall {
+            id: (*name).into(),
+            name: (*name).into(),
+            arguments: arguments.clone(),
+        }])
+    });
     let state = StateParts {
-        backend: ToolCallBackend::new("", "done", steps),
+        backend: scripted(steps, "done"),
         tools: Arc::new(tools),
         ..StateParts::default()
     }
@@ -1068,14 +949,13 @@ async fn state_with_hanging_tool(
     entered: Arc<Notify>,
     dropped: Arc<AtomicBool>,
 ) -> TestState {
-    let backend = ToolCallBackend::new(
-        "",
-        "done.",
-        vec![StepOutcome::ToolCalls(vec![ToolCall {
+    let backend = scripted(
+        [Step::tool_calls(vec![ToolCall {
             id: "c1".into(),
             name: "hang".into(),
             arguments: serde_json::json!({}),
         }])],
+        "done.",
     );
     let mut tools = ToolRegistry::new();
     tools.register(HangingTool { entered, dropped });
@@ -1157,63 +1037,17 @@ async fn interrupt_drops_a_turn_still_waiting_to_start() {
     assert_eq!(user_prompts, ["kept"]);
 }
 
-/// Streams the start of a reply, then never finishes the step; records the
-/// reply it is told to keep for an interrupted turn.
-#[derive(Debug, Default)]
-struct StallingBackend {
-    streamed: Notify,
-    interrupted_replies: StdMutex<Vec<String>>,
-}
-
-#[async_trait::async_trait]
-impl TurnBackend for StallingBackend {
-    async fn push_user(
-        &self,
-        _text: String,
-        _attachments: Vec<assistd_ipc::Attachment>,
-    ) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn push_tool_results(
-        &self,
-        _results: Vec<ToolResultPayload>,
-    ) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn step(
-        &self,
-        _tools: Vec<serde_json::Value>,
-        tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<StepOutcome> {
-        let text = "The answer is ".to_string();
-        tx.send(LlmEvent::Delta { text }).await.ok();
-        self.streamed.notify_one();
-        std::future::pending().await
-    }
-
-    async fn push_interrupted_reply(&self, reply: String) -> assistd_llm::LlmResult<()> {
-        self.interrupted_replies.lock().push(reply);
-        Ok(())
-    }
-
-    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-}
-
-impl LlmBackend for StallingBackend {}
-
 #[tokio::test]
 async fn an_interrupted_reply_is_kept_with_a_marker_in_the_history_and_the_transcript() {
-    let backend = Arc::new(StallingBackend::default());
+    let stalled = Gate::new();
+    let stalling = Step::reply("The answer is ").waiting_at(&stalled);
+    let backend = Arc::new(ScriptedBackend::new([stalling]));
     let (state, conv, _session, branch) =
         branch_state_with(backend.clone(), Arc::new(ToolRegistry::default())).await;
     let query_state = state.clone();
     let asked = tokio::spawn(async move { dispatch(&query_state, query("q", "why?")).await });
 
-    backend.streamed.notified().await;
+    stalled.reached().await;
     let (res, _) = dispatch(&state, Request::new("int", RequestBody::InterruptTurn)).await;
     res.unwrap();
     let (res, events) = tokio::time::timeout(Duration::from_secs(5), asked)
@@ -1224,7 +1058,7 @@ async fn an_interrupted_reply_is_kept_with_a_marker_in_the_history_and_the_trans
     assert_eq!(events.last(), Some(&done("q")), "{events:?}");
 
     let kept = "The answer is\n\n[interrupted]";
-    assert_eq!(*backend.interrupted_replies.lock(), [kept]);
+    assert_eq!(backend.seen().interrupted_replies, [kept]);
     state.transcript.drain_inflight().await;
     let rows = conv
         .load_branch(branch, HistoryScope::Whole)
@@ -1270,14 +1104,13 @@ async fn a_turn_waiting_to_start_does_not_hold_the_daemon_awake() {
 
 #[tokio::test(start_paused = true)]
 async fn query_turn_outlives_the_dispatch_envelope() {
-    let backend = ToolCallBackend::new(
-        "",
-        "done.",
-        vec![StepOutcome::ToolCalls(vec![ToolCall {
+    let backend = scripted(
+        [Step::tool_calls(vec![ToolCall {
             id: "c1".into(),
             name: "sleep".into(),
             arguments: serde_json::json!({}),
         }])],
+        "done.",
     );
     let mut tools = ToolRegistry::new();
     tools.register(SleepTool { ms: 3_000 });
@@ -1314,10 +1147,8 @@ async fn query_turn_outlives_the_dispatch_envelope() {
 async fn client_departure_cancels_the_turn_and_completes_the_batch() {
     let entered = Arc::new(Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
-    let backend = ToolCallBackend::new(
-        "Working.",
-        "done.",
-        vec![StepOutcome::ToolCalls(vec![
+    let backend = scripted(
+        [Step::tool_calls(vec![
             ToolCall {
                 id: "c1".into(),
                 name: "hang".into(),
@@ -1328,7 +1159,9 @@ async fn client_departure_cancels_the_turn_and_completes_the_batch() {
                 name: "hang".into(),
                 arguments: serde_json::json!({}),
             },
-        ])],
+        ])
+        .saying("Working.")],
+        "done.",
     );
     let mut tools = ToolRegistry::new();
     tools.register(HangingTool {
@@ -1398,14 +1231,14 @@ async fn client_departure_cancels_the_turn_and_completes_the_batch() {
 #[tokio::test]
 async fn client_departure_still_publishes_done_to_the_bus() {
     let entered = Arc::new(Notify::new());
-    let backend = ToolCallBackend::new(
-        "Working.",
-        "done.",
-        vec![StepOutcome::ToolCalls(vec![ToolCall {
+    let backend = scripted(
+        [Step::tool_calls(vec![ToolCall {
             id: "c1".into(),
             name: "hang".into(),
             arguments: serde_json::json!({}),
-        }])],
+        }])
+        .saying("Working.")],
+        "done.",
     );
     let mut tools = ToolRegistry::new();
     tools.register(HangingTool {
@@ -1539,93 +1372,21 @@ fn memory_hit(id: i64, key: &str, value: &str, similarity: f32) -> MemoryHit {
     }
 }
 
-/// The main backend, which records every prompt pushed to it and hands
-/// out `task_backend` as its one isolated backend. As the safety judge's model it
-/// records each judge prompt and allows the command.
-#[derive(Debug)]
-struct MainBackend {
-    pushed: StdMutex<Vec<String>>,
-    judge_prompts: StdMutex<Vec<String>>,
-    task_backend: StdMutex<Option<Arc<dyn LlmBackend>>>,
-}
-
-impl MainBackend {
-    fn new(task_backend: Arc<dyn LlmBackend>) -> Arc<Self> {
-        Arc::new(Self {
-            pushed: StdMutex::new(Vec::new()),
-            judge_prompts: StdMutex::new(Vec::new()),
-            task_backend: StdMutex::new(Some(task_backend)),
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl TurnBackend for MainBackend {
-    async fn push_user(
-        &self,
-        text: String,
-        _attachments: Vec<assistd_ipc::Attachment>,
-    ) -> assistd_llm::LlmResult<()> {
-        self.pushed.lock().push(text);
-        Ok(())
-    }
-
-    async fn push_tool_results(
-        &self,
-        _results: Vec<ToolResultPayload>,
-    ) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn step(
-        &self,
-        _tools: Vec<serde_json::Value>,
-        _tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<StepOutcome> {
-        Ok(StepOutcome::Final)
-    }
-
-    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl LlmBackend for MainBackend {
-    async fn recent_user_messages(&self, limit: usize) -> Vec<String> {
-        let pushed = self.pushed.lock();
-        pushed[pushed.len().saturating_sub(limit)..].to_vec()
-    }
-
-    async fn complete_oneshot(
-        &self,
-        prompt: String,
-        _reply: assistd_llm::OneShotReply,
-    ) -> assistd_llm::LlmResult<String> {
-        self.judge_prompts.lock().push(prompt);
-        Ok(r#"{"decision":"allow","reason":"a step of the task"}"#.into())
-    }
-
-    fn isolated_backend(
-        &self,
-        _system_prompt: String,
-        _slot: SlotAssignment,
-    ) -> assistd_llm::LlmResult<Arc<dyn LlmBackend>> {
-        self.task_backend
-            .lock()
-            .take()
-            .ok_or_else(|| LlmError::Unavailable("one task backend only".into()))
-    }
+/// The main backend, handing out `task_backend` as its one isolated backend; as the
+/// safety judge's model it allows every command.
+fn main_backend(task_backend: Arc<dyn LlmBackend>) -> Arc<ScriptedBackend> {
+    let allow = r#"{"decision":"allow","reason":"a step of the task"}"#;
+    Arc::new(
+        ScriptedBackend::default()
+            .handing_out([task_backend])
+            .answering_oneshots(allow),
+    )
 }
 
 /// An `AppState` on a fresh database with one saved task, positioned on a user
 /// session whose `main` branch holds one turn.
 async fn task_state(
-    backend: Arc<MainBackend>,
+    backend: Arc<ScriptedBackend>,
     tools: Arc<ToolRegistry>,
 ) -> (TestState, Arc<dyn TranscriptStore>, BranchId, TaskId) {
     task_state_with(Config::default(), backend, tools).await

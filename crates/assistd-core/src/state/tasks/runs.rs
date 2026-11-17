@@ -3,7 +3,6 @@
 //! by the task's mode and hosts or paused for the user.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -11,7 +10,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, info_span, warn};
 
 use assistd_ipc::{ConfirmSource, Event, EventBody, TaskId, TaskRunId, TaskTrigger};
-use assistd_llm::{LlmBackend, LlmError, LlmEvent, LlmHealthProbe, SlotHolder};
+use assistd_llm::{LlmBackend, LlmError, LlmEvent, SlotHolder};
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
 };
@@ -23,10 +22,9 @@ use super::confirms::TaskRunParking;
 use super::event_triggers::Occurrence;
 use super::queue::QueuedRun;
 use super::runner::RegisteredRun;
-use crate::Agent;
 use crate::bus::EventSink;
 use crate::judge::BackendJudgeModel;
-use crate::presence::{PresenceLlmHealthProbe, RequestGuard};
+use crate::presence::RequestGuard;
 use crate::state::branches::delete_answer_files;
 use crate::state::lanes::LaneLease;
 use crate::state::run_lane::{LaneHold, RunLane, YieldingBackend};
@@ -356,19 +354,11 @@ impl TaskService {
         llm_tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> AbortOnDropHandle<Result<(), LlmError>> {
-        let health: Option<Arc<dyn LlmHealthProbe>> = Some(Arc::new(PresenceLlmHealthProbe::new(
-            self.deps.presence.clone(),
-        )));
         let backend = Arc::new(YieldingBackend {
             inner: backend,
             lane: Arc::clone(&lane),
         });
-        let agent = Agent::new(
-            backend,
-            self.deps.tools.snapshot(),
-            health,
-            Duration::from_secs(self.deps.config.timeouts.tool_call_secs),
-        );
+        let agent = self.deps.agents.agent(backend, self.deps.tools.snapshot());
         let source = ConfirmSource::Task {
             task: turn.task.id,
             run: turn.run,

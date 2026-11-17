@@ -272,72 +272,6 @@ async fn dispatch_query_speaks_sentences_in_order_and_drains() {
     );
 }
 
-/// On its first `step`, emits a scripted sequence of deltas with optional
-/// pauses between them; always answers `Final`.
-#[derive(Debug)]
-struct StreamingDeltaBackend {
-    script: StdMutex<Option<Vec<DeltaScript>>>,
-}
-
-#[derive(Debug)]
-enum DeltaScript {
-    Text(&'static str),
-    Sleep(Duration),
-}
-
-impl StreamingDeltaBackend {
-    fn new(script: Vec<DeltaScript>) -> Arc<Self> {
-        Arc::new(Self {
-            script: StdMutex::new(Some(script)),
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl TurnBackend for StreamingDeltaBackend {
-    async fn push_user(
-        &self,
-        _text: String,
-        _attachments: Vec<assistd_ipc::Attachment>,
-    ) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn push_tool_results(
-        &self,
-        _results: Vec<ToolResultPayload>,
-    ) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn step(
-        &self,
-        _tools: Vec<serde_json::Value>,
-        tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<StepOutcome> {
-        let script = self.script.lock().take();
-        for action in script.into_iter().flatten() {
-            match action {
-                DeltaScript::Text(s) => {
-                    tx.send(LlmEvent::Delta { text: s.into() }).await.ok();
-                }
-                DeltaScript::Sleep(d) => tokio::time::sleep(d).await,
-            }
-        }
-        Ok(StepOutcome::Final)
-    }
-
-    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-
-    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
-        Ok(())
-    }
-}
-
-impl LlmBackend for StreamingDeltaBackend {}
-
 #[tokio::test(start_paused = true)]
 async fn partial_flush_speaks_a_stalled_fragment_only_when_enabled() {
     let cases: [(u32, &[&str]); 2] = [
@@ -348,11 +282,12 @@ async fn partial_flush_speaks_a_stalled_fragment_only_when_enabled() {
         let recorder = MockSpeechRecorder::new();
         let state = StateParts {
             config: config_with_partial_flush(flush_ms),
-            backend: StreamingDeltaBackend::new(vec![
-                DeltaScript::Text("Half a sente"),
-                DeltaScript::Sleep(Duration::from_millis(150)),
-                DeltaScript::Text("nce. End."),
-            ]),
+            backend: scripted(
+                [Step::reply("Half a sente")
+                    .pausing(Duration::from_millis(150))
+                    .saying("nce. End.")],
+                "",
+            ),
             speech: recorder.clone(),
             ..StateParts::default()
         }

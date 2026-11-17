@@ -10,12 +10,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use assistd_ipc::{Event, EventBody, HostName, PermissionMode, TaskPrompt};
-use assistd_llm::{LlmBackend, LlmEvent, SlotAssignment, SlotHolder};
+use assistd_llm::{LlmBackend, SlotAssignment, SlotHolder};
 
 use super::TaskService;
 use super::runs::task_system_prompt;
 use crate::bus::EventSink;
 use crate::planner::{PlanAsk, PlanError, Refinement, WorkPermissions};
+use crate::state::turn_driver::TurnDriver;
 use crate::state::{DispatchError, FailedStep};
 
 const EVENT_BUFFER: usize = 32;
@@ -129,7 +130,10 @@ impl TaskService {
             llm_tx,
             cancel.clone(),
         );
-        let (refinement, ()) = tokio::join!(planning, forward_planning_events(id, llm_rx, tx));
+        let transcript = Arc::clone(&self.deps.transcript);
+        let streaming = TurnDriver::new(id.to_string(), transcript, None, tx.of_task_plan())
+            .drive(llm_rx, cancel);
+        let (refinement, _reply) = tokio::join!(planning, streaming);
         drop(lane);
         let refinement = refinement?;
         info!(target: "assistd::tasks", plan = %refinement.plan.id, "task prompt refined");
@@ -201,70 +205,4 @@ async fn cancel_when_client_leaves<T>(
             refining.await
         }
     }
-}
-
-/// Send the planning turn's events to `tx`, each wrapped as `TaskPlan`.
-async fn forward_planning_events(id: &str, mut llm_rx: mpsc::Receiver<LlmEvent>, tx: &EventSink) {
-    while let Some(event) = llm_rx.recv().await {
-        if let Some(event) = planning_wire_event(id, event) {
-            let wrapped = Event::new(
-                id.to_string(),
-                EventBody::TaskPlan {
-                    event: Box::new(event),
-                },
-            );
-            let _ = tx.send(wrapped).await;
-        }
-    }
-}
-
-/// `event` as a client is shown it; `None` for what only the agent loop uses.
-fn planning_wire_event(id: &str, event: LlmEvent) -> Option<Event> {
-    let id = id.to_string();
-    Some(match event {
-        LlmEvent::Delta { text } => Event::new(id, EventBody::Delta { text }),
-        LlmEvent::ReasoningDelta { text } => Event::new(id, EventBody::ReasoningDelta { text }),
-        LlmEvent::ToolCall {
-            name, arguments, ..
-        } => Event::new(
-            id,
-            EventBody::ToolCall {
-                name,
-                args: arguments,
-            },
-        ),
-        LlmEvent::ToolResult { name, result, .. } => Event::new(
-            id,
-            EventBody::ToolResult {
-                name,
-                result: *result,
-            },
-        ),
-        LlmEvent::Relay(event) => Event::new(id, EventBody::Relay { event }),
-        LlmEvent::ContextSize { tokens, total } => {
-            Event::new(id, EventBody::ContextSize { tokens, total })
-        }
-        LlmEvent::Status {
-            severity,
-            component,
-            event,
-            message,
-        } => Event::new(
-            id,
-            EventBody::Status {
-                severity,
-                component,
-                event,
-                message,
-            },
-        ),
-        LlmEvent::StepStarted
-        | LlmEvent::StepDiscarded
-        | LlmEvent::ToolCallsRequested { .. }
-        | LlmEvent::HistoryCompacted { .. }
-        | LlmEvent::Interrupted { .. }
-        | LlmEvent::Done => {
-            return None;
-        }
-    })
 }

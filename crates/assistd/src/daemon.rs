@@ -15,8 +15,8 @@ use assistd_config::Config;
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::socket::StartupLock;
 use assistd_core::{
-    AppState, MemoryStack, PresenceManager, RelayDeps, SessionContext, SubAgentRunner, Subsystems,
-    VisionRevalidator, VramLedger, gpu_monitor, idle_monitor,
+    AgentSpec, AppState, MemoryStack, PresenceManager, RelayDeps, SessionContext, SubAgentRunner,
+    Subsystems, VisionRevalidator, VramLedger, gpu_monitor, idle_monitor,
 };
 use assistd_llm::{
     HistoryReplay, LlamaClient, LlamaServerControl, LlmBackend, LlmHealthProbe, SlotDir, SlotStash,
@@ -377,8 +377,10 @@ fn build_relay_deps(
     Ok(RelayDeps {
         runner: SubAgentRunner::new(
             Arc::clone(llm),
-            Some(Arc::clone(health_probe)),
-            Duration::from_secs(config.timeouts.tool_call_secs),
+            AgentSpec {
+                health: Some(Arc::clone(health_probe)),
+                tool_deadline: Duration::from_secs(config.timeouts.tool_call_secs),
+            },
         ),
         slot_stash,
         dir: prepare_relay_dir()?,
