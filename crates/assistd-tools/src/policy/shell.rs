@@ -16,6 +16,17 @@ pub(super) const COMMAND_PREFIX_WORDS: &[&str] = &[
     "!", "{", "if", "then", "else", "elif", "do", "while", "until",
 ];
 
+/// Each reserved word that opens a compound command, with the one that closes it.
+const COMPOUND_COMMANDS: &[(&str, &str)] = &[
+    ("{", "}"),
+    ("case", "esac"),
+    ("for", "done"),
+    ("if", "fi"),
+    ("select", "done"),
+    ("until", "done"),
+    ("while", "done"),
+];
+
 /// A shell word after quote removal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Word {
@@ -86,6 +97,19 @@ pub(super) struct SimpleCommand {
     /// Indexes into [`Script::inputs`] of what is fed to its stdin.
     pub inputs: Vec<usize>,
     pub redirects: Vec<Redirect>,
+    /// The script's own shell runs it whenever it gets that far: it is outside every subshell,
+    /// substitution, compound command and function body, follows no `&&`, `||` or `|`, and
+    /// is neither piped onward nor put in the background, alone or with the list it begins.
+    pub unconditional: bool,
+    /// The commands after it, up to this index into [`Script::commands`], run only if it
+    /// succeeded; 0 when none are known to.
+    pub required_until: usize,
+}
+
+impl SimpleCommand {
+    fn is_empty(&self) -> bool {
+        self.words.is_empty() && self.inputs.is_empty() && self.redirects.is_empty()
+    }
 }
 
 /// Every simple command in a script, in source order, with those inside
@@ -95,9 +119,13 @@ pub(super) struct Script {
     pub commands: Vec<SimpleCommand>,
     /// Here-document bodies and here-string words, as written.
     pub inputs: Vec<String>,
-    /// Each function defined, with the index into [`Script::commands`] of
-    /// the first command after its definition began.
+    /// Each function defined where a command would be
+    /// [`unconditional`](SimpleCommand::unconditional), with the index into
+    /// [`Script::commands`] of the first command after its definition began.
     pub functions: Vec<(String, usize)>,
+    /// The commands inside function bodies and loops, by index into [`Script::commands`]: each
+    /// may run after commands that follow it.
+    pub run_later: Vec<Range<usize>>,
     /// Arithmetic expressions as written: `$((…))`, `((…))`, `$[…]`, and
     /// the subscripts of assignments and array elements.
     pub arithmetic: Vec<String>,
@@ -114,6 +142,11 @@ impl Script {
         command: &'s SimpleCommand,
     ) -> impl Iterator<Item = &'s str> {
         command.inputs.iter().map(|&i| self.inputs[i].as_str())
+    }
+
+    /// Whether the command at `index` may run after commands that follow it.
+    pub(super) fn runs_later(&self, index: usize) -> bool {
+        self.run_later.iter().any(|range| range.contains(&index))
     }
 }
 
@@ -164,6 +197,15 @@ impl OpenCases {
         }
     }
 
+    /// Whether bash reads `word`, at the start of a command, as the reserved word that closes
+    /// a compound command: in a pattern list it is a pattern, but for an `esac` that starts one.
+    fn reads_closer(&self, word: &Word) -> bool {
+        match self.innermost() {
+            Some(CaseState::Pattern { fresh }) => fresh && is_bare(word, "esac"),
+            _ => true,
+        }
+    }
+
     /// Advance past the last of `words`, the words of the command being lexed.
     fn word(&mut self, words: &[Word]) {
         let Some((last, before)) = words.split_last() else {
@@ -187,6 +229,209 @@ impl OpenCases {
                 self.0.push(CaseState::Subject);
             }
             _ => {}
+        }
+    }
+}
+
+/// Which commands one call of [`Lexer::commands`] lexes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum List {
+    /// The script's own, which its shell runs.
+    Script,
+    /// Text bash runs from inside a word, to its end.
+    Nested,
+    /// A subshell's or a substitution's, to the `)` that closes them.
+    Parenthesized,
+}
+
+/// What ends a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Terminator {
+    /// `;`, a newline or the end of the list: the next command runs whatever this one did.
+    Sequence,
+    /// `&&`: the next command runs only if this one succeeded.
+    And,
+    /// `||`: the next command runs only if this one failed.
+    Or,
+    /// `|` or `|&`: this command runs in a subshell.
+    Pipe,
+    /// `&`: the list this command ends runs in a subshell.
+    Background,
+    /// A `(` or `)`, which separates no commands.
+    Paren,
+}
+
+/// Something open around the command being lexed, which may therefore never run.
+#[derive(Debug, PartialEq, Eq)]
+enum Open {
+    /// A compound command, up to this reserved word.
+    Until(&'static str),
+    /// A function definition whose body has not ended.
+    Body,
+}
+
+impl Open {
+    /// Whether the commands inside may run after ones that follow them: a function's when it
+    /// is called, a loop's when it goes round again.
+    fn runs_later(&self) -> bool {
+        matches!(self, Self::Body | Self::Until("done"))
+    }
+}
+
+/// What decides whether the script's own shell always runs the command being lexed, and
+/// whether it may run it again later.
+#[derive(Debug, Default)]
+struct Reach {
+    /// The commands being lexed are the script's own.
+    own: bool,
+    /// Innermost last.
+    open: Vec<Open>,
+    /// An `&&`, `||` or `|` joins the command being lexed to the one before it.
+    joined: bool,
+    /// Functions defined in the list being lexed, which a `|` or `&` after their definition
+    /// would leave defined in a subshell only.
+    pending: Vec<(String, usize)>,
+    /// The index of the unconditional command that began the list being lexed.
+    head: Option<usize>,
+    /// Every command since `head` runs only if it succeeded.
+    needs_head: bool,
+    /// The index into [`Script::run_later`] of the range the command being lexed is in.
+    later: Option<usize>,
+}
+
+impl Reach {
+    fn new(list: List) -> Self {
+        Self {
+            own: list == List::Script,
+            ..Self::default()
+        }
+    }
+
+    fn always_runs(&self) -> bool {
+        self.own && self.open.is_empty() && !self.joined
+    }
+
+    /// Advance past the last word of `cmd`, the command being lexed, which `may_close` a
+    /// compound command where bash reads a reserved word in its place.
+    fn word(&mut self, cmd: &SimpleCommand, may_close: bool, out: &mut Script) {
+        let Some((last, before)) = cmd.words.split_last() else {
+            return;
+        };
+        if let Some((_, closer)) = COMPOUND_COMMANDS
+            .iter()
+            .find(|(opener, _)| is_bare(last, opener))
+        {
+            self.enter(Open::Until(closer), out);
+            return;
+        }
+        let starts_command =
+            cmd.redirects.is_empty() && cmd.inputs.is_empty() && before.iter().all(is_closer);
+        let closes_innermost =
+            matches!(self.open.last(), Some(Open::Until(closer)) if is_bare(last, closer));
+        if may_close && starts_command && closes_innermost {
+            self.open.pop();
+            self.end_body();
+        }
+    }
+
+    /// Note the definition of function `name`, whose body starts at the next command.
+    fn define(&mut self, name: String, out: &mut Script) {
+        if self.always_runs() {
+            self.pending.push((name, out.commands.len()));
+        }
+        self.enter(Open::Body, out);
+    }
+
+    /// Note that `opened` encloses what follows, starting a range in `out` when its commands
+    /// run later and none is open.
+    fn enter(&mut self, opened: Open, out: &mut Script) {
+        if opened.runs_later() && self.later.is_none() {
+            self.later = Some(out.run_later.len());
+            out.run_later.push(out.commands.len()..usize::MAX);
+        }
+        self.open.push(opened);
+    }
+
+    /// What was just lexed was the body of the function definition it followed, if any.
+    fn end_body(&mut self) {
+        if self.open.last() == Some(&Open::Body) {
+            self.open.pop();
+        }
+    }
+
+    /// Note a parenthesized list or arithmetic command that just ended, and whether it
+    /// `ran_something`: `()` runs nothing, so it is no function body.
+    fn end_parens(&mut self, ran_something: bool) {
+        if ran_something {
+            self.end_body();
+        }
+        self.joined = false;
+    }
+
+    /// End in `out` the range of commands that run later, once nothing open makes them.
+    fn end_run_later(&mut self, out: &mut Script) {
+        if !self.open.iter().any(Open::runs_later)
+            && let Some(range) = self.later.take().and_then(|at| out.run_later.get_mut(at))
+        {
+            range.end = out.commands.len();
+        }
+    }
+
+    /// Mark `cmd`, which `terminator` ends, and settle in `out` what the end of the list it is
+    /// in decides: which functions it defined, and what its first command is required for.
+    fn end_command(&mut self, cmd: &mut SimpleCommand, terminator: Terminator, out: &mut Script) {
+        let in_shell = matches!(
+            terminator,
+            Terminator::Sequence | Terminator::And | Terminator::Or
+        );
+        cmd.unconditional = self.always_runs() && in_shell;
+        if !cmd.is_empty() {
+            self.end_body();
+        }
+        if terminator == Terminator::Paren {
+            return;
+        }
+        if cmd.unconditional && !cmd.is_empty() && self.head.is_none() {
+            self.head = Some(out.commands.len());
+            self.needs_head =
+                terminator == Terminator::And && !cmd.words.iter().any(|word| is_bare(word, "!"));
+        }
+        let heads_pipeline = !self.joined;
+        self.joined = match terminator {
+            Terminator::Sequence => self.joined && cmd.is_empty(),
+            Terminator::Background => false,
+            _ => true,
+        };
+        if terminator == Terminator::Or || !self.joined {
+            self.end_requirement(out, usize::from(!cmd.is_empty()));
+        }
+        if terminator == Terminator::Background
+            && let Some(head) = self.head.take().and_then(|at| out.commands.get_mut(at))
+        {
+            head.unconditional = false;
+        }
+        if !self.open.is_empty() {
+            return;
+        }
+        match terminator {
+            Terminator::Sequence if !self.joined => {
+                out.functions.append(&mut self.pending);
+                self.head = None;
+            }
+            Terminator::Pipe if heads_pipeline => self.pending.clear(),
+            Terminator::Background => self.pending.clear(),
+            _ => {}
+        }
+    }
+
+    /// Note in `out` that the commands since the head of the list, and `more` yet to be added,
+    /// are the ones that run only if it succeeded.
+    fn end_requirement(&mut self, out: &mut Script, more: usize) {
+        let required_until = out.commands.len() + more;
+        if mem::take(&mut self.needs_head)
+            && let Some(head) = self.head.and_then(|at| out.commands.get_mut(at))
+        {
+            head.required_until = required_until;
         }
     }
 }
@@ -261,13 +506,15 @@ impl<'s, 'o> Lexer<'s, 'o> {
         Ok(())
     }
 
-    /// Lex commands up to the end of input or, `in_parens`, the `)` that
-    /// closes them.
-    fn commands(&mut self, in_parens: bool) -> Result<(), TooDeep> {
+    /// Lex the commands of `list` up to the end of input or, when it is parenthesized, the
+    /// `)` that closes them.
+    fn commands(&mut self, list: List) -> Result<(), TooDeep> {
         self.descend()?;
+        let in_parens = list == List::Parenthesized;
         let mut cmd = SimpleCommand::default();
         let mut conditional = false;
         let mut cases = OpenCases::default();
+        let mut reach = Reach::new(list);
         loop {
             conditional &= !cmd.words.is_empty();
             let Some(c) = self.peek() else {
@@ -280,16 +527,19 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 '&' | '|' if conditional && self.peek_at(1) == Some(c) => {
                     self.conditional_operator(&mut cmd, 2);
                 }
-                '(' if !conditional && cases.at_pattern_start() => self.skip(1),
+                '(' if !conditional && cases.at_pattern_start() => {
+                    self.skip(1);
+                    cases.set_innermost(CaseState::Pattern { fresh: false });
+                }
                 ')' if !conditional && cases.in_pattern() => {
                     self.skip(1);
-                    self.end_command(&mut cmd);
+                    self.end_command(&mut cmd, &mut reach, Terminator::Paren);
                     cases.set_innermost(CaseState::Body);
                 }
                 '(' | ')' => {
                     if conditional {
                         self.conditional_operator(&mut cmd, 1);
-                    } else if self.parens(&mut cmd, in_parens)? {
+                    } else if self.parens(&mut cmd, &mut reach, in_parens)? {
                         break;
                     }
                 }
@@ -298,27 +548,27 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 }
                 '\n' => {
                     self.skip(1);
-                    self.end_command(&mut cmd);
+                    self.end_command(&mut cmd, &mut reach, Terminator::Sequence);
                     self.heredoc_bodies()?;
                 }
                 '#' => self.skip_comment(),
-                ';' | '|' => {
-                    if c == ';' && matches!(self.peek_at(1), Some(';' | '&')) {
+                ';' => {
+                    if matches!(self.peek_at(1), Some(';' | '&')) {
                         cases.end_clause();
                     }
                     self.skip(1);
-                    self.end_command(&mut cmd);
+                    self.end_command(&mut cmd, &mut reach, Terminator::Sequence);
                 }
-                '&' if self.peek_at(1) != Some('>') => {
-                    self.skip(1);
-                    self.end_command(&mut cmd);
+                '|' | '&' if c == '|' || self.peek_at(1) != Some('>') => {
+                    let terminator = self.control_operator(c);
+                    self.end_command(&mut cmd, &mut reach, terminator);
                 }
                 '&' | '<' | '>' if c == '&' || self.peek_at(1) != Some('(') => {
                     self.redirect(&mut cmd)?;
                 }
                 _ => {
                     if self.command_word(&mut cmd, conditional)? && !conditional {
-                        cases.word(&cmd.words);
+                        self.after_word(&mut cmd, &mut cases, &mut reach);
                     }
                     conditional = if conditional {
                         !cmd.words.last().is_some_and(|word| is_bare(word, "]]"))
@@ -328,30 +578,67 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 }
             }
         }
-        self.end_command(&mut cmd);
+        self.end_command(&mut cmd, &mut reach, Terminator::Sequence);
         self.depth -= 1;
         Ok(())
     }
 
     /// Lex a `(` or `)` outside `[[ … ]]`, returning whether it closes the
     /// commands being lexed.
-    fn parens(&mut self, cmd: &mut SimpleCommand, in_parens: bool) -> Result<bool, TooDeep> {
+    fn parens(
+        &mut self,
+        cmd: &mut SimpleCommand,
+        reach: &mut Reach,
+        in_parens: bool,
+    ) -> Result<bool, TooDeep> {
         if self.eat("((") {
-            self.end_command(cmd);
+            self.end_command(cmd, reach, Terminator::Paren);
             self.double_parens()?;
+            reach.end_parens(true);
         } else if self.eat("(") {
-            if !self.function_definition(cmd) {
-                self.end_command(cmd);
-                self.commands(true)?;
+            if !self.function_definition(cmd, reach) {
+                self.end_command(cmd, reach, Terminator::Paren);
+                let commands_before = self.out.commands.len();
+                self.commands(List::Parenthesized)?;
+                reach.end_parens(self.out.commands.len() > commands_before);
             }
         } else {
             self.skip(1);
             if in_parens {
                 return Ok(true);
             }
-            self.end_command(cmd);
+            self.end_command(cmd, reach, Terminator::Paren);
         }
         Ok(false)
+    }
+
+    /// Consume the `|`, `||`, `|&`, `&` or `&&` that starts with `first`.
+    fn control_operator(&mut self, first: char) -> Terminator {
+        let (terminator, len) = match (first, self.peek_at(1)) {
+            ('&', Some('&')) => (Terminator::And, 2),
+            ('&', _) => (Terminator::Background, 1),
+            (_, Some('|')) => (Terminator::Or, 2),
+            (_, Some('&')) => (Terminator::Pipe, 2),
+            _ => (Terminator::Pipe, 1),
+        };
+        self.skip(len);
+        terminator
+    }
+
+    /// Advance what is open past the word `cmd` just gained, recording a `function name`
+    /// that the word completes in place of a command.
+    fn after_word(&mut self, cmd: &mut SimpleCommand, cases: &mut OpenCases, reach: &mut Reach) {
+        let may_close = cmd
+            .words
+            .last()
+            .is_some_and(|word| cases.reads_closer(word));
+        cases.word(&cmd.words);
+        reach.word(cmd, may_close, self.out);
+        if matches!(cmd.words.as_slice(), [keyword, _] if is_bare(keyword, "function"))
+            && let Some(name) = cmd.words.drain(..).next_back()
+        {
+            reach.define(name.text, self.out);
+        }
     }
 
     /// Consume an operator of `[[ … ]]` that is `len` characters long as a
@@ -387,7 +674,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
 
     /// After a `(`: whether it opens a `name ()` function definition. If
     /// so, consumes the `)` and records the name in place of a command.
-    fn function_definition(&mut self, cmd: &mut SimpleCommand) -> bool {
+    fn function_definition(&mut self, cmd: &mut SimpleCommand, reach: &mut Reach) -> bool {
         let [name] = cmd.words.as_slice() else {
             return false;
         };
@@ -400,22 +687,18 @@ impl<'s, 'o> Lexer<'s, 'o> {
         }
         self.skip(1);
         let name = cmd.words.remove(0).text;
-        self.out.functions.push((name, self.out.commands.len()));
+        reach.define(name, self.out);
         true
     }
 
-    fn end_command(&mut self, cmd: &mut SimpleCommand) {
-        let cmd = mem::take(cmd);
-        if let [keyword, name, ..] = cmd.words.as_slice()
-            && keyword.text == "function"
-            && !keyword.quoted
-        {
-            self.out
-                .functions
-                .push((name.text.clone(), self.out.commands.len()));
-        }
-        if !cmd.words.is_empty() || !cmd.inputs.is_empty() || !cmd.redirects.is_empty() {
+    fn end_command(&mut self, cmd: &mut SimpleCommand, reach: &mut Reach, terminator: Terminator) {
+        let mut cmd = mem::take(cmd);
+        reach.end_command(&mut cmd, terminator, self.out);
+        if !cmd.is_empty() {
             self.out.commands.push(cmd);
+        }
+        if self.heredocs.is_empty() {
+            reach.end_run_later(self.out);
         }
     }
 
@@ -495,7 +778,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
     /// Lex `src` as a script of its own, adding its commands to ours.
     fn nested(&mut self, src: &str) -> Result<(), TooDeep> {
         let mut lexer = Lexer::new(src, &mut *self.out, self.depth);
-        lexer.commands(false)?;
+        lexer.commands(List::Nested)?;
         self.incomplete |= lexer.incomplete;
         Ok(())
     }
@@ -687,7 +970,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
         let src = self.src;
         let start = self.pos;
         self.skip(2);
-        self.commands(true)?;
+        self.commands(List::Parenthesized)?;
         buf.expansion(&src[start..self.pos], true);
         Ok(())
     }
@@ -780,7 +1063,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
             }
             Some('(') => {
                 self.skip(1);
-                self.commands(true)?;
+                self.commands(List::Parenthesized)?;
             }
             Some('{') => {
                 self.skip(1);
@@ -1068,7 +1351,7 @@ impl WordBuf {
 pub(super) fn parse(src: &str) -> Result<Script, TooDeep> {
     let mut script = Script::default();
     let mut lexer = Lexer::new(src, &mut script, 0);
-    lexer.commands(false)?;
+    lexer.commands(List::Script)?;
     script.incomplete = lexer.incomplete;
     Ok(script)
 }
@@ -1095,6 +1378,13 @@ fn at_command_start(before: &[Word]) -> bool {
             || is_bare(word, "time")
             || (is_bare(word, "-p") && at > 0 && is_bare(&before[at - 1], "time"))
     })
+}
+
+/// Whether `word` is a reserved word that closes a compound command.
+fn is_closer(word: &Word) -> bool {
+    COMPOUND_COMMANDS
+        .iter()
+        .any(|(_, closer)| is_bare(word, closer))
 }
 
 /// Whether `word` is `text`, unquoted and known before run time.
