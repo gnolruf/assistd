@@ -97,6 +97,9 @@ pub(super) struct SimpleCommand {
     /// Indexes into [`Script::inputs`] of what is fed to its stdin.
     pub inputs: Vec<usize>,
     pub redirects: Vec<Redirect>,
+    /// What the braces of each `{NAME}` before a redirection hold: a variable bash assigns
+    /// the descriptor it opens, with any subscript. One from a quoted word may be no prefix.
+    pub fd_variables: Vec<String>,
     /// The script's own shell runs it whenever it gets that far: it is outside every subshell,
     /// substitution, compound command and function body, follows no `&&`, `||` or `|`, and
     /// is neither piped onward nor put in the background, alone or with the list it begins.
@@ -108,7 +111,10 @@ pub(super) struct SimpleCommand {
 
 impl SimpleCommand {
     fn is_empty(&self) -> bool {
-        self.words.is_empty() && self.inputs.is_empty() && self.redirects.is_empty()
+        self.words.is_empty()
+            && self.inputs.is_empty()
+            && self.redirects.is_empty()
+            && self.fd_variables.is_empty()
     }
 }
 
@@ -750,8 +756,9 @@ impl<'s, 'o> Lexer<'s, 'o> {
         }
     }
 
-    /// Lex one word into `cmd`, dropping a file-descriptor prefix on a
-    /// redirection outside a `conditional`; returns whether `cmd` gained a word.
+    /// Lex one word into `cmd`, dropping a file-descriptor prefix on a redirection outside a
+    /// `conditional` and noting the variable a word that may be one names; returns whether
+    /// `cmd` gained a word.
     fn command_word(
         &mut self,
         cmd: &mut SimpleCommand,
@@ -760,7 +767,12 @@ impl<'s, 'o> Lexer<'s, 'o> {
         let Some(word) = self.word()? else {
             return Ok(false);
         };
-        let fd = !conditional && matches!(self.peek(), Some('<' | '>')) && is_fd(&word);
+        let redirected = !conditional && matches!(self.peek(), Some('<' | '>'));
+        if redirected {
+            cmd.fd_variables
+                .extend(fd_variable(&word.text).map(str::to_string));
+        }
+        let fd = redirected && is_fd(&word);
         if !fd {
             cmd.words.push(word);
         }
@@ -1512,9 +1524,17 @@ fn names_fd(target: &Word) -> bool {
 /// `{fd}>file`.
 fn is_fd(word: &Word) -> bool {
     let text = word.text.as_str();
-    !word.quoted
-        && !word.dynamic
-        && !text.is_empty()
-        && (text.bytes().all(|b| b.is_ascii_digit())
-            || (text.starts_with('{') && text.ends_with('}')))
+    let number = !word.dynamic && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    !word.quoted && (number || fd_variable(text).is_some())
+}
+
+/// What the braces of a `{NAME}` or `{NAME[…]}` file-descriptor prefix hold.
+fn fd_variable(prefix: &str) -> Option<&str> {
+    let variable = prefix.strip_prefix('{')?.strip_suffix('}')?;
+    let name = match variable.split_once('[') {
+        Some((name, subscript)) if subscript.ends_with(']') => name,
+        Some(_) => return None,
+        None => variable,
+    };
+    is_name(name).then_some(variable)
 }

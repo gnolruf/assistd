@@ -206,8 +206,8 @@ const SHELLS_FILE: &str = "/etc/shells";
 const APPROVALS_HEADER: &str = "\
 # Programs approved with \"always allow\". Each runs without confirmation
 # while its name still resolves to `path` on the command's PATH: with
-# `subcommand` as its first argument, or with only options when there is
-# none. Delete an entry to be asked again.
+# `subcommand` as its first argument, or with exactly `options` as its
+# arguments when there is none. Delete an entry to be asked again.
 ";
 
 /// Directories bare command names are looked up in, as the command sees
@@ -248,7 +248,10 @@ pub struct ProgramApproval {
 impl fmt::Display for ProgramApproval {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.scope {
-            ApprovalScope::OptionsOnly => write!(f, "{} [options]", self.name),
+            ApprovalScope::Options(options) if options.is_empty() => {
+                write!(f, "{} (no arguments)", self.name)
+            }
+            ApprovalScope::Options(options) => write!(f, "{} {}", self.name, options.join(" ")),
             ApprovalScope::Subcommand(subcommand) => write!(f, "{} {subcommand} …", self.name),
         }
     }
@@ -257,8 +260,8 @@ impl fmt::Display for ProgramApproval {
 /// Which runs of a program one approval covers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum ApprovalScope {
-    /// No arguments, or only options.
-    OptionsOnly,
+    /// Exactly these arguments, each an option; none for a run with no arguments.
+    Options(Vec<String>),
     /// This first argument, whatever follows it.
     Subcommand(String),
 }
@@ -416,7 +419,28 @@ struct StoredProgram {
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subcommand: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    options: Vec<String>,
     path: PathBuf,
+}
+
+impl StoredProgram {
+    /// The approval it holds and the file it is pinned to; none when it names both a
+    /// subcommand and options.
+    fn into_approval(self) -> Option<(ProgramApproval, PathBuf)> {
+        let scope = match (self.subcommand, self.options) {
+            (Some(subcommand), options) if options.is_empty() => {
+                ApprovalScope::Subcommand(subcommand)
+            }
+            (Some(_), _) => return None,
+            (None, options) => ApprovalScope::Options(options),
+        };
+        let approval = ProgramApproval {
+            name: self.name,
+            scope,
+        };
+        Some((approval, self.path))
+    }
 }
 
 /// The approvals saved in `store`; none when it does not exist.
@@ -431,16 +455,7 @@ fn load_approvals(store: &Path) -> Result<BTreeMap<ProgramApproval, PathBuf>, Al
     Ok(stored
         .programs
         .into_iter()
-        .map(|program| {
-            let scope = program
-                .subcommand
-                .map_or(ApprovalScope::OptionsOnly, ApprovalScope::Subcommand);
-            let approval = ProgramApproval {
-                name: program.name,
-                scope,
-            };
-            (approval, program.path)
-        })
+        .filter_map(StoredProgram::into_approval)
         .collect())
 }
 
@@ -451,13 +466,17 @@ async fn save(
     let stored = Stored {
         programs: approved
             .into_iter()
-            .map(|(approval, path)| StoredProgram {
-                name: approval.name,
-                subcommand: match approval.scope {
-                    ApprovalScope::OptionsOnly => None,
-                    ApprovalScope::Subcommand(subcommand) => Some(subcommand),
-                },
-                path,
+            .map(|(approval, path)| {
+                let (subcommand, options) = match approval.scope {
+                    ApprovalScope::Options(options) => (None, options),
+                    ApprovalScope::Subcommand(subcommand) => (Some(subcommand), Vec::new()),
+                };
+                StoredProgram {
+                    name: approval.name,
+                    subcommand,
+                    options,
+                    path,
+                }
             })
             .collect(),
     };
@@ -474,12 +493,12 @@ mod tests {
 
     use super::*;
 
-    const OPTIONS_ONLY: Option<&ApprovalScope> = Some(&ApprovalScope::OptionsOnly);
+    const NO_ARGUMENTS: Option<&ApprovalScope> = Some(&ApprovalScope::Options(Vec::new()));
 
-    fn options_only(name: &str) -> ProgramApproval {
+    fn without_arguments(name: &str) -> ProgramApproval {
         ProgramApproval {
             name: name.to_string(),
-            scope: ApprovalScope::OptionsOnly,
+            scope: ApprovalScope::Options(Vec::new()),
         }
     }
 
@@ -503,14 +522,14 @@ mod tests {
         executable(late.path(), "tool");
         let allowlist = Allowlist::unsaved(search_path(&[early.path(), late.path()]));
         allowlist
-            .approve(&[options_only("tool")])
+            .approve(&[without_arguments("tool")])
             .await
             .expect("approve");
-        assert_eq!(allowlist.verdict("tool", OPTIONS_ONLY), Verdict::Approved);
+        assert_eq!(allowlist.verdict("tool", NO_ARGUMENTS), Verdict::Approved);
 
         executable(early.path(), "tool");
         assert_eq!(
-            allowlist.verdict("tool", OPTIONS_ONLY),
+            allowlist.verdict("tool", NO_ARGUMENTS),
             Verdict::Unapproved { approvable: true },
             "a program planted earlier on the path does not inherit the approval"
         );
@@ -524,8 +543,13 @@ mod tests {
         let store = config.path().join("nested").join(APPROVALS_FILE);
 
         let allowlist = Allowlist::load(search_path(&[bin.path()]), store.clone()).expect("load");
+        let with_all = ApprovalScope::Options(vec!["--all".to_string()]);
+        let tool_with_all = ProgramApproval {
+            name: "tool".to_string(),
+            scope: with_all.clone(),
+        };
         allowlist
-            .approve(&[options_only("tool"), options_only("missing")])
+            .approve(&[tool_with_all, without_arguments("missing")])
             .await
             .expect("approve");
         let saved = std::fs::read_to_string(&store).expect("saved");
@@ -533,7 +557,11 @@ mod tests {
         assert!(!saved.contains("missing"), "{saved}");
 
         let reloaded = Allowlist::load(search_path(&[bin.path()]), store).expect("reload");
-        assert_eq!(reloaded.verdict("tool", OPTIONS_ONLY), Verdict::Approved);
+        assert_eq!(reloaded.verdict("tool", Some(&with_all)), Verdict::Approved);
+        assert_eq!(
+            reloaded.verdict("tool", NO_ARGUMENTS),
+            Verdict::Unapproved { approvable: true }
+        );
     }
 
     #[test]
@@ -559,15 +587,15 @@ mod tests {
         let allowlist = Allowlist::load(search_path(&[bin.path()]), store).expect("load");
         let run = ApprovalScope::Subcommand("run".to_string());
         for (name, scope) in [
-            ("python3.12", OPTIONS_ONLY),
-            ("py", OPTIONS_ONLY),
-            ("history", OPTIONS_ONLY),
+            ("python3.12", NO_ARGUMENTS),
+            ("py", NO_ARGUMENTS),
+            ("history", NO_ARGUMENTS),
             ("cargo", Some(&run)),
             ("npm", Some(&run)),
-            ("git", OPTIONS_ONLY),
-            ("make", OPTIONS_ONLY),
-            ("gcc-14", OPTIONS_ONLY),
-            ("compile", OPTIONS_ONLY),
+            ("git", NO_ARGUMENTS),
+            ("make", NO_ARGUMENTS),
+            ("gcc-14", NO_ARGUMENTS),
+            ("compile", NO_ARGUMENTS),
         ] {
             assert_eq!(
                 allowlist.verdict(name, scope),
@@ -576,7 +604,7 @@ mod tests {
             );
         }
         assert_eq!(
-            allowlist.verdict("tool", OPTIONS_ONLY),
+            allowlist.verdict("tool", NO_ARGUMENTS),
             Verdict::Unapproved { approvable: true }
         );
     }
@@ -603,7 +631,7 @@ mod tests {
                 allowlist.verdict("systemctl", Some(&subcommand("status"))),
                 Verdict::Approved
             );
-            for other in [Some(&subcommand("restart")), OPTIONS_ONLY] {
+            for other in [Some(&subcommand("restart")), NO_ARGUMENTS] {
                 assert_eq!(
                     allowlist.verdict("systemctl", other),
                     Verdict::Unapproved { approvable: true },

@@ -1,7 +1,7 @@
 //! Text bash evaluates at run time as arithmetic, a variable name or a
 //! prompt string, where a subscript in a value runs command substitutions.
 
-use super::changed_variables;
+use super::changed_in;
 use super::options::{self, Flag, OptionSpec, Walked};
 use crate::policy::shell::{self, Script, Word};
 
@@ -90,6 +90,7 @@ pub(super) fn in_script(script: &Script) -> Option<String> {
                 })
         })
         .or_else(|| conditional_operand(script))
+        .or_else(|| fd_variable_subscript(script))
         .or_else(|| changes_trace_prompt(script))
 }
 
@@ -334,12 +335,22 @@ fn hidden_operand(words: &[Word]) -> Option<String> {
         })
 }
 
-fn changes_trace_prompt(script: &Script) -> Option<String> {
+/// A `{NAME[…]}` redirection prefix whose subscript may read a variable.
+fn fd_variable_subscript(script: &Script) -> Option<String> {
     script
         .commands
         .iter()
-        .flat_map(|cmd| &cmd.words)
-        .flat_map(|word| changed_variables(&word.text))
+        .flat_map(|cmd| &cmd.fd_variables)
+        .find(|variable| may_evaluate_subscript(variable))
+        .map(|variable| {
+            format!(
+                "`{{{variable}}}` before a redirection may evaluate an array subscript, which can run commands"
+            )
+        })
+}
+
+fn changes_trace_prompt(script: &Script) -> Option<String> {
+    changed_in(script)
         .any(|name| name == "PS4")
         .then(|| "the script changes PS4, which bash expands as a prompt string".to_string())
 }

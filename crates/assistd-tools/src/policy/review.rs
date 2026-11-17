@@ -264,25 +264,42 @@ fn path_components(path: &str) -> impl Iterator<Item = &str> {
 /// past: the search path, the dynamic loader's, bash's startup file, or a
 /// file of options a program reads (`rg --pre`).
 fn changed_sensitive_variable(script: &Script) -> Option<&str> {
-    script
-        .commands
-        .iter()
-        .flat_map(|cmd| &cmd.words)
-        .flat_map(|word| changed_variables(&word.text))
-        .find(|name| {
-            matches!(
-                *name,
-                "PATH" | "BASH_ENV" | "GCONV_PATH" | "RIPGREP_CONFIG_PATH"
-            ) || name.starts_with("LD_")
-        })
+    changed_in(script).find(|name| {
+        matches!(
+            *name,
+            "PATH" | "BASH_ENV" | "GCONV_PATH" | "RIPGREP_CONFIG_PATH"
+        ) || name.starts_with("LD_")
+    })
 }
 
-/// Variables a word may assign, wherever it sits: `NAME=…`, a bare
-/// `NAME` (`read NAME`, `for NAME in`, `export NAME`), a nameref target
-/// (`declare -n ref=NAME`), or a `${NAME:=…}` default.
+/// Every variable `script` may change: those its words may assign, and those a `{NAME}>`
+/// redirection gives a file descriptor.
+fn changed_in(script: &Script) -> impl Iterator<Item = &str> {
+    script.commands.iter().flat_map(|cmd| {
+        let by_words = cmd
+            .words
+            .iter()
+            .flat_map(|word| changed_variables(&word.text));
+        let by_redirections = cmd
+            .fd_variables
+            .iter()
+            .filter_map(|variable| target_name(variable));
+        by_words.chain(by_redirections)
+    })
+}
+
+/// Variables a word may assign, wherever it sits: `NAME=…`, a bare `NAME` or `NAME[…]`
+/// (`read NAME`, `for NAME in`, `export NAME`), one attached to a short option
+/// (`printf -vNAME`), a nameref target (`declare -n ref=NAME`), or a `${NAME:=…}` default.
 fn changed_variables(text: &str) -> impl Iterator<Item = &str> {
-    let whole = shell::is_name(text).then_some(text);
+    let whole = target_name(text);
     let assigned = assigned_name(text);
+    let attached = short_options(text).into_iter().flat_map(|cluster| {
+        cluster
+            .char_indices()
+            .skip(1)
+            .filter_map(|(at, _)| target_name(&cluster[at..]))
+    });
     let value = text
         .split_once('=')
         .map(|(_, value)| value)
@@ -296,6 +313,7 @@ fn changed_variables(text: &str) -> impl Iterator<Item = &str> {
     whole
         .into_iter()
         .chain(assigned)
+        .chain(attached)
         .chain(value)
         .chain(defaults)
 }
@@ -350,8 +368,12 @@ fn is_command_line(word: &Word) -> bool {
 /// The variable `word` assigns, as `NAME=…`, `NAME+=…` or `NAME[…]=…`.
 fn assigned_name(word: &str) -> Option<&str> {
     let (name, _) = word.split_once('=')?;
-    let name = name.strip_suffix('+').unwrap_or(name);
-    let name = name.split_once('[').map_or(name, |(base, _)| base);
+    target_name(name.strip_suffix('+').unwrap_or(name))
+}
+
+/// The variable `target` names, as `NAME` or `NAME[…]`.
+fn target_name(target: &str) -> Option<&str> {
+    let name = target.split_once('[').map_or(target, |(base, _)| base);
     shell::is_name(name).then_some(name)
 }
 

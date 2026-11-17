@@ -108,9 +108,10 @@ impl StandingApprovals {
                 program,
                 subcommand,
             } => {
-                let scope = subcommand
-                    .clone()
-                    .map_or(ApprovalScope::OptionsOnly, ApprovalScope::Subcommand);
+                let scope = subcommand.clone().map_or_else(
+                    || ApprovalScope::Options(Vec::new()),
+                    ApprovalScope::Subcommand,
+                );
                 self.programs.verdict(program, Some(&scope)) == Verdict::Approved
             }
             PlannedAction::WebHost { host } => self.hosts.contains(host),
