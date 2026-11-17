@@ -718,8 +718,9 @@ mod tests {
     use assistd_llm::{Gate, ScriptedBackend, Step, ToolCall};
 
     use super::*;
+    use crate::Subsystems;
+    use crate::presence::tests::stub_presence;
     use crate::state::tests::TestState;
-    use crate::{PresenceManager, Subsystems};
 
     async fn test_state() -> TestState {
         state_with_backend(Arc::new(assistd_llm::EchoBackend::new())).await
@@ -753,7 +754,7 @@ mod tests {
     ) -> TestState {
         let subsystems = Subsystems::new(
             backend,
-            PresenceManager::stub(PresenceTarget::Active),
+            stub_presence(PresenceTarget::Active),
             tools,
             assistd_voice::VoiceManager::new(true),
         );

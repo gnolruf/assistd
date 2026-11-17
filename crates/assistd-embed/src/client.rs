@@ -219,6 +219,7 @@ mod tests {
     use std::net::SocketAddr;
 
     use assistd_utils::child_server::ReadyState;
+    use assistd_utils::child_server::scripted::scripted_status;
     use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -407,7 +408,7 @@ mod tests {
             ("supervisor stopped", ReadyState::Ready, Some(7), false),
         ];
         for (label, state, pid, supervisor_running) in cases {
-            let (ready_tx, status) = ChildServerStatus::scripted(state, pid);
+            let (ready_tx, status) = scripted_status(state, pid);
             let _supervisor = supervisor_running.then_some(ready_tx);
             let result =
                 LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), None, Some(status))
@@ -432,7 +433,7 @@ mod tests {
             json!({ "data": [{ "index": 0, "embedding": [0.0, 1.0] }] }),
         ])
         .await;
-        let (ready_tx, status) = ChildServerStatus::scripted(ReadyState::Ready, Some(7));
+        let (ready_tx, status) = scripted_status(ReadyState::Ready, Some(7));
         let embedder =
             LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), None, Some(status))
                 .await

@@ -31,8 +31,6 @@ const OUTPUT_DIR: &str = "output";
 /// Why a quarantine could not be set up.
 #[derive(Debug, thiserror::Error)]
 pub enum QuarantineError {
-    #[error("a quarantine needs the bwrap sandbox, and this configuration does not wrap")]
-    Unsandboxed,
     #[error("cannot create a quarantine directory under {}: {source}", parent.display())]
     Create {
         parent: PathBuf,
@@ -74,7 +72,7 @@ pub struct Quarantine {
 impl Quarantine {
     /// A new quarantine under `parent` wrapped as `sandbox` wraps, showing each of `inputs`
     /// read-only in [`Quarantine::input_dir`] under its file name, and with `egress` a `web`
-    /// command. Fails when `sandbox` does not wrap.
+    /// command.
     pub async fn create(
         parent: &Path,
         sandbox: &SandboxInfo,
@@ -89,13 +87,11 @@ impl Quarantine {
         })
         .await?;
         let egress = egress.map(RelayEgress::from);
-        let sandbox = sandbox
-            .quarantined(
-                dir.path.join(HOME_DIR),
-                vec![dir.path.join(INPUT_DIR), dir.path.join(OUTPUT_DIR)],
-                binds,
-            )
-            .ok_or(QuarantineError::Unsandboxed)?;
+        let sandbox = sandbox.quarantined(
+            dir.path.join(HOME_DIR),
+            vec![dir.path.join(INPUT_DIR), dir.path.join(OUTPUT_DIR)],
+            binds,
+        );
         Ok(Self {
             egress,
             dir,

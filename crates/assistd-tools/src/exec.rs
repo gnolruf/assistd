@@ -293,3 +293,127 @@ fn signal_exit_code(status: ExitStatus) -> Option<i32> {
 fn signal_exit_code(_status: &ExitStatus) -> Option<i32> {
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use rustix::process::{Pid, test_kill_process};
+
+    use super::*;
+
+    /// Run `script` under a `limit`. Bounded, since a surviving grandchild would hold the
+    /// output pipe open forever.
+    async fn run_bash(script: &str, stdin: &[u8], limit: Duration) -> CommandOutput {
+        let mut cmd = ProcCommand::new("bash");
+        cmd.args(["-c", script]);
+        timeout(
+            Duration::from_secs(10),
+            supervise("bash", cmd, None, stdin, limit),
+        )
+        .await
+        .expect("bash did not return: a grandchild kept the output pipe open")
+        .expect("bash starts")
+    }
+
+    /// Poll for up to two seconds; returns whether `pid` exited.
+    async fn waited_for_exit(pid: Pid) -> bool {
+        for _ in 0..40 {
+            if test_kill_process(pid).is_err() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// Run `script`, which must write a background child's PID to `pidfile`, and return the
+    /// output plus that PID.
+    async fn run_leaving_background_child(
+        limit: Duration,
+        script: impl Fn(&Path) -> String,
+    ) -> (CommandOutput, Pid) {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("child.pid");
+        let out = run_bash(&script(&pidfile), b"", limit).await;
+        let recorded = std::fs::read_to_string(&pidfile).unwrap();
+        let pid = recorded
+            .trim()
+            .parse()
+            .ok()
+            .and_then(Pid::from_raw)
+            .expect("script recorded a background PID");
+        (out, pid)
+    }
+
+    #[tokio::test]
+    async fn timeout_returns_137_with_timeout_message() {
+        let out = run_bash("sleep 5", b"", Duration::from_millis(100)).await;
+        assert_eq!(out.exit_code, TIMEOUT_EXIT);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.starts_with("[error] bash: timed out after 0s [exit:137 | "),
+            "{stderr}"
+        );
+        assert!(stderr.ends_with("s]\n"), "{stderr}");
+    }
+
+    /// `yes` must be killed at the capture cap (141), not buffered until the
+    /// timeout (137).
+    #[tokio::test]
+    async fn output_overflow_kills_child_and_returns_141() {
+        let out = run_bash("yes", b"", Duration::from_secs(10)).await;
+        assert_eq!(out.exit_code, OUTPUT_OVERFLOW_EXIT);
+        assert!(
+            out.stdout.len() <= OUTPUT_BUF_MAX,
+            "stdout was {} bytes, expected <= {OUTPUT_BUF_MAX}",
+            out.stdout.len()
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("output exceeded"), "{stderr}");
+    }
+
+    /// `sleep 300 &` outlives a leader-only SIGKILL, so this checks the whole
+    /// process group is killed.
+    #[tokio::test]
+    async fn timeout_kills_backgrounded_grandchild() {
+        let (out, pid) = run_leaving_background_child(Duration::from_millis(200), |pidfile| {
+            format!("sleep 300 & echo $! > {}; wait", pidfile.display())
+        })
+        .await;
+        assert_eq!(out.exit_code, TIMEOUT_EXIT);
+        assert!(
+            waited_for_exit(pid).await,
+            "grandchild {pid:?} survived the timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn normal_exit_kills_backgrounded_grandchild() {
+        let (out, pid) = run_leaving_background_child(Duration::from_secs(30), |pidfile| {
+            format!("sleep 300 & echo $! > {}; echo done", pidfile.display())
+        })
+        .await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, b"done\n");
+        assert!(
+            waited_for_exit(pid).await,
+            "grandchild {pid:?} survived the script's exit"
+        );
+    }
+
+    #[tokio::test]
+    async fn unread_stdin_does_not_block_the_timeout() {
+        let stdin = vec![b'x'; 1024 * 1024];
+        let out = run_bash("sleep 300", &stdin, Duration::from_millis(200)).await;
+        assert_eq!(out.exit_code, TIMEOUT_EXIT);
+    }
+
+    #[tokio::test]
+    async fn stdin_larger_than_a_pipe_buffer_arrives_whole() {
+        let stdin = vec![b'x'; 1024 * 1024];
+        let out = run_bash("wc -c", &stdin, Duration::from_secs(30)).await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1048576");
+    }
+}

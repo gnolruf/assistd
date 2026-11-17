@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use assistd_tools::{AlwaysAllowGate, Approval, Approvals, ConfirmationGate, DenyAllGate};
+use assistd_tools::test_support::{AlwaysAllowGate, DenyAllGate};
+use assistd_tools::{Approval, Approvals, ConfirmationGate};
 use parking_lot::Mutex;
 use serde_json::json;
 

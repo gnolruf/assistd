@@ -11,9 +11,9 @@ use assistd_mcp::{
     Connector, LaunchTarget, McpClient, McpError, McpServer, StdioConfig, adapt_client_as_tools,
     launch,
 };
+use assistd_tools::test_support::AlwaysAllowGate;
 use assistd_tools::{
-    AlwaysAllowGate, ApprovalGate, Approvals, Tool, ToolCatalog, ToolRegistry, TurnContext,
-    VisionGate,
+    ApprovalGate, Approvals, Tool, ToolCatalog, ToolRegistry, TurnContext, VisionGate,
 };
 use assistd_utils::backoff::MIN_HEALTHY_SECONDS;
 use rmcp::model::{CallToolResult, ContentBlock};

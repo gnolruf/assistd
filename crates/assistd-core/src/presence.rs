@@ -15,8 +15,6 @@ use tracing::{Instrument, debug, info, warn};
 
 use crate::bus::EventSink;
 
-#[cfg(test)]
-use assistd_config::defaults::{nz16, nz32, nz64};
 use assistd_config::{ModelConfig, TimeoutsConfig};
 use assistd_ipc::{
     Component, Event, EventBody, PresenceState, PresenceTarget, StatusKind, StatusSeverity,
@@ -693,52 +691,6 @@ impl PresenceManager {
     }
 }
 
-#[cfg(test)]
-impl PresenceManager {
-    /// Manager in a fixed state whose llama-server has no supervisor or
-    /// child. Transitions that hit the network (`drowse`, cold-start `wake`) error.
-    pub(crate) fn stub(state: PresenceTarget) -> Arc<Self> {
-        let (_tx, rx) = watch::channel(false);
-        let (state_tx, _) = watch::channel(state.into());
-        let stopped_server = || ChildServer::scripted(ReadyState::Starting, None).1;
-        let lifecycle = match state {
-            PresenceTarget::Active => Lifecycle::Active(stopped_server()),
-            PresenceTarget::Drowsy => Lifecycle::Drowsy(stopped_server()),
-            PresenceTarget::Sleeping => Lifecycle::Sleeping,
-        };
-        let model = ModelConfig {
-            name: "stub/model".parse().expect("stub model name"),
-            context_length: nz32(1024),
-            server_binary: "/does/not/exist".parse().expect("stub server binary"),
-            port: nz16(1),
-            gpu_layers: 1,
-            ready_timeout_secs: nz64(1),
-            ..ModelConfig::default()
-        };
-        let api_key = ApiKey::generate().expect("stub api key");
-        let control =
-            LlamaServerControl::new(model.listen_addr(), None, None).expect("dummy control");
-        Arc::new(Self {
-            lifecycle: StdMutex::new(lifecycle),
-            transition: AsyncMutex::new(()),
-            model,
-            timeouts: TimeoutsConfig::default(),
-            api_key,
-            slot_dir: SlotDir::new("/does/not/exist/slots".into()),
-            control,
-            tasks: TaskTracker::new(),
-            current_inner_shutdown: Arc::new(StdMutex::new(None)),
-            state_tx,
-            _daemon_shutdown_keepalive: rx,
-            last_activity: StdMutex::new(Instant::now()),
-            inflight: Arc::new(RwLock::new(())),
-            wake_started: StdMutex::new(None),
-            wake_room: OnceLock::new(),
-            gpu_hold: watch::channel(false).0,
-        })
-    }
-}
-
 /// Holds the daemon `Active` for a query: [`PresenceManager::sleep`] and
 /// [`PresenceManager::drowse`] wait until every guard drops.
 #[derive(Debug)]
@@ -914,8 +866,54 @@ fn spawn_load_progress_emitter(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use assistd_config::defaults::{nz16, nz32, nz64};
+    use assistd_utils::child_server::scripted::scripted_server;
+
     use super::*;
+
+    /// A manager in a fixed state whose llama-server has no supervisor or child.
+    /// Transitions that hit the network (`drowse`, cold-start `wake`) error.
+    pub(crate) fn stub_presence(state: PresenceTarget) -> Arc<PresenceManager> {
+        let (_tx, rx) = watch::channel(false);
+        let (state_tx, _) = watch::channel(state.into());
+        let stopped_server = || scripted_server(ReadyState::Starting, None).1;
+        let lifecycle = match state {
+            PresenceTarget::Active => Lifecycle::Active(stopped_server()),
+            PresenceTarget::Drowsy => Lifecycle::Drowsy(stopped_server()),
+            PresenceTarget::Sleeping => Lifecycle::Sleeping,
+        };
+        let model = ModelConfig {
+            name: "stub/model".parse().expect("stub model name"),
+            context_length: nz32(1024),
+            server_binary: "/does/not/exist".parse().expect("stub server binary"),
+            port: nz16(1),
+            gpu_layers: 1,
+            ready_timeout_secs: nz64(1),
+            ..ModelConfig::default()
+        };
+        let api_key = ApiKey::generate().expect("stub api key");
+        let control =
+            LlamaServerControl::new(model.listen_addr(), None, None).expect("dummy control");
+        Arc::new(PresenceManager {
+            lifecycle: StdMutex::new(lifecycle),
+            transition: AsyncMutex::new(()),
+            model,
+            timeouts: TimeoutsConfig::default(),
+            api_key,
+            slot_dir: SlotDir::new("/does/not/exist/slots".into()),
+            control,
+            tasks: TaskTracker::new(),
+            current_inner_shutdown: Arc::new(StdMutex::new(None)),
+            state_tx,
+            _daemon_shutdown_keepalive: rx,
+            last_activity: StdMutex::new(Instant::now()),
+            inflight: Arc::new(RwLock::new(())),
+            wake_started: StdMutex::new(None),
+            wake_room: OnceLock::new(),
+            gpu_hold: watch::channel(false).0,
+        })
+    }
 
     #[tokio::test]
     async fn transition_to_current_state_is_a_silent_noop() {
@@ -924,7 +922,7 @@ mod tests {
             PresenceTarget::Drowsy,
             PresenceTarget::Sleeping,
         ] {
-            let m = PresenceManager::stub(state);
+            let m = stub_presence(state);
             let rx = m.subscribe();
             m.set_presence(state)
                 .await
@@ -936,7 +934,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_active_resets_activity_timer() {
-        let m = PresenceManager::stub(PresenceTarget::Active);
+        let m = stub_presence(PresenceTarget::Active);
         tokio::time::sleep(Duration::from_millis(50)).await;
         let before = m.idle_duration();
         assert!(before >= Duration::from_millis(40));
@@ -949,7 +947,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_guard_waiter_leaves_its_wake_running() {
-        let m = PresenceManager::stub(PresenceTarget::Drowsy);
+        let m = stub_presence(PresenceTarget::Drowsy);
         let transition = m.transition.lock().await;
         let waiter = timeout(
             Duration::from_millis(50),
@@ -971,7 +969,7 @@ mod tests {
 
     #[tokio::test]
     async fn sleep_defers_for_inflight_request() {
-        let m = PresenceManager::stub(PresenceTarget::Active);
+        let m = stub_presence(PresenceTarget::Active);
         let guard = m.acquire_request_guard_inner(None).await.unwrap();
 
         let m2 = Arc::clone(&m);
@@ -994,7 +992,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_wake_settles_back_to_the_prior_state() {
-        let m = PresenceManager::stub(PresenceTarget::Sleeping);
+        let m = stub_presence(PresenceTarget::Sleeping);
         m.wake()
             .await
             .expect_err("stub llama-server binary does not exist");

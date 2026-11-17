@@ -13,6 +13,8 @@ mod health;
 mod llama_env;
 mod ownership;
 mod process;
+#[cfg(feature = "test-support")]
+pub mod scripted;
 mod service;
 mod supervisor;
 

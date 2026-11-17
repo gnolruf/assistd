@@ -45,7 +45,7 @@ use assistd_voice::{
 use assistd_wm::FocusedWindowContext;
 
 use super::*;
-use crate::PresenceManager;
+use crate::presence::tests::stub_presence;
 use crate::state::context::{format_memory_line, format_window_context_block};
 
 mod branches;
@@ -132,7 +132,7 @@ impl StateParts {
         };
         let subsystems = Subsystems::new(
             self.backend,
-            PresenceManager::stub(self.presence),
+            stub_presence(self.presence),
             self.tools,
             VoiceManager::ready(capture, self.speech, true),
         );
@@ -152,7 +152,7 @@ fn stub_subsystems() -> Subsystems {
     };
     Subsystems::new(
         parts.backend,
-        PresenceManager::stub(parts.presence),
+        stub_presence(parts.presence),
         parts.tools,
         VoiceManager::ready(capture, parts.speech, true),
     )
@@ -1318,7 +1318,7 @@ async fn branch_state_with(
     let branch = conv.begin_session_with_main_branch(session).await.unwrap();
     let subsystems = Subsystems::new(
         backend,
-        PresenceManager::stub(PresenceTarget::Active),
+        stub_presence(PresenceTarget::Active),
         tools,
         VoiceManager::new(true),
     );
@@ -1417,7 +1417,7 @@ async fn task_state_with(
     let task = tasks.save(None, spec).await.unwrap().id;
     let subsystems = Subsystems::new(
         backend,
-        PresenceManager::stub(PresenceTarget::Active),
+        stub_presence(PresenceTarget::Active),
         tools,
         VoiceManager::new(true),
     );

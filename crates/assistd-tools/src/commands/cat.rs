@@ -204,7 +204,9 @@ mod tests {
     use crate::TurnContext;
     use crate::Unattended;
     use crate::command::run_rendered;
-    use crate::commands::{FILE_READ_MAX, RecordingGate, hold_fifo_open, make_fifo, test_cat};
+    use crate::commands::{
+        FILE_READ_MAX, RecordingGate, hold_fifo_open, make_fifo, test_cat, test_sandbox,
+    };
     use crate::fixtures::PNG_BYTES;
 
     async fn run_cat(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
@@ -237,7 +239,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let ordinary = write_file(&dir, "notes.txt", b"notes\n");
         let gate = RecordingGate::new(false);
-        let cat = CatCommand::new(SandboxInfo::none(), gate.clone());
+        let cat = CatCommand::new(test_sandbox(), gate.clone());
 
         let read = run_cat_as(&cat, &[&ordinary], None).await;
         assert_eq!(read.stdout, b"notes\n");

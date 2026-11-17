@@ -137,17 +137,17 @@ mod tests {
     use crate::TurnContext;
     use crate::chain::{execute, parse_chain};
     use crate::command::CommandRegistry;
-    use crate::commands::{RecordingGate, register_readers};
+    use crate::commands::{RecordingGate, register_readers, test_sandbox};
+    use crate::exec::{POLICY_DENIED_EXIT, SPAWN_FAILED_EXIT};
+    use crate::test_support::bash_policy;
 
+    /// The readers over a sandbox that starts nothing: a line the policy lets through exits
+    /// [`SPAWN_FAILED_EXIT`].
     fn registry_asking(gate: &Arc<RecordingGate>) -> CommandRegistry {
         let gate: Arc<dyn ConfirmationGate> = gate.clone();
         let mut registry = CommandRegistry::new();
-        register_readers(
-            &mut registry,
-            &Arc::new(BashPolicyCfg::default()),
-            &SandboxInfo::none(),
-            &gate,
-        );
+        let cfg = Arc::new(bash_policy());
+        register_readers(&mut registry, &cfg, &test_sandbox(), &gate);
         registry
     }
 
@@ -160,22 +160,16 @@ mod tests {
         .await
     }
 
+    /// `touch` as a command would ask; quoted into `grep`'s pattern it is only a word.
     #[tokio::test]
     async fn arguments_reach_the_program_as_words_not_code() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let planted = dir.path().join("planted");
         let gate = RecordingGate::new(false);
         let registry = registry_asking(&gate);
-        let line = format!(
-            "echo 'a; touch {0}' | grep -c \"; touch {0}\"",
-            planted.display()
-        );
+        let line = "echo 'a; touch /nonexistent/x' | grep -c \"; touch /nonexistent/x\"";
 
-        let out = run(&registry, &line).await;
+        let out = run(&registry, line).await;
 
-        assert_eq!(out.exit_code, 0, "{out:?}");
-        assert_eq!(out.stdout, b"1\n");
-        assert!(!planted.exists());
+        assert_eq!(out.exit_code, SPAWN_FAILED_EXIT, "{out:?}");
         assert!(gate.prompts().is_empty(), "{:?}", gate.prompts());
     }
 
@@ -191,7 +185,7 @@ mod tests {
 
         let out = run(&registry, &line).await;
 
-        assert_eq!(out.exit_code, 126, "{out:?}");
+        assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{out:?}");
         assert!(!written.exists());
         let prompts = gate.prompts();
         assert_eq!(prompts.len(), 1, "{prompts:?}");

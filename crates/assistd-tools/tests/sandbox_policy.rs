@@ -1,5 +1,6 @@
 //! The bash command's confirmation gate and bwrap sandbox.
-//! Bwrap tests return early when `bwrap` is not on PATH.
+//! Policy tests use a sandbox that starts nothing; bwrap tests return early when `bwrap`
+//! is not on PATH.
 
 use std::os::linux::net::SocketAddrExt;
 use std::os::unix::net::{SocketAddr, UnixListener};
@@ -13,18 +14,20 @@ use parking_lot::Mutex;
 use assistd_tools::chain::Word;
 use assistd_tools::commands::{BashCommand, BashPolicyCfg, WriteCommand, WritePolicyCfg};
 use assistd_tools::policy::{ToolSandbox, probe_sandbox};
+use assistd_tools::test_support::{AlwaysAllowGate, DenyAllGate, bash_policy, inert_sandbox};
 use assistd_tools::{
-    Allowlist, AlwaysAllowGate, Approval, CommandInput, ConfirmationGate, ConfirmationRequest,
-    DenyAllGate, FileScope, Protected, SandboxInfo, SandboxRequest, ScratchCap, SearchPath,
-    SharedDirs, TurnContext, Unattended, run_rendered,
+    Allowlist, Approval, CommandInput, ConfirmationGate, ConfirmationRequest, FileScope, Protected,
+    SandboxInfo, SandboxRequest, ScratchCap, SearchPath, SharedDirs, TurnContext, Unattended,
+    run_rendered,
 };
 
 const POLICY_DENIED_EXIT: i32 = 126;
+const SPAWN_FAILED_EXIT: i32 = 127;
 
 fn bash_with(gate: Arc<dyn ConfirmationGate>, sandbox: Arc<SandboxInfo>) -> BashCommand {
     let cfg = BashPolicyCfg {
         timeout: Duration::from_secs(10),
-        ..BashPolicyCfg::default()
+        ..bash_policy()
     };
     BashCommand::new(Arc::new(cfg), sandbox, gate)
 }
@@ -42,13 +45,15 @@ fn bash_approving(store: &Path, gate: Arc<dyn ConfirmationGate>) -> BashCommand 
     .expect("approvals load");
     let cfg = BashPolicyCfg {
         allowlist: Arc::new(allowlist),
-        ..BashPolicyCfg::default()
+        ..bash_policy()
     };
-    BashCommand::new(Arc::new(cfg), no_sandbox(), gate)
+    BashCommand::new(Arc::new(cfg), inert(), gate)
 }
 
-fn no_sandbox() -> Arc<SandboxInfo> {
-    SandboxInfo::none()
+/// A sandbox that starts nothing: a script the policy lets through exits
+/// [`SPAWN_FAILED_EXIT`].
+fn inert() -> Arc<SandboxInfo> {
+    inert_sandbox(SharedDirs::default())
 }
 
 fn input(script: &str) -> CommandInput {
@@ -114,12 +119,11 @@ impl ConfirmationGate for RecordingGate {
 }
 
 #[tokio::test]
-async fn an_unvetted_program_asks_the_gate_and_runs_when_approved() {
+async fn an_unvetted_program_asks_the_gate_and_is_let_through_when_approved() {
     let gate = RecordingGate::answering(Approval::Once);
-    let cmd = bash_with(gate.clone(), no_sandbox());
+    let cmd = bash_with(gate.clone(), inert());
     let out = run_rendered(&cmd, input("nproc >/dev/null && echo ran")).await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(out.stdout, b"ran\n");
+    assert_eq!(out.exit_code, SPAWN_FAILED_EXIT);
     let asked = gate.asked.lock();
     let [req] = asked.as_slice() else {
         panic!("expected exactly one confirmation, got {asked:?}");
@@ -142,9 +146,9 @@ async fn only_edits_strictly_inside_the_edit_scope_may_run_unasked() {
     let gate = RecordingGate::answering(Approval::Deny);
     let cfg = BashPolicyCfg {
         edit_scope: vec![scope_dir.clone()],
-        ..BashPolicyCfg::default()
+        ..bash_policy()
     };
-    let cmd = BashCommand::new(Arc::new(cfg), no_sandbox(), gate.clone());
+    let cmd = BashCommand::new(Arc::new(cfg), inert(), gate.clone());
     for (script, scoped) in [
         (format!("mkdir {}/new", scope_dir.display()), true),
         (format!("mkdir {}/new", elsewhere_dir.display()), false),
@@ -216,16 +220,16 @@ async fn a_redirect_through_a_symlink_in_scratch_is_an_edit_of_where_it_leads() 
     let gate = RecordingGate::answering(Approval::Deny);
     let cfg = BashPolicyCfg {
         scratch: Some(scratch_dir.clone()),
-        ..BashPolicyCfg::default()
+        ..bash_policy()
     };
-    let cmd = BashCommand::new(Arc::new(cfg), no_sandbox(), gate.clone());
+    let cmd = BashCommand::new(Arc::new(cfg), inert(), gate.clone());
 
     let out = run_rendered(
         &cmd,
         input(&format!("echo x > {}/plain", scratch_dir.display())),
     )
     .await;
-    assert_eq!(out.exit_code, 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.exit_code, SPAWN_FAILED_EXIT);
     assert!(gate.asked.lock().is_empty());
 
     let out = run_rendered(
@@ -246,7 +250,7 @@ async fn run_time_command_names_ask_the_gate() {
         std::fs::write(&target, b"x").unwrap();
         let script = template.replace("{}", &target.to_string_lossy());
 
-        let cmd = bash_with(Arc::new(DenyAllGate), no_sandbox());
+        let cmd = bash_with(Arc::new(DenyAllGate), inert());
         let out = run_rendered(&cmd, input(&script)).await;
         assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -270,7 +274,7 @@ async fn running_a_script_file_asks_the_gate_without_offering_always() {
     );
 
     let gate = RecordingGate::answering(Approval::Deny);
-    let cmd = bash_with(gate.clone(), no_sandbox());
+    let cmd = bash_with(gate.clone(), inert());
     let out = run_rendered(&cmd, input(&script)).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
     assert!(target.exists(), "{script}: the script must not have run");
@@ -282,8 +286,8 @@ async fn running_a_script_file_asks_the_gate_without_offering_always() {
 }
 
 #[tokio::test]
-async fn read_only_programs_run_without_asking() {
-    let cmd = bash_with(Arc::new(PanicGate), no_sandbox());
+async fn read_only_programs_are_let_through_without_asking() {
+    let cmd = bash_with(Arc::new(PanicGate), inert());
     let out = run_rendered(
         &cmd,
         CommandInput {
@@ -294,8 +298,7 @@ async fn read_only_programs_run_without_asking() {
         },
     )
     .await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(out.stdout, b"HI");
+    assert_eq!(out.exit_code, SPAWN_FAILED_EXIT);
 }
 
 #[tokio::test]
@@ -305,13 +308,9 @@ async fn always_allow_adds_the_offered_programs_for_good() {
     let script = "nproc --all";
 
     let gate = RecordingGate::answering(Approval::Always);
-    let out = run_rendered(&bash_approving(&store, gate.clone()), input(script)).await;
-    assert_eq!(
-        out.exit_code,
-        0,
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let asking = bash_approving(&store, gate.clone());
+    let out = run_rendered(&asking, input(script)).await;
+    assert_eq!(out.exit_code, SPAWN_FAILED_EXIT);
     {
         let asked = gate.asked.lock();
         let [req] = asked.as_slice() else {
@@ -322,14 +321,9 @@ async fn always_allow_adds_the_offered_programs_for_good() {
     let saved = std::fs::read_to_string(&store).expect("approvals saved");
     assert!(saved.contains("name = \"nproc\""), "{saved}");
 
-    let out = run_rendered(&bash_approving(&store, Arc::new(PanicGate)), input(script)).await;
-    assert_eq!(
-        out.exit_code,
-        0,
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(!out.stdout.is_empty());
+    let approved = bash_approving(&store, Arc::new(PanicGate));
+    let out = run_rendered(&approved, input(script)).await;
+    assert_eq!(out.exit_code, SPAWN_FAILED_EXIT);
 }
 
 #[tokio::test]
@@ -438,7 +432,7 @@ async fn a_script_that_outgrows_the_scratch_cap_is_killed_and_what_it_wrote_remo
     let cfg = BashPolicyCfg {
         timeout: Duration::from_secs(10),
         scratch: Some(dir.clone()),
-        ..BashPolicyCfg::default()
+        ..bash_policy()
     };
     let bash = BashCommand::new(Arc::new(cfg), sandbox, Arc::new(PanicGate));
     let filled = dir.join("filled.bin");

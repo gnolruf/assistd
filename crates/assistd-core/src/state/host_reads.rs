@@ -82,8 +82,9 @@ mod tests {
 
     use assistd_memory::{MessageId, PersistedMessage, PersistedToolCall, Seq, ToolOutcome};
     use assistd_tools::commands::WebCommand;
+    use assistd_tools::test_support::AlwaysAllowGate;
     use assistd_tools::{
-        AlwaysAllowGate, ApprovalGate, Approvals, CommandRegistry, OutputCap, PresentSpec, RunTool,
+        ApprovalGate, Approvals, CommandRegistry, OutputCap, PresentSpec, RunTool,
     };
 
     use super::*;

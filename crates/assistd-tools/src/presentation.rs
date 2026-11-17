@@ -145,12 +145,7 @@ impl OutputCap {
         let file_name = format!("{stem}-{n}.txt");
         match write_overflow_file(raw, &self.spec.overflow_dir.join(&file_name)) {
             Ok(path) => {
-                prune_spills(
-                    &self.spec.overflow_dir,
-                    &path,
-                    raw.len() as u64,
-                    SpillLimits::DEFAULT,
-                );
+                prune_spills(&self.spec.overflow_dir, &path, raw.len() as u64);
                 Some(path)
             }
             Err(e) => {
@@ -286,21 +281,6 @@ impl Truncation {
             lines: banner.lines + notice.lines,
         }
     }
-}
-
-/// How many spill files, and how many bytes of them, an overflow
-/// directory keeps; the newest spill is kept even when it alone exceeds them.
-#[derive(Debug, Clone, Copy)]
-struct SpillLimits {
-    max_files: usize,
-    max_bytes: u64,
-}
-
-impl SpillLimits {
-    const DEFAULT: Self = Self {
-        max_files: MAX_SPILL_FILES,
-        max_bytes: MAX_SPILL_BYTES,
-    };
 }
 
 /// An existing `<stem>-<n>.txt` spill file in an overflow directory.
@@ -531,9 +511,9 @@ fn write_overflow_file(raw: &[u8], path: &Path) -> std::io::Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-/// Delete the oldest spill files in `dir` until it holds at most `limits`,
-/// never touching `newest` (`newest_len` bytes); failures are only logged.
-fn prune_spills(dir: &Path, newest: &Path, newest_len: u64, limits: SpillLimits) {
+/// Delete the oldest spill files in `dir` until it holds at most [`MAX_SPILL_FILES`] and
+/// [`MAX_SPILL_BYTES`], never touching `newest` (`newest_len` bytes); failures are only logged.
+fn prune_spills(dir: &Path, newest: &Path, newest_len: u64) {
     let older = match older_spills(dir, newest) {
         Ok(older) => older,
         Err(e) => {
@@ -541,7 +521,7 @@ fn prune_spills(dir: &Path, newest: &Path, newest_len: u64, limits: SpillLimits)
             return;
         }
     };
-    for spill in evicted_spills(older, newest_len, limits) {
+    for spill in evicted_spills(older, newest_len) {
         if let Err(e) = std::fs::remove_file(&spill.path)
             && e.kind() != ErrorKind::NotFound
         {
@@ -561,20 +541,16 @@ fn older_spills(dir: &Path, newest: &Path) -> std::io::Result<Vec<SpillFile>> {
     Ok(spills)
 }
 
-/// The tail of newest-first `older` that does not fit in `limits`
-/// alongside the newest spill of `newest_len` bytes.
-fn evicted_spills(
-    mut older: Vec<SpillFile>,
-    newest_len: u64,
-    limits: SpillLimits,
-) -> Vec<SpillFile> {
+/// The tail of newest-first `older` that does not fit in [`MAX_SPILL_FILES`] and
+/// [`MAX_SPILL_BYTES`] alongside the newest spill of `newest_len` bytes.
+fn evicted_spills(mut older: Vec<SpillFile>, newest_len: u64) -> Vec<SpillFile> {
     let mut kept_bytes = newest_len;
     let kept = older
         .iter()
-        .take(limits.max_files.saturating_sub(1))
+        .take(MAX_SPILL_FILES - 1)
         .take_while(|spill| {
             kept_bytes = kept_bytes.saturating_add(spill.len);
-            kept_bytes <= limits.max_bytes
+            kept_bytes <= MAX_SPILL_BYTES
         })
         .count();
     older.split_off(kept)
@@ -641,15 +617,12 @@ mod tests {
         names
     }
 
-    fn write_file_aged(dir: &Path, name: &str, len: usize, age_secs: u64) -> PathBuf {
+    /// A sparse file of `len` bytes, last modified `age_secs` ago.
+    fn write_file_aged(dir: &Path, name: &str, len: u64, age_secs: u64) -> PathBuf {
         let path = dir.join(name);
-        std::fs::write(&path, vec![b'x'; len]).unwrap();
-        let modified = SystemTime::now() - Duration::from_secs(age_secs);
-        std::fs::File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(modified)
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(len).unwrap();
+        file.set_modified(SystemTime::now() - Duration::from_secs(age_secs))
             .unwrap();
         path
     }
@@ -940,17 +913,14 @@ mod tests {
     #[test]
     fn prune_spills_evicts_the_oldest_until_under_the_byte_cap() {
         let dir = tempdir().unwrap();
-        write_file_aged(dir.path(), "notes.txt", 500, 50);
-        write_file_aged(dir.path(), "mcp-web-9.txt", 100, 40);
-        write_file_aged(dir.path(), "cmd-1.txt", 100, 30);
-        write_file_aged(dir.path(), "mcp-web-10.txt", 100, 20);
-        let newest = write_file_aged(dir.path(), "cmd-2.txt", 100, 0);
-        let limits = SpillLimits {
-            max_files: 10,
-            max_bytes: 300,
-        };
+        let third_of_cap = MAX_SPILL_BYTES / 3;
+        write_file_aged(dir.path(), "notes.txt", 5 * third_of_cap, 50);
+        write_file_aged(dir.path(), "mcp-web-9.txt", third_of_cap, 40);
+        write_file_aged(dir.path(), "cmd-1.txt", third_of_cap, 30);
+        write_file_aged(dir.path(), "mcp-web-10.txt", third_of_cap, 20);
+        let newest = write_file_aged(dir.path(), "cmd-2.txt", third_of_cap, 0);
 
-        prune_spills(dir.path(), &newest, 100, limits);
+        prune_spills(dir.path(), &newest, third_of_cap);
 
         assert_eq!(
             sorted_file_names(dir.path()),
@@ -961,14 +931,11 @@ mod tests {
     #[test]
     fn prune_spills_keeps_the_new_spill_even_when_it_alone_exceeds_the_caps() {
         let dir = tempdir().unwrap();
+        let over_cap = MAX_SPILL_BYTES + 1;
         write_file_aged(dir.path(), "cmd-1.txt", 10, 0);
-        let newest = write_file_aged(dir.path(), "cmd-2.txt", 1000, 60);
-        let limits = SpillLimits {
-            max_files: 1,
-            max_bytes: 100,
-        };
+        let newest = write_file_aged(dir.path(), "cmd-2.txt", over_cap, 60);
 
-        prune_spills(dir.path(), &newest, 1000, limits);
+        prune_spills(dir.path(), &newest, over_cap);
 
         assert_eq!(sorted_file_names(dir.path()), ["cmd-2.txt"]);
     }

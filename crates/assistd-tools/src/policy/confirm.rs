@@ -129,38 +129,6 @@ pub trait ConfirmationGate: fmt::Debug + Send + Sync + 'static {
     async fn confirm(&self, turn: &TurnContext, req: ConfirmationRequest) -> Approval;
 }
 
-/// Gate that never approves, logging each denial.
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Debug, Default)]
-pub struct DenyAllGate;
-
-#[cfg(any(test, feature = "test-support"))]
-#[async_trait]
-impl ConfirmationGate for DenyAllGate {
-    async fn confirm(&self, _turn: &TurnContext, req: ConfirmationRequest) -> Approval {
-        warn!(
-            target: "assistd::policy",
-            tool = %req.tool,
-            pattern = %req.matched_pattern,
-            "command denied: no interactive confirmation gate attached"
-        );
-        Approval::Deny
-    }
-}
-
-/// Gate that approves every request once.
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Debug, Default)]
-pub struct AlwaysAllowGate;
-
-#[cfg(any(test, feature = "test-support"))]
-#[async_trait]
-impl ConfirmationGate for AlwaysAllowGate {
-    async fn confirm(&self, _turn: &TurnContext, _req: ConfirmationRequest) -> Approval {
-        Approval::Once
-    }
-}
-
 /// Holds a task run's prompts, which nobody is present to answer, until the user answers.
 #[async_trait]
 pub trait PromptParking: fmt::Debug + Send + Sync + 'static {

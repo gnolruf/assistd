@@ -359,12 +359,11 @@ mod tests {
 
     use super::*;
     use crate::commands::{
-        BashCommand, LsCommand, WebCommand, WmCommand, permissive_write, test_cat, test_screenshot,
-        test_see, test_wm,
+        BashCommand, LsCommand, WebCommand, WmCommand, permissive_write, test_cat, test_sandbox,
+        test_screenshot, test_see, test_wm,
     };
-    use crate::policy::{
-        AlwaysAllowGate, ApprovalGate, Approvals, BashPolicyCfg, DenyAllGate, SandboxInfo,
-    };
+    use crate::policy::{ApprovalGate, Approvals};
+    use crate::test_support::{AlwaysAllowGate, DenyAllGate, bash_policy};
 
     #[test]
     fn unmatched_glob_reads_as_a_glob_not_a_missing_file() {
@@ -415,8 +414,8 @@ mod tests {
 
     fn bash_declining_every_confirmation() -> BashCommand {
         BashCommand::new(
-            Arc::new(BashPolicyCfg::default()),
-            SandboxInfo::none(),
+            Arc::new(bash_policy()),
+            test_sandbox(),
             Arc::new(DenyAllGate),
         )
     }

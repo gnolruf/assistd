@@ -146,9 +146,9 @@ mod tests {
     use super::*;
     use crate::TurnContext;
     use crate::command::run_rendered;
-    use crate::commands::test_see;
+    use crate::commands::{test_sandbox, test_see};
     use crate::fixtures::PNG_BYTES;
-    use crate::policy::AlwaysAllowGate;
+    use crate::test_support::AlwaysAllowGate;
 
     async fn run_see(cmd: &SeeCommand, args: &[&str]) -> CommandOutput {
         let input = CommandInput {
@@ -183,7 +183,7 @@ mod tests {
     async fn vision_disabled_returns_exact_error() {
         let cmd = SeeCommand::new(
             VisionGate::new(false),
-            SandboxInfo::none(),
+            test_sandbox(),
             Arc::new(AlwaysAllowGate),
         );
         let out = run_see(&cmd, &["/tmp/some-image.png"]).await;
