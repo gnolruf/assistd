@@ -197,35 +197,32 @@ impl OpenCases {
         }
     }
 
-    /// Whether bash reads `word`, at the start of a command, as the reserved word that closes
-    /// a compound command: in a pattern list it is a pattern, but for an `esac` that starts one.
-    fn reads_closer(&self, word: &Word) -> bool {
+    /// Whether bash reads `word` as a reserved word where it would read one outside a `case`:
+    /// in a pattern list it is a pattern, but for an `esac` that starts one.
+    fn reads_keyword(&self, word: &Word) -> bool {
         match self.innermost() {
             Some(CaseState::Pattern { fresh }) => fresh && is_bare(word, "esac"),
             _ => true,
         }
     }
 
-    /// Advance past the last of `words`, the words of the command being lexed.
-    fn word(&mut self, words: &[Word]) {
-        let Some((last, before)) = words.split_last() else {
-            return;
-        };
+    /// Advance past `word`, which stands where bash reads a `keyword` outside a pattern list.
+    fn word(&mut self, word: &Word, keyword: bool) {
         match self.innermost() {
             Some(CaseState::Subject) => self.set_innermost(CaseState::In),
-            Some(CaseState::In) if is_bare(last, "in") => {
+            Some(CaseState::In) if is_bare(word, "in") => {
                 self.set_innermost(CaseState::Pattern { fresh: true });
             }
-            Some(CaseState::Pattern { fresh: true }) if is_bare(last, "esac") => {
+            Some(CaseState::Pattern { fresh: true }) if is_bare(word, "esac") => {
                 self.0.pop();
             }
             Some(CaseState::Pattern { .. }) => {
                 self.set_innermost(CaseState::Pattern { fresh: false });
             }
-            Some(CaseState::Body) if is_bare(last, "esac") && at_command_start(before) => {
+            Some(CaseState::Body) if keyword && is_bare(word, "esac") => {
                 self.0.pop();
             }
-            _ if is_bare(last, "case") && at_command_start(before) => {
+            _ if keyword && is_bare(word, "case") => {
                 self.0.push(CaseState::Subject);
             }
             _ => {}
@@ -242,6 +239,8 @@ enum List {
     Nested,
     /// A subshell's or a substitution's, to the `)` that closes them.
     Parenthesized,
+    /// A `${ …; }` substitution's, to the `}` that closes it.
+    Braced,
 }
 
 /// What ends a command.
@@ -278,8 +277,8 @@ impl Open {
     }
 }
 
-/// What decides whether the script's own shell always runs the command being lexed, and
-/// whether it may run it again later.
+/// What decides whether the script's own shell always runs the command being lexed, whether
+/// it may run it again later, and where bash reads a reserved word in it.
 #[derive(Debug, Default)]
 struct Reach {
     /// The commands being lexed are the script's own.
@@ -297,6 +296,11 @@ struct Reach {
     needs_head: bool,
     /// The index into [`Script::run_later`] of the range the command being lexed is in.
     later: Option<usize>,
+    /// A `|` or `|&` comes straight before the command being lexed, where bash takes `time`
+    /// for a program.
+    piped: bool,
+    /// How many `{` groups are open around the command being lexed.
+    groups: usize,
 }
 
 impl Reach {
@@ -311,12 +315,30 @@ impl Reach {
         self.own && self.open.is_empty() && !self.joined
     }
 
-    /// Advance past the last word of `cmd`, the command being lexed, which `may_close` a
-    /// compound command where bash reads a reserved word in its place.
-    fn word(&mut self, cmd: &SimpleCommand, may_close: bool, out: &mut Script) {
-        let Some((last, before)) = cmd.words.split_last() else {
+    /// Whether bash reads a reserved word after the words `cmd`, the command being lexed, has
+    /// so far.
+    fn reads_keyword(&self, cmd: &SimpleCommand) -> bool {
+        let start = Expecting::Keyword { timed: !self.piped };
+        cmd.redirects.is_empty()
+            && cmd.inputs.is_empty()
+            && cmd
+                .words
+                .iter()
+                .try_fold(start, Expecting::after)
+                .is_some_and(Expecting::reads_keyword)
+    }
+
+    /// Advance past the last word of `cmd`, the command being lexed, which bash reads as a
+    /// `reserved` word if it is one.
+    fn word(&mut self, cmd: &SimpleCommand, reserved: bool, out: &mut Script) {
+        let Some(last) = cmd.words.last() else {
             return;
         };
+        if reserved && is_bare(last, "{") {
+            self.groups += 1;
+        } else if reserved && is_bare(last, "}") {
+            self.groups = self.groups.saturating_sub(1);
+        }
         if let Some((_, closer)) = COMPOUND_COMMANDS
             .iter()
             .find(|(opener, _)| is_bare(last, opener))
@@ -324,11 +346,9 @@ impl Reach {
             self.enter(Open::Until(closer), out);
             return;
         }
-        let starts_command =
-            cmd.redirects.is_empty() && cmd.inputs.is_empty() && before.iter().all(is_closer);
         let closes_innermost =
             matches!(self.open.last(), Some(Open::Until(closer)) if is_bare(last, closer));
-        if may_close && starts_command && closes_innermost {
+        if reserved && closes_innermost {
             self.open.pop();
             self.end_body();
         }
@@ -384,6 +404,8 @@ impl Reach {
             terminator,
             Terminator::Sequence | Terminator::And | Terminator::Or
         );
+        self.piped = terminator == Terminator::Pipe
+            || (self.piped && terminator == Terminator::Sequence && cmd.is_empty());
         cmd.unconditional = self.always_runs() && in_shell;
         if !cmd.is_empty() {
             self.end_body();
@@ -433,6 +455,65 @@ impl Reach {
         {
             head.required_until = required_until;
         }
+    }
+}
+
+/// What bash reads the next word of a command as, going by the words before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expecting {
+    /// A reserved word if it is one, though `time` only where `timed`.
+    Keyword { timed: bool },
+    /// As [`Keyword`](Self::Keyword), or an option of the `time` before it: `--`, or `-p`
+    /// unless `p` came already.
+    TimeOption { p: bool },
+    /// A reserved word if it is one, or else the name of a coprocess.
+    CoprocName,
+    /// The name of a function.
+    FunctionName,
+    /// The variable of a `for` or `select`.
+    LoopVariable,
+    /// The `do` of a loop over the positional parameters, or else an ordinary word.
+    Do,
+    /// A word of a `[[ … ]]`, up to its `]]`.
+    Condition,
+}
+
+impl Expecting {
+    /// What bash reads the word after `word` as, or `None` for an ordinary word, as every
+    /// word after that one is.
+    fn after(self, word: &Word) -> Option<Self> {
+        let text = if word.quoted || word.dynamic {
+            ""
+        } else {
+            word.text.as_str()
+        };
+        let next = match (self, text) {
+            (Self::Condition, "]]") | (Self::FunctionName, _) => Self::Keyword { timed: false },
+            (Self::Condition, _) => Self::Condition,
+            (Self::LoopVariable, _) => Self::Do,
+            (Self::Do, "do") | (Self::TimeOption { .. }, "--") => Self::Keyword { timed: true },
+            (Self::Do, _) | (_, "case") => return None,
+            (Self::TimeOption { p: false }, "-p") => Self::TimeOption { p: true },
+            (Self::Keyword { timed: true } | Self::TimeOption { .. }, "time") => {
+                Self::TimeOption { p: false }
+            }
+            (_, "coproc") => Self::CoprocName,
+            (_, "function") => Self::FunctionName,
+            (_, "for" | "select") => Self::LoopVariable,
+            (_, "[[") => Self::Condition,
+            _ if COMMAND_PREFIX_WORDS.contains(&text) => Self::Keyword { timed: true },
+            _ if is_closer(word) => Self::Keyword { timed: false },
+            (Self::CoprocName, _) => Self::Keyword { timed: false },
+            _ => return None,
+        };
+        Some(next)
+    }
+
+    fn reads_keyword(self) -> bool {
+        matches!(
+            self,
+            Self::Keyword { .. } | Self::TimeOption { .. } | Self::CoprocName
+        )
     }
 }
 
@@ -518,7 +599,8 @@ impl<'s, 'o> Lexer<'s, 'o> {
         loop {
             conditional &= !cmd.words.is_empty();
             let Some(c) = self.peek() else {
-                self.incomplete |= in_parens || conditional;
+                self.incomplete |=
+                    matches!(list, List::Parenthesized | List::Braced) || conditional;
                 break;
             };
             match c {
@@ -566,15 +648,19 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 '&' | '<' | '>' if c == '&' || self.peek_at(1) != Some('(') => {
                     self.redirect(&mut cmd)?;
                 }
+                _ if conditional => {
+                    self.command_word(&mut cmd, true)?;
+                    conditional = !cmd.words.last().is_some_and(|word| is_bare(word, "]]"));
+                }
+                '}' if list == List::Braced && ends_substitution(&cmd, &cases, &reach) => {
+                    self.skip(1);
+                    break;
+                }
                 _ => {
-                    if self.command_word(&mut cmd, conditional)? && !conditional {
-                        self.after_word(&mut cmd, &mut cases, &mut reach);
+                    let keyword = reach.reads_keyword(&cmd);
+                    if self.command_word(&mut cmd, false)? {
+                        conditional = self.after_word(&mut cmd, &mut cases, &mut reach, keyword);
                     }
-                    conditional = if conditional {
-                        !cmd.words.last().is_some_and(|word| is_bare(word, "]]"))
-                    } else {
-                        opens_conditional(&cmd.words)
-                    };
                 }
             }
         }
@@ -625,20 +711,29 @@ impl<'s, 'o> Lexer<'s, 'o> {
         terminator
     }
 
-    /// Advance what is open past the word `cmd` just gained, recording a `function name`
-    /// that the word completes in place of a command.
-    fn after_word(&mut self, cmd: &mut SimpleCommand, cases: &mut OpenCases, reach: &mut Reach) {
-        let may_close = cmd
-            .words
-            .last()
-            .is_some_and(|word| cases.reads_closer(word));
-        cases.word(&cmd.words);
-        reach.word(cmd, may_close, self.out);
-        if matches!(cmd.words.as_slice(), [keyword, _] if is_bare(keyword, "function"))
+    /// Advance what is open past the word `cmd` just gained where bash reads a `keyword`
+    /// outside a pattern list, recording a `function name` that the word completes in place
+    /// of a command. Returns whether the word opens a `[[ … ]]`.
+    fn after_word(
+        &mut self,
+        cmd: &mut SimpleCommand,
+        cases: &mut OpenCases,
+        reach: &mut Reach,
+        keyword: bool,
+    ) -> bool {
+        let Some(word) = cmd.words.last() else {
+            return false;
+        };
+        let reserved = keyword && cases.reads_keyword(word);
+        let opens_conditional = reserved && is_bare(word, "[[");
+        cases.word(word, keyword);
+        reach.word(cmd, reserved, self.out);
+        if matches!(cmd.words.as_slice(), [first, _] if is_bare(first, "function"))
             && let Some(name) = cmd.words.drain(..).next_back()
         {
             reach.define(name.text, self.out);
         }
+        opens_conditional
     }
 
     /// Consume an operator of `[[ … ]]` that is `len` characters long as a
@@ -755,13 +850,10 @@ impl<'s, 'o> Lexer<'s, 'o> {
     /// Consume lines up to `doc`'s delimiter, returning the body and
     /// whether the delimiter was found.
     fn heredoc_body(&mut self, doc: &Heredoc) -> (String, bool) {
-        let src = self.src;
         let mut body = String::new();
-        while self.pos < src.len() {
-            let rest = &src[self.pos..];
-            let line = &rest[..rest.find('\n').map_or(rest.len(), |i| i + 1)];
-            self.pos += line.len();
-            let bare = line.strip_suffix('\n').unwrap_or(line);
+        while self.pos < self.src.len() {
+            let line = self.heredoc_line(doc.expands);
+            let bare = line.strip_suffix('\n').unwrap_or(&line);
             let bare = if doc.strip_tabs {
                 bare.trim_start_matches('\t')
             } else {
@@ -770,9 +862,31 @@ impl<'s, 'o> Lexer<'s, 'o> {
             if bare == doc.delimiter {
                 return (body, true);
             }
-            body.push_str(line);
+            body.push_str(&line);
         }
         (body, false)
+    }
+
+    /// Consume one line of a here-document as bash reads it: where the document `expands`,
+    /// a backslash before a newline joins the next line on.
+    fn heredoc_line(&mut self, expands: bool) -> String {
+        let mut line = String::new();
+        while let Some(c) = self.next() {
+            let escaped = if c == '\\' && expands {
+                self.next()
+            } else {
+                None
+            };
+            if escaped == Some('\n') {
+                continue;
+            }
+            line.push(c);
+            line.extend(escaped);
+            if c == '\n' {
+                break;
+            }
+        }
+        line
     }
 
     /// Lex `src` as a script of its own, adding its commands to ours.
@@ -793,8 +907,8 @@ impl<'s, 'o> Lexer<'s, 'o> {
     }
 
     /// Consume up to the `close` that balances `depth` consumed `open`s and
-    /// lex what lies between as commands. Used for extglobs and `${ …; }`,
-    /// so a `<<` shift inside is never read as a here-document.
+    /// lex what lies between as commands. Used for extglobs, so a `<<`
+    /// shift inside is never read as a here-document.
     fn balanced(&mut self, open: char, close: char, depth: usize) -> Result<(), TooDeep> {
         let src = self.src;
         let span = self.balanced_span(open, close, depth);
@@ -1059,7 +1173,8 @@ impl<'s, 'o> Lexer<'s, 'o> {
             }
             Some('{') if matches!(self.peek_at(1), Some(' ' | '\t' | '\n' | '|')) => {
                 self.skip(1);
-                self.balanced('{', '}', 1)?;
+                self.eat("|");
+                self.commands(List::Braced)?;
             }
             Some('(') => {
                 self.skip(1);
@@ -1362,22 +1477,10 @@ pub(super) fn is_name(text: &str) -> bool {
         && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn opens_conditional(words: &[Word]) -> bool {
-    words
-        .split_last()
-        .is_some_and(|(last, before)| is_bare(last, "[[") && at_command_start(before))
-}
-
-/// Whether a word after `before` is where bash reads a reserved word: after only
-/// [`COMMAND_PREFIX_WORDS`], `time` and `time -p`.
-fn at_command_start(before: &[Word]) -> bool {
-    before.iter().enumerate().all(|(at, word)| {
-        COMMAND_PREFIX_WORDS
-            .iter()
-            .any(|keyword| is_bare(word, keyword))
-            || is_bare(word, "time")
-            || (is_bare(word, "-p") && at > 0 && is_bare(&before[at - 1], "time"))
-    })
+/// Whether a `}` after the words of `cmd` closes the `${ …; }` whose commands are being
+/// lexed: bash reads a reserved word there, and no `{` group or pattern list is open.
+fn ends_substitution(cmd: &SimpleCommand, cases: &OpenCases, reach: &Reach) -> bool {
+    reach.groups == 0 && !cases.in_pattern() && reach.reads_keyword(cmd)
 }
 
 /// Whether `word` is a reserved word that closes a compound command.

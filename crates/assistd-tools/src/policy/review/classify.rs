@@ -1611,6 +1611,20 @@ mod tests {
         "echo $((echo x) ; (echo y > ~/f))",
         "((echo x) > ~/f)",
         "echo $(( a > b )",
+        "echo \"$(function f case x in x) rm -rf ~;; esac)\"",
+        "echo \"$(coproc case x in x) rm -rf ~;; esac)\"",
+        "echo \"$(coproc cat case x in x) rm -rf ~;; esac)\"",
+        "case x in a) :;; [[) rm -rf ~;; esac",
+        ">/dev/null [[ a || rm -rf ~ ]]",
+        "true | time [[ a || rm -rf ~ ]]",
+        "coproc time -p [[ a || rm -rf ~ ]]",
+        "echo \"${ echo }; rm -rf ~; }\"",
+        "echo \"${ echo { ; }\"; rm -rf ~; echo \"; }\"",
+        "echo \"${ [[ a ]] }\"; rm -rf ~; echo \"; }\"",
+        "echo \"${ time -- { ls; }; rm -rf ~; }\"",
+        "set -- a; echo \"${ for x do { :; }; rm -rf ~; done; }\"",
+        "cat <<EOF\nE\\\nOF\nrm -rf ~\nEOF",
+        "cat <<EOF\nx\\\nEOF\necho \"\nEOF\nrm -rf ~ #\"",
     ];
 
     /// Scripts whose text mentions commands bash never runs.
@@ -1678,6 +1692,8 @@ mod tests {
         "grep -rn --include='*.rs' -e TODO -A 2 src",
         "find . -type f -name '*.rs' -newer a -exec grep -l -e x {} +",
         "f() { ls; }\ng() (f)\nfunction h\n{ g; }\nf | sort; h; cd sub && cat x",
+        "echo \"${ { echo a; }; echo }; }x; rm -rf ~\"",
+        "cat <<EOF\nx\\\\\nEOF\necho hi",
     ];
 
     /// What a script does to a path other than read it, and whether throughout.
