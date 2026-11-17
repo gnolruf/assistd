@@ -722,72 +722,25 @@ fn mounted_path(quarantine: &Quarantine, input: &Path) -> PathBuf {
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use tokio::sync::mpsc;
-
-    use assistd_ipc::Attachment;
-    use assistd_llm::{
-        LlmBackend, LlmError, LlmEvent, LlmResult, SlotAssignment, SlotDir, StepOutcome,
-        ToolResultPayload, TurnBackend,
-    };
+    use assistd_llm::{LlmBackend, ScriptedBackend, SlotDir};
     use assistd_tools::{Approvals, DenyAllGate};
 
     use super::*;
+    use crate::agent::AgentSpec;
 
-    /// A parent that records whether a sub-agent backend was opened on it.
-    #[derive(Debug, Default)]
-    struct WatchedParent {
-        backend_opened: AtomicBool,
-    }
-
-    #[async_trait]
-    impl TurnBackend for WatchedParent {
-        async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
-            unimplemented!("parent is never driven")
-        }
-
-        async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> LlmResult<()> {
-            unimplemented!("parent is never driven")
-        }
-
-        async fn step(
-            &self,
-            _tools: Vec<Value>,
-            _tx: mpsc::Sender<LlmEvent>,
-        ) -> LlmResult<StepOutcome> {
-            unimplemented!("parent is never driven")
-        }
-
-        async fn push_interrupted_reply(&self, _reply: String) -> LlmResult<()> {
-            unimplemented!("parent is never driven")
-        }
-
-        async fn set_transient_note(&self, _text: String) -> LlmResult<()> {
-            unimplemented!("parent is never driven")
-        }
-    }
-
-    impl LlmBackend for WatchedParent {
-        fn isolated_backend(
-            &self,
-            _system_prompt: String,
-            _slot: SlotAssignment,
-        ) -> LlmResult<Arc<dyn LlmBackend>> {
-            self.backend_opened.store(true, Ordering::SeqCst);
-            Err(LlmError::Unavailable("test parent".into()))
-        }
-    }
-
-    fn relay_tool(parent: &Arc<WatchedParent>, dir: &Path) -> RelayTool {
+    /// A relay tool whose sub-agents would run beside `parent`, which has none to hand out.
+    fn relay_tool(parent: &Arc<ScriptedBackend>, dir: &Path) -> RelayTool {
         let gate = Arc::new(DenyAllGate);
         RelayTool::new(
             RelayDeps {
                 runner: SubAgentRunner::new(
                     Arc::clone(parent) as Arc<dyn LlmBackend>,
-                    None,
-                    Duration::from_secs(60),
+                    AgentSpec {
+                        health: None,
+                        tool_deadline: Duration::from_secs(60),
+                    },
                 ),
                 slot_stash: Arc::new(
                     SlotStash::new(
@@ -822,7 +775,7 @@ mod tests {
         std::fs::create_dir(project.path().join("big")).unwrap();
         std::fs::write(project.path().join("big/notes.txt"), "x".repeat(12_000)).unwrap();
         std::fs::write(project.path().join("small.txt"), "x".repeat(400)).unwrap();
-        let parent = Arc::new(WatchedParent::default());
+        let parent = Arc::new(ScriptedBackend::default());
         let relay = relay_tool(&parent, dir.path());
         let step = |search_only: bool| {
             json!({
@@ -851,7 +804,7 @@ mod tests {
     #[tokio::test]
     async fn web_relay_with_inputs_is_refused_before_any_model_request() {
         let dir = tempfile::tempdir().unwrap();
-        let parent = Arc::new(WatchedParent::default());
+        let parent = Arc::new(ScriptedBackend::default());
         let relay = relay_tool(&parent, dir.path());
 
         let result = relay
@@ -869,14 +822,14 @@ mod tests {
             matches!(&result, Err(ToolError::InvalidArgs(message)) if message.contains("never both")),
             "{result:?}"
         );
-        assert!(!parent.backend_opened.load(Ordering::SeqCst));
+        assert_eq!(parent.seen().isolated_requests, 0);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
     async fn web_relay_asks_once_the_turn_has_read_this_machine() {
         let dir = tempfile::tempdir().unwrap();
-        let parent = Arc::new(WatchedParent::default());
+        let parent = Arc::new(ScriptedBackend::default());
         let relay = relay_tool(&parent, dir.path());
         let web_step = json!({
             "task": "look up the weather in the city named in my notes",
@@ -894,7 +847,7 @@ mod tests {
         let declined = relay.invoke(&turn, web_step.clone()).await.unwrap();
 
         assert_eq!(declined.output, WEB_RELAY_DECLINED);
-        assert!(!parent.backend_opened.load(Ordering::SeqCst));
+        assert_eq!(parent.seen().isolated_requests, 0);
         assert!(!relay.reads_host(&web_step));
         assert!(relay.reads_host(&file_step));
     }
@@ -902,7 +855,7 @@ mod tests {
     #[tokio::test]
     async fn plan_with_web_after_files_is_refused_before_any_model_request() {
         let dir = tempfile::tempdir().unwrap();
-        let parent = Arc::new(WatchedParent::default());
+        let parent = Arc::new(ScriptedBackend::default());
         let relay = relay_tool(&parent, dir.path());
 
         let result = relay
@@ -919,7 +872,7 @@ mod tests {
             matches!(&result, Err(ToolError::InvalidArgs(message)) if message.contains("may not follow")),
             "{result:?}"
         );
-        assert!(!parent.backend_opened.load(Ordering::SeqCst));
+        assert_eq!(parent.seen().isolated_requests, 0);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
@@ -929,7 +882,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         std::fs::write(project.path().join("notes.txt"), "notes").unwrap();
         let missing = project.path().join("missing.rs");
-        let parent = Arc::new(WatchedParent::default());
+        let parent = Arc::new(ScriptedBackend::default());
         let relay = relay_tool(&parent, dir.path());
 
         let result = relay
@@ -946,7 +899,7 @@ mod tests {
                 if message.starts_with("step 2: cannot hand over input")),
             "{result:?}"
         );
-        assert!(!parent.backend_opened.load(Ordering::SeqCst));
+        assert_eq!(parent.seen().isolated_requests, 0);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

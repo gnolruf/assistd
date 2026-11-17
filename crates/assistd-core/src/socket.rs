@@ -715,6 +715,7 @@ mod tests {
 
     use assistd_config::Config;
     use assistd_ipc::{PresenceState, PresenceTarget};
+    use assistd_llm::{Gate, ScriptedBackend, Step, ToolCall};
 
     use super::*;
     use crate::state::tests::TestState;
@@ -722,6 +723,24 @@ mod tests {
 
     async fn test_state() -> TestState {
         state_with_backend(Arc::new(assistd_llm::EchoBackend::new())).await
+    }
+
+    fn scripted(steps: impl IntoIterator<Item = Step>) -> Arc<ScriptedBackend> {
+        Arc::new(ScriptedBackend::new(steps))
+    }
+
+    /// A step that calls tool `name` with no arguments.
+    fn calling(id: &str, name: &str) -> Step {
+        Step::tool_calls([ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: serde_json::json!({}),
+        }])
+    }
+
+    /// A step that streams 1 KiB deltas until nobody reads them.
+    fn flood() -> Step {
+        Step::default().flooding("x".repeat(1024))
     }
 
     async fn state_with_backend(backend: Arc<dyn assistd_llm::LlmBackend>) -> TestState {
@@ -1122,112 +1141,15 @@ mod tests {
         );
     }
 
-    /// Backend that emits N deltas with a fixed pause between each, then
-    /// Done.
-    #[derive(Debug)]
-    struct SlowBackend {
-        deltas: usize,
-        pause: Duration,
-    }
-
-    #[async_trait::async_trait]
-    impl assistd_llm::TurnBackend for SlowBackend {
-        async fn push_user(
-            &self,
-            _text: String,
-            _attachments: Vec<assistd_ipc::Attachment>,
-        ) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn push_tool_results(
-            &self,
-            _results: Vec<assistd_llm::ToolResultPayload>,
-        ) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn step(
-            &self,
-            _tools: Vec<serde_json::Value>,
-            tx: mpsc::Sender<assistd_llm::LlmEvent>,
-        ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
-            for i in 0..self.deltas {
-                let _ = tx
-                    .send(assistd_llm::LlmEvent::Delta {
-                        text: format!("d{i}"),
-                    })
-                    .await;
-                tokio::time::sleep(self.pause).await;
-            }
-            Ok(assistd_llm::StepOutcome::Final)
-        }
-
-        async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-    }
-
-    impl assistd_llm::LlmBackend for SlowBackend {}
-
-    /// Backend that emits a single delta then blocks indefinitely on an
-    /// un-awoken channel.
-    #[derive(Debug)]
-    struct StuckBackend;
-
-    #[async_trait::async_trait]
-    impl assistd_llm::TurnBackend for StuckBackend {
-        async fn push_user(
-            &self,
-            _text: String,
-            _attachments: Vec<assistd_ipc::Attachment>,
-        ) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn push_tool_results(
-            &self,
-            _results: Vec<assistd_llm::ToolResultPayload>,
-        ) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn step(
-            &self,
-            _tools: Vec<serde_json::Value>,
-            tx: mpsc::Sender<assistd_llm::LlmEvent>,
-        ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
-            let _ = tx
-                .send(assistd_llm::LlmEvent::Delta {
-                    text: "stuck".into(),
-                })
-                .await;
-            std::future::pending::<()>().await;
-            Ok(assistd_llm::StepOutcome::Final)
-        }
-
-        async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-    }
-
-    impl assistd_llm::LlmBackend for StuckBackend {}
-
     #[tokio::test]
     async fn graceful_shutdown_waits_for_in_flight_stream() {
-        let state = state_with_backend(Arc::new(SlowBackend {
-            deltas: 3,
-            pause: Duration::from_millis(50),
-        }))
-        .await;
+        let pause = Duration::from_millis(50);
+        let slow_reply = ["d0", "d1", "d2"]
+            .into_iter()
+            .fold(Step::default(), |step, delta| {
+                step.saying(delta).pausing(pause)
+            });
+        let state = state_with_backend(scripted([slow_reply])).await;
         let server = TestServer::start(&state).await;
         let (_write, mut reader) = open_connection(
             &server.path,
@@ -1248,7 +1170,8 @@ mod tests {
 
     #[tokio::test]
     async fn graceful_shutdown_aborts_after_grace_timeout() {
-        let state = state_with_backend(Arc::new(StuckBackend)).await;
+        let stuck = Step::reply("stuck").waiting_at(&Gate::new());
+        let state = state_with_backend(scripted([stuck])).await;
         let server = TestServer::start(&state).await;
         let (_write, mut reader) = open_connection(
             &server.path,
@@ -1258,7 +1181,7 @@ mod tests {
         .await;
         read_event(&mut reader)
             .await
-            .expect("expected first Delta from StuckBackend");
+            .expect("expected first Delta from the stuck step");
 
         tokio::time::pause();
         tokio::time::timeout(Duration::from_secs(10), server.stop())
@@ -1403,58 +1326,6 @@ mod tests {
             .expect("subscriber not released on shutdown");
     }
 
-    /// Backend whose first step asks for the `gated` tool and whose second
-    /// step ends the turn.
-    #[derive(Debug)]
-    struct GatedToolBackend {
-        stepped: AtomicBool,
-    }
-
-    #[async_trait::async_trait]
-    impl assistd_llm::TurnBackend for GatedToolBackend {
-        async fn push_user(
-            &self,
-            _text: String,
-            _attachments: Vec<assistd_ipc::Attachment>,
-        ) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn push_tool_results(
-            &self,
-            _results: Vec<assistd_llm::ToolResultPayload>,
-        ) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn step(
-            &self,
-            _tools: Vec<serde_json::Value>,
-            _tx: mpsc::Sender<assistd_llm::LlmEvent>,
-        ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
-            if self.stepped.swap(true, Ordering::SeqCst) {
-                return Ok(assistd_llm::StepOutcome::Final);
-            }
-            Ok(assistd_llm::StepOutcome::ToolCalls(vec![
-                assistd_llm::ToolCall {
-                    id: "call-1".into(),
-                    name: "gated".into(),
-                    arguments: serde_json::json!({}),
-                },
-            ]))
-        }
-
-        async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-    }
-
-    impl assistd_llm::LlmBackend for GatedToolBackend {}
-
     /// Tool that runs the production IPC gate on a request the given modes may approve unasked,
     /// and reports its verdict.
     #[derive(Debug)]
@@ -1508,10 +1379,7 @@ mod tests {
     async fn gated_tool_state_at(unattended: assistd_tools::Unattended) -> TestState {
         let mut tools = assistd_tools::ToolRegistry::new();
         tools.register(GatedTool(unattended));
-        let backend = Arc::new(GatedToolBackend {
-            stepped: AtomicBool::new(false),
-        });
-        state_with(backend, Arc::new(tools)).await
+        state_with(scripted([calling("call-1", "gated")]), Arc::new(tools)).await
     }
 
     fn tool_output(ev: &Event) -> Option<&str> {
@@ -1599,58 +1467,6 @@ mod tests {
         .await;
     }
 
-    /// Backend that streams 1 KiB deltas until its channel closes.
-    #[derive(Debug)]
-    struct FloodBackend;
-
-    impl FloodBackend {
-        async fn flood(tx: &mpsc::Sender<assistd_llm::LlmEvent>) {
-            let text = "x".repeat(1024);
-            while tx
-                .send(assistd_llm::LlmEvent::Delta { text: text.clone() })
-                .await
-                .is_ok()
-            {}
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl assistd_llm::TurnBackend for FloodBackend {
-        async fn push_user(
-            &self,
-            _text: String,
-            _attachments: Vec<assistd_ipc::Attachment>,
-        ) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn push_tool_results(
-            &self,
-            _results: Vec<assistd_llm::ToolResultPayload>,
-        ) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn step(
-            &self,
-            _tools: Vec<serde_json::Value>,
-            tx: mpsc::Sender<assistd_llm::LlmEvent>,
-        ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
-            Self::flood(&tx).await;
-            Ok(assistd_llm::StepOutcome::Final)
-        }
-
-        async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-    }
-
-    impl assistd_llm::LlmBackend for FloodBackend {}
-
     /// Sends a query and returns the connection after its first event has
     /// arrived, so the caller controls when the client goes away.
     async fn open_query_and_read_first_event(
@@ -1668,7 +1484,7 @@ mod tests {
     #[tokio::test]
     async fn client_disconnect_mid_turn_releases_the_turn_lock() {
         with_server(
-            &state_with_backend(Arc::new(FloodBackend)).await,
+            &state_with_backend(scripted([flood(), flood()])).await,
             |path| async move {
                 let (first, reader, write) = open_query_and_read_first_event(&path, "gone").await;
                 assert!(
@@ -1698,7 +1514,7 @@ mod tests {
             .write_all(b"{\"type\":\"query\",\"id\":\"bye\",\"text\":\"go\"}\n")
             .await
             .unwrap();
-        let state = state_with_backend(Arc::new(FloodBackend)).await;
+        let state = state_with_backend(scripted([flood()])).await;
         let (_drain_tx, drain_rx) = watch::channel(false);
         let large_frames = Arc::new(Semaphore::new(LARGE_FRAME_SLOTS));
         let connection = tokio::spawn(handle_connection(
@@ -1744,62 +1560,6 @@ mod tests {
         assert!(matches!(err, SocketError::WriteTimeout(_)), "got {err:?}");
     }
 
-    /// Calls `hang` on its first step and answers on the next.
-    #[derive(Debug, Default)]
-    struct HangingCallBackend {
-        called: AtomicBool,
-    }
-
-    #[async_trait::async_trait]
-    impl assistd_llm::TurnBackend for HangingCallBackend {
-        async fn push_user(
-            &self,
-            _text: String,
-            _attachments: Vec<assistd_ipc::Attachment>,
-        ) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn push_tool_results(
-            &self,
-            _results: Vec<assistd_llm::ToolResultPayload>,
-        ) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn step(
-            &self,
-            _tools: Vec<serde_json::Value>,
-            tx: mpsc::Sender<assistd_llm::LlmEvent>,
-        ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
-            if !self.called.swap(true, Ordering::SeqCst) {
-                return Ok(assistd_llm::StepOutcome::ToolCalls(vec![
-                    assistd_llm::ToolCall {
-                        id: "c1".into(),
-                        name: "hang".into(),
-                        arguments: serde_json::json!({}),
-                    },
-                ]));
-            }
-            let _ = tx
-                .send(assistd_llm::LlmEvent::Delta {
-                    text: "done".into(),
-                })
-                .await;
-            Ok(assistd_llm::StepOutcome::Final)
-        }
-
-        async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-
-        async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
-            Ok(())
-        }
-    }
-
-    impl assistd_llm::LlmBackend for HangingCallBackend {}
-
     /// Never returns and emits nothing; `dropped` flips when the invocation
     /// future is torn down.
     #[derive(Debug)]
@@ -1844,7 +1604,8 @@ mod tests {
         tools.register(SilentHangingTool {
             dropped: dropped.clone(),
         });
-        let state = state_with(Arc::new(HangingCallBackend::default()), Arc::new(tools)).await;
+        let backend = ScriptedBackend::new([calling("c1", "hang")]).then_replying("done");
+        let state = state_with(Arc::new(backend), Arc::new(tools)).await;
         with_server(&state, |path| async move {
             let (write, mut reader) =
                 open_connection(&path, &[r#"{"type":"query","id":"h1","text":"go"}"#], true).await;

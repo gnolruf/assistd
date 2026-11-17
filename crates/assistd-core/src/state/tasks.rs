@@ -16,6 +16,7 @@ use self::scheduler::TaskScheduler;
 use super::persistence::TranscriptLog;
 use super::session::SessionContext;
 use super::turn_admission::TurnAdmission;
+use crate::agent::AgentSpec;
 use crate::bus::EventBus;
 use crate::planner::Planner;
 use crate::presence::PresenceManager;
@@ -49,6 +50,7 @@ pub(super) struct TaskDeps {
     pub(super) presence: Arc<PresenceManager>,
     pub(super) vision_revalidator: Option<Arc<VisionRevalidator>>,
     pub(super) tools: Arc<ToolCatalog>,
+    pub(super) agents: AgentSpec,
     pub(super) planner: Arc<Planner>,
     pub(super) slot_stash: Option<Arc<SlotStash>>,
     pub(super) voice: Arc<VoiceManager>,

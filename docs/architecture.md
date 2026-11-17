@@ -962,13 +962,15 @@ A walk through "what files changed this week?" typed into `assistd chat`:
    to the client, so a slow client never delays subscribers.
 
 3. **Agent** ([`crates/assistd-core/src/agent.rs`](../crates/assistd-core/src/agent.rs)).
-   The handler builds `Agent::new(...)` from the handles it holds
+   The handler builds an `Agent` from the daemon's `AgentSpec` (the
+   health probe and tool deadline every user turn, task run, planning
+   turn and sub-agent shares) over the handles it holds,
    and calls `run_turn()` with the turn's `TurnContext`, which every
    tool call receives: it carries who answers the turn's prompts, who
    watches its relays, the lane a task run gives up on request, and whether
    the turn's history has read this machine. A
-   `TurnDriver`, the same one a task run uses, persists the agent's
-   events and sends them to the sink.
+   `TurnDriver`, the same one a task run and a refine's planning turn
+   use, persists the agent's events and sends them to the sink.
 
 4. **LLM step** ([`crates/assistd-llm/src/completion/client.rs`](../crates/assistd-llm/src/completion/client.rs)).
    `LlamaClient` POSTs `messages + tools` to llama-server with

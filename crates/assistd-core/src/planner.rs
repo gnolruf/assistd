@@ -3,7 +3,6 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -17,8 +16,7 @@ use assistd_ipc::{
     Attachment, HostName, ModeRecommendation, PermissionMode, Plan, TaskPrompt, TaskSpecError,
 };
 use assistd_llm::{
-    LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult, StepOutcome, ToolResultPayload,
-    TurnBackend,
+    LlmBackend, LlmError, LlmEvent, LlmResult, StepOutcome, ToolResultPayload, TurnBackend,
 };
 use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{
@@ -26,7 +24,7 @@ use assistd_tools::{
     TurnContext,
 };
 
-use crate::agent::Agent;
+use crate::agent::{Agent, AgentSpec};
 
 mod draft;
 mod recommend;
@@ -142,27 +140,24 @@ pub struct Planner {
     tools: PlanningTools,
     /// The tools ordinary turns are offered, which an anticipated MCP tool must be among.
     catalog: Arc<ToolCatalog>,
-    health: Option<Arc<dyn LlmHealthProbe>>,
-    tool_deadline: Duration,
+    agents: AgentSpec,
     /// Auto mode may be recommended.
     auto_offered: bool,
 }
 
 impl Planner {
-    /// A planner over `tools`; `health` and `tool_deadline` act as they do for [`Agent`], and
-    /// a refine recommends Auto only when `auto_offered`.
+    /// A planner over `tools` whose turns run on agents built from `agents`; a refine
+    /// recommends Auto only when `auto_offered`.
     pub fn new(
         tools: PlanningTools,
         catalog: Arc<ToolCatalog>,
-        health: Option<Arc<dyn LlmHealthProbe>>,
-        tool_deadline: Duration,
+        agents: AgentSpec,
         auto_offered: bool,
     ) -> Self {
         Self {
             tools,
             catalog,
-            health,
-            tool_deadline,
+            agents,
             auto_offered,
         }
     }
@@ -181,13 +176,12 @@ impl Planner {
         acting.register(EnterPlanModeTool);
         let mut planning = ToolRegistry::clone(&self.tools.registry);
         planning.register(ExitPlanModeTool);
-        Agent::new(
-            PlanModeBackend::new(backend, USER_TURN_PLAN_ENDING, turn.clone()),
-            Arc::new(acting),
-            self.health.clone(),
-            self.tool_deadline,
-        )
-        .with_planning_tools(Arc::new(planning))
+        self.agents
+            .agent(
+                PlanModeBackend::new(backend, USER_TURN_PLAN_ENDING, turn.clone()),
+                Arc::new(acting),
+            )
+            .with_planning_tools(Arc::new(planning))
     }
 
     /// Every tool a user turn over `acting` may have called, acting or planning.
@@ -251,11 +245,9 @@ impl Planner {
         cancel: &CancellationToken,
     ) -> Result<(), PlanError> {
         let turn = TurnContext::answered_by(ConfirmRouter::for_planning(request_id));
-        let agent = Agent::new(
+        let agent = self.agents.agent(
             PlanModeBackend::new(backend, FINDINGS_ENDING, turn.clone()),
             Arc::clone(&self.tools.registry),
-            self.health.clone(),
-            self.tool_deadline,
         );
         agent
             .run_turn(&turn, ask.into_text(), Vec::new(), tx, cancel.clone())

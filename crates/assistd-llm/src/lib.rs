@@ -17,6 +17,8 @@ pub mod completion;
 #[cfg(feature = "test-support")]
 mod echo;
 pub mod llama_server;
+#[cfg(feature = "test-support")]
+mod scripted;
 
 pub use assistd_utils::child_server::ReadyState;
 pub use completion::history::{CompactionCut, ToolCallRecord};
@@ -27,6 +29,8 @@ pub use llama_server::{
     LlamaServerControl, LlamaServerError, LlamaServerSpec, SlotAssignment, SlotDir, SlotHolder,
     SlotStash, VisionState, probe_capabilities_routed,
 };
+#[cfg(feature = "test-support")]
+pub use scripted::{Gate, JournaledStep, ScriptedBackend, Seen, Step, StepJournal};
 
 /// Reason an [`LlmHealthProbe::wait_for_ready`] call ended without
 /// observing `ReadyState::Ready`.

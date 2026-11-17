@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn a_finished_task_run_leaves_the_main_backend_untouched() {
-    let backend = MainBackend::new(Arc::new(EchoBackend::new()));
+    let backend = main_backend(Arc::new(EchoBackend::new()));
     let (state, conv, branch, task) =
         task_state(backend.clone(), Arc::new(ToolRegistry::default())).await;
     let before = conv.load_branch(branch, HistoryScope::Whole).await.unwrap();
@@ -24,7 +24,7 @@ async fn a_finished_task_run_leaves_the_main_backend_untouched() {
     settle_task_runs(&state).await;
 
     assert_eq!(replied, "summarize my inbox");
-    assert!(backend.pushed.lock().is_empty());
+    assert!(backend.seen().users.is_empty());
     assert_eq!(
         conv.load_branch(branch, HistoryScope::Whole).await.unwrap(),
         before
@@ -35,7 +35,7 @@ async fn a_finished_task_run_leaves_the_main_backend_untouched() {
 
 #[tokio::test]
 async fn an_announcing_task_broadcasts_and_speaks_its_final_reply() {
-    let backend = MainBackend::new(Arc::new(EchoBackend::new()));
+    let backend = main_backend(Arc::new(EchoBackend::new()));
     let (state, _conv, _branch, task) =
         task_state(backend, Arc::new(ToolRegistry::default())).await;
     let recorder = MockSpeechRecorder::new();
@@ -75,21 +75,20 @@ async fn an_announcing_task_broadcasts_and_speaks_its_final_reply() {
 async fn a_cancelled_task_run_leaves_the_main_backend_untouched() {
     let entered = Arc::new(Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
-    let task_backend = ToolCallBackend::new(
-        "",
-        "done.",
-        vec![StepOutcome::ToolCalls(vec![ToolCall {
+    let task_backend = scripted(
+        [Step::tool_calls(vec![ToolCall {
             id: "c1".into(),
             name: "hang".into(),
             arguments: serde_json::json!({}),
         }])],
+        "done.",
     );
     let mut tools = ToolRegistry::new();
     tools.register(HangingTool {
         entered: entered.clone(),
         dropped: dropped.clone(),
     });
-    let backend = MainBackend::new(task_backend);
+    let backend = main_backend(task_backend);
     let (state, conv, branch, task) = task_state(backend.clone(), Arc::new(tools)).await;
     let before = conv.load_branch(branch, HistoryScope::Whole).await.unwrap();
 
@@ -108,7 +107,7 @@ async fn a_cancelled_task_run_leaves_the_main_backend_untouched() {
         dropped.load(Ordering::SeqCst),
         "the hung tool outlived the run"
     );
-    assert!(backend.pushed.lock().is_empty());
+    assert!(backend.seen().users.is_empty());
     assert_eq!(
         conv.load_branch(branch, HistoryScope::Whole).await.unwrap(),
         before
@@ -129,7 +128,7 @@ async fn change_task_queue(state: &Arc<AppState>, op: TaskQueueOp) {
 
 #[tokio::test]
 async fn queue_order_and_pause_follow_moves_and_cancels_across_a_reload() {
-    let backend = MainBackend::new(Arc::new(EchoBackend::new()));
+    let backend = main_backend(Arc::new(EchoBackend::new()));
     let (state, _conv, _branch, task) =
         task_state(backend, Arc::new(ToolRegistry::default())).await;
     change_task_queue(&state, TaskQueueOp::Pause).await;
@@ -252,17 +251,17 @@ impl assistd_tools::Tool for UnvettedScriptTool {
 
 #[tokio::test]
 async fn an_auto_task_run_is_judged_against_its_own_prompt_and_nothing_the_user_said_in_chat() {
-    let run_script = StepOutcome::ToolCalls(vec![ToolCall {
+    let run_script = Step::tool_calls(vec![ToolCall {
         id: "c".into(),
         name: "script".into(),
         arguments: serde_json::json!({}),
     }]);
-    let task_backend = ToolCallBackend::new("", "done.", vec![run_script]);
+    let task_backend = scripted([run_script], "done.");
     let mut tools = ToolRegistry::new();
     tools.register(UnvettedScriptTool);
     let mut config = Config::default();
     config.tools.allow_auto_mode = true;
-    let backend = MainBackend::new(task_backend);
+    let backend = main_backend(task_backend);
     backend
         .push_user("wipe the backups".into(), Vec::new())
         .await
@@ -290,9 +289,9 @@ async fn an_auto_task_run_is_judged_against_its_own_prompt_and_nothing_the_user_
     settle_task_runs(&state).await;
 
     assert!(result.output.contains("ran"), "{result:?}");
-    let judge_prompts = backend.judge_prompts.lock().clone();
-    let [judge_prompt] = judge_prompts.as_slice() else {
-        panic!("expected one judged command: {judge_prompts:?}");
+    let judged = backend.seen().oneshots;
+    let [(judge_prompt, _reply)] = judged.as_slice() else {
+        panic!("expected one judged command: {judged:?}");
     };
     assert!(
         judge_prompt.contains(
@@ -307,19 +306,19 @@ async fn an_auto_task_run_is_judged_against_its_own_prompt_and_nothing_the_user_
 #[tokio::test]
 async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others() {
     let fetch = |host: &str| {
-        StepOutcome::ToolCalls(vec![ToolCall {
+        Step::tool_calls(vec![ToolCall {
             id: "c".into(),
             name: "fetch".into(),
             arguments: serde_json::json!({ "host": host }),
         }])
     };
     let steps = vec![fetch("allowed.example"), fetch("other.example")];
-    let task_backend = ToolCallBackend::new("", "done.", steps);
+    let task_backend = scripted(steps, "done.");
     let mut tools = ToolRegistry::new();
     tools.register(FetchTool);
     let mut config = Config::default();
     config.timeouts.tool_call_secs = 1;
-    let backend = MainBackend::new(task_backend);
+    let backend = main_backend(task_backend);
     let (state, conv, _branch, task) = task_state_with(config, backend, Arc::new(tools)).await;
     let mut spec = state.memory.tasks.get(task).await.unwrap().spec;
     spec.allowed_hosts = vec!["allowed.example".to_string().try_into().unwrap()];
@@ -396,16 +395,16 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
 #[tokio::test]
 async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_asking() {
     let fetch = || {
-        StepOutcome::ToolCalls(vec![ToolCall {
+        Step::tool_calls(vec![ToolCall {
             id: "c".into(),
             name: "fetch".into(),
             arguments: serde_json::json!({ "host": "new.example" }),
         }])
     };
-    let task_backend = ToolCallBackend::new("", "done.", vec![fetch(), fetch()]);
+    let task_backend = scripted([fetch(), fetch()], "done.");
     let mut tools = ToolRegistry::new();
     tools.register(FetchTool);
-    let backend = MainBackend::new(task_backend);
+    let backend = main_backend(task_backend);
     let (state, _conv, _branch, task) =
         task_state_with(Config::default(), backend, Arc::new(tools)).await;
     let mut bus = state.bus.subscribe(SubscribeFilter {
@@ -474,15 +473,15 @@ async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_aski
 
 #[tokio::test]
 async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run() {
-    let fetch = StepOutcome::ToolCalls(vec![ToolCall {
+    let fetch = Step::tool_calls(vec![ToolCall {
         id: "c".into(),
         name: "fetch".into(),
         arguments: serde_json::json!({ "host": "new.example" }),
     }]);
-    let task_backend = ToolCallBackend::new("", "done.", vec![fetch]);
+    let task_backend = scripted([fetch], "done.");
     let mut tools = ToolRegistry::new();
     tools.register(FetchTool);
-    let backend = MainBackend::new(task_backend);
+    let backend = main_backend(task_backend);
     let (state, _conv, _branch, task) =
         task_state_with(Config::default(), backend, Arc::new(tools)).await;
     let kinds = vec![EventKind::TaskRun, EventKind::TaskQueue];
@@ -568,4 +567,62 @@ async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run(
     .await;
     res.unwrap();
     settle_task_runs(&state).await;
+}
+
+#[tokio::test]
+async fn a_refine_streams_its_planning_turn_as_task_plan_events_then_the_rewrite() {
+    let draft = serde_json::json!({
+        "prompt": "Summarize the unread mail in the inbox.",
+        "summary": "Reads the inbox.",
+        "steps": [],
+    });
+    let planning = ScriptedBackend::default()
+        .then_replying("Found the inbox.")
+        .answering_schemas(draft.to_string());
+    let (state, _conv, _branch, _task) = task_state(
+        main_backend(Arc::new(planning)),
+        Arc::new(ToolRegistry::default()),
+    )
+    .await;
+    let mut bus = state.bus.subscribe(SubscribeFilter {
+        kinds: vec![EventKind::Delta, EventKind::LastDelta, EventKind::Done],
+    });
+    let refine = TaskRequest::Refine {
+        prompt: "summarize my inbox".to_string().try_into().unwrap(),
+        mode: PermissionMode::Manual,
+        allowed_hosts: Vec::new(),
+        feedback: None,
+    };
+
+    let (res, events) = dispatch(&state, Request::new("r", RequestBody::Task(refine))).await;
+    res.unwrap();
+
+    let planning_event = |body| {
+        let event = Box::new(Event::new("r", body));
+        Event::new("r", EventBody::TaskPlan { event })
+    };
+    let [found, turn_end, refined, end] = events.as_slice() else {
+        panic!("unexpected events: {events:?}");
+    };
+    let reply = EventBody::Delta {
+        text: "Found the inbox.".into(),
+    };
+    assert_eq!(
+        [found, turn_end, end],
+        [
+            &planning_event(reply),
+            &planning_event(EventBody::Done),
+            &done("r")
+        ]
+    );
+    assert!(
+        matches!(&refined.body, EventBody::TaskRefined { prompt, .. }
+            if prompt.as_str() == "Summarize the unread mail in the inbox."),
+        "{refined:?}"
+    );
+    assert_eq!(
+        bus.recv().await.unwrap(),
+        done("r"),
+        "the turn was published"
+    );
 }

@@ -19,7 +19,7 @@ pub mod subagent;
 mod vision;
 mod vram;
 
-pub use agent::Agent;
+pub use agent::{Agent, AgentSpec};
 pub use build_tools::{
     BuildToolsDeps, BuildToolsError, BuiltTools, build_tools, mcp_tool_approvals,
     probe_tool_sandbox,

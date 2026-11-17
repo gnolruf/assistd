@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -15,12 +15,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use assistd_ipc::{RelayEvent, StatusKind};
-use assistd_llm::{LlmBackend, LlmError, LlmEvent, LlmHealthProbe, SlotAssignment, TurnBackend};
+use assistd_llm::{LlmBackend, LlmError, LlmEvent, SlotAssignment, TurnBackend};
 use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{ToolRegistry, TurnContext};
 use assistd_utils::time::saturating_millis;
 
-use crate::agent::Agent;
+use crate::agent::AgentSpec;
 
 mod report;
 
@@ -71,22 +71,13 @@ struct FinalAnswer {
 #[derive(Debug)]
 pub struct SubAgentRunner {
     parent: Arc<dyn LlmBackend>,
-    health: Option<Arc<dyn LlmHealthProbe>>,
-    tool_deadline: Duration,
+    agents: AgentSpec,
 }
 
 impl SubAgentRunner {
-    /// A runner beside `parent`; `health` and `tool_deadline` act as they do for [`Agent`].
-    pub fn new(
-        parent: Arc<dyn LlmBackend>,
-        health: Option<Arc<dyn LlmHealthProbe>>,
-        tool_deadline: Duration,
-    ) -> Self {
-        Self {
-            parent,
-            health,
-            tool_deadline,
-        }
+    /// A runner beside `parent` whose runs are driven by agents built from `agents`.
+    pub fn new(parent: Arc<dyn LlmBackend>, agents: AgentSpec) -> Self {
+        Self { parent, agents }
     }
 
     /// Run `task` on a backend with an empty history, `system_prompt` and `tools` until the model
@@ -106,12 +97,9 @@ impl SubAgentRunner {
         let backend = self
             .parent
             .isolated_backend(system_prompt, SlotAssignment::Unassigned)?;
-        let agent = Agent::new(
-            Arc::clone(&backend) as Arc<dyn TurnBackend>,
-            tools,
-            self.health.clone(),
-            self.tool_deadline,
-        );
+        let agent = self
+            .agents
+            .agent(Arc::clone(&backend) as Arc<dyn TurnBackend>, tools);
         let (tx, rx) = mpsc::channel(EVENT_BUFFER);
         let (outcome, finished) = tokio::join!(
             agent.run_turn(turn, task, Vec::new(), tx, cancel.clone()),

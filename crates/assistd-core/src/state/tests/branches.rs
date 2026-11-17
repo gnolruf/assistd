@@ -259,11 +259,7 @@ async fn resume_or_new_keeps_an_unsaved_session() {
 
 #[tokio::test]
 async fn narration_from_a_truncated_step_is_not_persisted() {
-    let backend = ToolCallBackend::new(
-        "Cut off mid-",
-        "All done.",
-        vec![StepOutcome::Truncated, StepOutcome::Final],
-    );
+    let backend = scripted([Step::truncated().saying("Cut off mid-")], "All done.");
     let (state, conv, _session, branch) = branch_state_with(backend, echo_tools()).await;
     let (res, _) = dispatch(&state, query("rq", "go")).await;
     res.unwrap();
@@ -289,13 +285,13 @@ async fn narration_from_a_truncated_step_is_not_persisted() {
 
 #[tokio::test]
 async fn step_with_parallel_calls_persists_as_one_assistant_row() {
-    let backend = ToolCallBackend::new(
-        "Checking both.",
-        "All done.",
-        vec![StepOutcome::ToolCalls(vec![
+    let backend = scripted(
+        [Step::tool_calls(vec![
             run_call("call-a", "echo a"),
             run_call("call-b", "echo b"),
-        ])],
+        ])
+        .saying("Checking both.")],
+        "All done.",
     );
     let (state, conv, _session, branch) = branch_state_with(backend, echo_tools()).await;
     let (res, _) = dispatch(&state, query("rq", "go")).await;

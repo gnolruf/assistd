@@ -26,6 +26,7 @@ use self::tasks::TaskDeps;
 use self::turn_admission::TurnAdmission;
 use self::voice_handlers::HeardPrompt;
 use crate::PresenceError;
+use crate::agent::AgentSpec;
 use crate::bus::{EventBus, EventSink};
 use crate::judge::BackendJudgeModel;
 use crate::planner::{PlanError, Planner};
@@ -238,7 +239,8 @@ impl AppState {
             embed_wake,
             Arc::clone(&session_ctx),
         ));
-        let planner = Arc::new(planner(&config, &subsystems));
+        let agents = agent_spec(&config, &subsystems);
+        let planner = Arc::new(planner(&config, &subsystems, agents.clone()));
         let tasks = TaskService::new(TaskDeps {
             config: Arc::clone(&config),
             store: Arc::clone(&memory.tasks),
@@ -250,6 +252,7 @@ impl AppState {
             presence: Arc::clone(&subsystems.presence),
             vision_revalidator: subsystems.vision_revalidator.clone(),
             tools: Arc::clone(&subsystems.tools),
+            agents: agents.clone(),
             planner: Arc::clone(&planner),
             slot_stash: subsystems.slot_stash.clone(),
             voice: Arc::clone(&subsystems.voice),
@@ -275,6 +278,7 @@ impl AppState {
             llm: Arc::clone(&subsystems.llm),
             presence: Arc::clone(&subsystems.presence),
             tools: Arc::clone(&subsystems.tools),
+            agents,
             planner,
             vision_revalidator: subsystems.vision_revalidator.clone(),
             voice: Arc::clone(&subsystems.voice),
@@ -512,16 +516,24 @@ impl AppState {
     }
 }
 
-/// The planner every planning turn and task refine goes through.
-fn planner(config: &Config, subsystems: &Subsystems) -> Planner {
+/// What every agent in the daemon is built with: replays wait on the presence manager's
+/// llama-server, and a tool call gets `timeouts.tool_call_secs`.
+fn agent_spec(config: &Config, subsystems: &Subsystems) -> AgentSpec {
     let health: Arc<dyn LlmHealthProbe> = Arc::new(PresenceLlmHealthProbe::new(Arc::clone(
         &subsystems.presence,
     )));
+    AgentSpec {
+        health: Some(health),
+        tool_deadline: Duration::from_secs(config.timeouts.tool_call_secs),
+    }
+}
+
+/// The planner every planning turn and task refine goes through.
+fn planner(config: &Config, subsystems: &Subsystems, agents: AgentSpec) -> Planner {
     Planner::new(
         subsystems.planning.clone(),
         Arc::clone(&subsystems.tools),
-        Some(health),
-        Duration::from_secs(config.timeouts.tool_call_secs),
+        agents,
         config.tools.allow_auto_mode,
     )
 }
