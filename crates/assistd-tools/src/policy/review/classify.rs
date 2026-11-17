@@ -3,9 +3,10 @@
 //! "always allow" approvals, and lists the paths those programs read, write, delete or change
 //! the mode or owner of, and the paths an unvetted command names.
 
+use std::mem;
 use std::path::Path;
 
-use super::options::{self, Flag, Walked};
+use super::options::{self, Flag, OptionSpec, Walked};
 use super::placeholder::{self, Placeholder, XARGS_ARG_FILE_OPTIONS};
 use super::programs::{self, EditProgram, Operands, ReadOnlyProgram, Targets, Wrapper};
 use super::{
@@ -40,6 +41,12 @@ const EXPORTING_DECLARATIONS: &[&str] = &["declare", "local", "readonly", "types
 /// included; a glob only matches existing entries below its directory.
 const ANY_PATH_CHARS: &[char] = &['$', '`', '{'];
 
+/// `cd`'s options, which it reads up to its directory.
+const CD_OPTIONS: OptionSpec = OptionSpec {
+    flags: "LPe@",
+    ..OptionSpec::LEADING
+};
+
 /// `env`'s options that change the directory its command runs in.
 const ENV_CHDIR: &[Flag] = &[Flag::Short('C'), Flag::Long("chdir")];
 
@@ -51,6 +58,15 @@ const SHELLS: &[&str] = &["ash", "bash", "dash", "ksh", "mksh", "sh", "zsh"];
 
 /// Paths a redirection opens as a network connection to the host and port below them.
 const NETWORK_PATHS: &[&str] = &["/dev/tcp/", "/dev/udp/"];
+
+/// Builtins bash in POSIX mode runs in place of a function of the same name.
+const SPECIAL_BUILTINS: &[&str] = &[
+    ".", ":", "break", "continue", "eval", "exec", "exit", "export", "readonly", "return", "set",
+    "shift", "source", "times", "trap", "unset",
+];
+
+/// How many directories a script may be in at one point before where it is counts as unknown.
+const MAX_DIRECTORIES: usize = 16;
 
 /// What a script may do, as far as the read-only and edit lists can tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +136,9 @@ struct Invocation {
     fed: bool,
     /// `find` or `xargs` runs it once per item, where or with what it chooses.
     per_item: bool,
+    /// A wrapper or `find` runs it, so it is no call of a function the script defines and
+    /// changes nothing in the script's shell.
+    wrapped: bool,
     placeholders: Vec<Placeholder>,
 }
 
@@ -139,25 +158,63 @@ struct Position<'s> {
 }
 
 /// The directory relative paths are resolved against, as far as the script shows.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 enum Directory {
-    /// The one the script started in.
-    #[default]
-    Start,
-    /// One a literal `cd` entered, as written, joined to any earlier one.
-    At(String),
+    /// One of these: `None` is the one the script started in, and the others ones a literal
+    /// `cd` entered, as written, joined to any earlier one.
+    OneOf(Vec<Option<String>>),
     Unknown,
 }
 
+impl Default for Directory {
+    fn default() -> Self {
+        Self::OneOf(vec![None])
+    }
+}
+
 impl Directory {
-    fn entered(&self, dir: String) -> Self {
+    fn is_start(&self) -> bool {
+        matches!(self, Self::OneOf(dirs) if dirs.as_slice() == [None])
+    }
+
+    /// Where a `cd dir` that succeeds leads from here.
+    fn entered(&self, dir: &str) -> Self {
         match self {
-            _ if dir.starts_with(['/', '~']) => Self::At(dir),
-            Self::Start => Self::At(dir),
-            Self::At(current) => Self::At(joined_path(current, &dir)),
+            _ if dir.starts_with(['/', '~']) => Self::OneOf(vec![Some(dir.to_string())]),
+            Self::OneOf(dirs) => Self::OneOf(
+                dirs.iter()
+                    .map(|from| Some(below(from.as_deref(), dir)))
+                    .collect(),
+            ),
             Self::Unknown => Self::Unknown,
         }
     }
+
+    /// Here or `other`, whichever the script is in.
+    fn or(self, other: Self) -> Self {
+        let (Self::OneOf(mut dirs), Self::OneOf(others)) = (self, other) else {
+            return Self::Unknown;
+        };
+        for dir in others {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        if dirs.len() > MAX_DIRECTORIES {
+            Self::Unknown
+        } else {
+            Self::OneOf(dirs)
+        }
+    }
+}
+
+/// A `cd` the classifier followed, which may have failed.
+#[derive(Debug)]
+struct FollowedCd {
+    /// Where the script stays if it failed.
+    otherwise: Directory,
+    /// The commands before this index run only if it succeeded.
+    required_until: usize,
 }
 
 #[derive(Default)]
@@ -168,6 +225,17 @@ struct Classifier<'a> {
     carried: Vec<String>,
     runs_edit_program: bool,
     directory: Directory,
+    /// The last `cd` followed, until a command runs whether or not it succeeded.
+    unsettled_cd: Option<FollowedCd>,
+    /// The command being classified may run after commands that follow it: it is in a function
+    /// body, a loop or a `trap` action.
+    runs_later: bool,
+    /// The first relative target named by a command that runs later.
+    relative_run_later: Option<String>,
+    /// Names taken to run a function the script defines.
+    called_functions: Vec<String>,
+    /// Names given to `unset`, any of which may be a function's.
+    unset_names: Vec<String>,
     /// The script may change `HOME`, so `$HOME` is not `~`.
     home_changed: bool,
     /// The script may change `CDPATH`, so where `cd` goes is unknown.
@@ -199,6 +267,11 @@ impl Classifier<'_> {
         self.home_changed |= changes(&script, "HOME");
         self.cdpath_changed |= changes(&script, "CDPATH");
         for (index, cmd) in script.commands.iter().enumerate() {
+            if depth == 0 {
+                self.settle_cd(index);
+            }
+            let ran_later = self.runs_later;
+            self.runs_later |= script.runs_later(index);
             let redirected = self.redirects(cmd);
             self.vet(redirected);
             let position = Position {
@@ -213,8 +286,17 @@ impl Classifier<'_> {
             if self.unvetted_findings > findings {
                 self.handed(position);
             }
+            self.runs_later = ran_later;
         }
         Ok(())
+    }
+
+    /// Once the command at `index` runs whether or not the last `cd` followed succeeded, the
+    /// script may also be where that `cd` left.
+    fn settle_cd(&mut self, index: usize) {
+        if let Some(cd) = self.unsettled_cd.take_if(|cd| index >= cd.required_until) {
+            self.directory = mem::take(&mut self.directory).or(cd.otherwise);
+        }
     }
 
     /// Keep the first reason a command is unvetted, and go on collecting effects.
@@ -274,7 +356,7 @@ impl Classifier<'_> {
                 ));
             }
             let target = spelled(&redirect.target, self.home_changed);
-            self.target(Action::Write, target, false);
+            self.target(Action::Write, &target, false);
         }
         Ok(())
     }
@@ -290,7 +372,7 @@ impl Classifier<'_> {
             let named = static_path(&word, self.home_changed)
                 .or_else(|| every_entry_of(&spelled(&word, self.home_changed)));
             if let Some(path) = named {
-                self.target(Action::Unknown, path, true);
+                self.target(Action::Unknown, &path, true);
             }
         }
         let scripts = commands(words, start)
@@ -347,6 +429,7 @@ impl Classifier<'_> {
             let feeds = program(&word.text) == FEEDS_ARGUMENTS;
             invocation.fed |= feeds;
             invocation.per_item |= feeds || per_item_runner(word).is_some();
+            invocation.wrapped = true;
             invocation
                 .placeholders
                 .extend(placeholder::placeholders(word, args));
@@ -372,7 +455,12 @@ impl Classifier<'_> {
         if is_command_line(word) {
             return self.script(name, position.depth + 1);
         }
-        if (!word.quoted && KEYWORDS.contains(&name)) || defines(position, name) {
+        let calls_function =
+            !invocation.wrapped && !SPECIAL_BUILTINS.contains(&name) && defines(position, name);
+        if calls_function {
+            self.called_functions.push(name.to_string());
+        }
+        if (!word.quoted && KEYWORDS.contains(&name)) || calls_function {
             return Ok(());
         }
         if let Some(why) = evaluated::by_builtin(name, args) {
@@ -380,12 +468,12 @@ impl Classifier<'_> {
         }
         match name {
             "eval" => self.script(&joined(args), position.depth + 1),
-            "trap" => args
-                .iter()
-                .find(|arg| !arg.text.starts_with('-'))
-                .map_or(Ok(()), |action| {
-                    self.script(&action.text, position.depth + 1)
-                }),
+            "trap" => self.trapped(args, position),
+            "unset" => {
+                self.unset_names
+                    .extend(args.iter().map(|arg| arg.text.clone()));
+                Ok(())
+            }
             "source" | "." => self.sourced(word, args.first(), position),
             "alias" if !args.is_empty() => {
                 Err("`alias` defines commands the lists cannot see".into())
@@ -394,7 +482,7 @@ impl Classifier<'_> {
                 Err("`hash -p` makes a command name run another program".into())
             }
             _ if CHANGES_DIRECTORY.contains(&name) => {
-                self.change_directory(name, args);
+                self.change_directory(name, args, position, invocation.wrapped);
                 Ok(())
             }
             _ if SAFE_BUILTINS.contains(&name) => Ok(()),
@@ -402,21 +490,48 @@ impl Classifier<'_> {
         }
     }
 
-    /// Follow `cd DIR` when `DIR` is literal; any other change leaves the directory unknown.
-    fn change_directory(&mut self, name: &str, args: &[Word]) {
-        let operand = args
-            .iter()
-            .find(|arg| arg.text == "-" || !arg.text.starts_with('-'));
-        let entered = match (name, operand) {
-            ("cd", None) => Some("~".to_string()),
-            ("cd", Some(dir)) if dir.text != "-" => static_path(dir, self.home_changed)
+    /// Classify the action a `trap` sets, which runs later.
+    fn trapped(&mut self, args: &[Word], position: Position<'_>) -> Result<(), String> {
+        let Some(action) = args.iter().find(|arg| !arg.text.starts_with('-')) else {
+            return Ok(());
+        };
+        let ran_later = mem::replace(&mut self.runs_later, true);
+        let outcome = self.script(&action.text, position.depth + 1);
+        self.runs_later = ran_later;
+        outcome
+    }
+
+    /// Follow `cd DIR` when `DIR` is literal and the script's own shell always runs it, unless
+    /// `wrapped`; any other change leaves the directory unknown. Either way, where a command
+    /// that runs later named a relative target is no longer known.
+    fn change_directory(
+        &mut self,
+        name: &str,
+        args: &[Word],
+        position: Position<'_>,
+        wrapped: bool,
+    ) {
+        let always_runs = position.depth == 0 && position.cmd.unconditional && !wrapped;
+        let walked = options::walk(&CD_OPTIONS, args);
+        let entered = match (name, walked.operands.as_slice()) {
+            _ if !always_runs || walked.unlisted.is_some() => None,
+            ("cd", []) => Some("~".to_string()),
+            ("cd", &[dir]) if args[dir].text != "-" => static_path(&args[dir], self.home_changed)
                 .filter(|dir| !self.cdpath_changed || dir.starts_with(['/', '~', '.'])),
             _ => None,
         };
-        self.directory = match entered {
-            Some(dir) => self.directory.entered(dir),
-            None => Directory::Unknown,
+        if self.relative_after_cd.is_none() {
+            self.relative_after_cd = self.relative_run_later.clone();
+        }
+        let Some(dir) = entered else {
+            self.directory = Directory::Unknown;
+            return;
         };
+        let entered = self.directory.entered(&dir);
+        self.unsettled_cd = Some(FollowedCd {
+            otherwise: mem::replace(&mut self.directory, entered),
+            required_until: position.cmd.required_until,
+        });
     }
 
     /// Classify `word file`, where `word` is `source` or `.`.
@@ -568,7 +683,7 @@ impl Classifier<'_> {
             self.read(&args[at], recursive);
         }
         if recursive && files.is_empty() {
-            self.target(Action::Read, ".".to_string(), true);
+            self.target(Action::Read, ".", true);
         }
         self.unseen_operand(args, walked, patterns)
             .or_else(|| self.unseen_operand(args, walked, &filled))
@@ -610,7 +725,7 @@ impl Classifier<'_> {
             ));
         }
         if walked.operands.is_empty() {
-            self.target(Action::Read, ".".to_string(), true);
+            self.target(Action::Read, ".", true);
         }
         for &start in &walked.operands {
             self.read(&args[start], true);
@@ -641,7 +756,7 @@ impl Classifier<'_> {
     /// and one an expansion may send anywhere leaves the script unvetted.
     fn read(&mut self, word: &Word, recursive: bool) {
         match static_path(word, self.home_changed) {
-            Some(path) => self.target(Action::Read, path, recursive),
+            Some(path) => self.target(Action::Read, &path, recursive),
             None => {
                 let spelled = spelled(word, self.home_changed);
                 if spelled.contains(ANY_PATH_CHARS) {
@@ -650,7 +765,7 @@ impl Classifier<'_> {
                         word.text
                     )));
                 }
-                self.target(Action::Read, static_prefix(&spelled), true);
+                self.target(Action::Read, &static_prefix(&spelled), true);
             }
         }
     }
@@ -695,14 +810,14 @@ impl Classifier<'_> {
 
     fn each(&mut self, action: Action, paths: &[String], recursive: bool) {
         for path in paths {
-            self.target(action, path.clone(), recursive);
+            self.target(action, path, recursive);
         }
     }
 
     /// Record `action` on each of a copy's or move's `sources`, and that it lands elsewhere.
     fn carry(&mut self, action: Action, sources: &[String], recursive: bool) {
         for source in sources {
-            if let Some(path) = self.placed(action, source.clone()) {
+            for path in self.placed(action, source) {
                 self.carried.push(path.clone());
                 self.effects.push(Effect {
                     action,
@@ -715,42 +830,47 @@ impl Classifier<'_> {
 
     /// Record writes of `destination` and of where each source lands if it is a directory.
     fn copied_into(&mut self, destination: &str, sources: &[String], recursive: bool) {
-        self.target(Action::Write, destination.to_string(), recursive);
+        self.target(Action::Write, destination, recursive);
         for name in sources
             .iter()
             .map(|source| basename(source))
             .filter(|name| !matches!(*name, "" | "." | ".."))
         {
-            self.target(Action::Write, joined_path(destination, name), recursive);
+            self.target(Action::Write, &joined_path(destination, name), recursive);
         }
     }
 
-    /// Record an effect on `path` where the script's directory places it.
-    fn target(&mut self, action: Action, path: String, recursive: bool) {
-        if let Some(path) = self.placed(action, path) {
-            self.effects.push(Effect {
-                action,
-                path,
-                recursive,
-            });
-        }
+    /// Record an effect on `path` wherever the script's directory places it.
+    fn target(&mut self, action: Action, path: &str, recursive: bool) {
+        let placed = self.placed(action, path);
+        self.effects.extend(placed.into_iter().map(|path| Effect {
+            action,
+            path,
+            recursive,
+        }));
     }
 
-    /// `path`, joined to the directory a `cd` entered when relative; `None`, noting the path,
-    /// when that directory is unknown.
-    fn placed(&mut self, action: Action, path: String) -> Option<String> {
-        let relative = is_relative(&path);
-        let moved = !matches!(self.directory, Directory::Start);
+    /// `path`, when relative, below each directory the script may be in; nowhere, noting the
+    /// path, when that directory is unknown.
+    fn placed(&mut self, action: Action, path: &str) -> Vec<String> {
+        if !is_relative(path) {
+            return vec![path.to_string()];
+        }
         let unknown = matches!(self.directory, Directory::Unknown);
-        let vetted = action != Action::Unknown;
-        if vetted && relative && (unknown || (moved && action != Action::Read)) {
-            self.relative_after_cd.get_or_insert_with(|| path.clone());
+        let moved = !self.directory.is_start();
+        if action != Action::Unknown {
+            if unknown || (moved && action != Action::Read) {
+                self.relative_after_cd
+                    .get_or_insert_with(|| path.to_string());
+            }
+            if self.runs_later {
+                self.relative_run_later
+                    .get_or_insert_with(|| path.to_string());
+            }
         }
         match &self.directory {
-            _ if !relative => Some(path),
-            Directory::Start => Some(path),
-            Directory::At(dir) => Some(joined_path(dir, &path)),
-            Directory::Unknown => None,
+            Directory::OneOf(dirs) => dirs.iter().map(|dir| below(dir.as_deref(), path)).collect(),
+            Directory::Unknown => Vec::new(),
         }
     }
 
@@ -760,13 +880,20 @@ impl Classifier<'_> {
             .iter()
             .find(|effect| self.home_changed && effect.path.starts_with('~'))
             .map(|effect| changed_home_why(&effect.path));
+        let unset_function = self
+            .called_functions
+            .iter()
+            .find(|name| self.unset_names.contains(name))
+            .map(|name| unset_function_why(name));
         let approvable = !self.unapprovable
             && outcome.is_ok()
+            && unset_function.is_none()
             && self.relative_after_cd.is_none()
             && below_changed_home.is_none();
         let why = self
             .unvetted
             .or(outcome.err())
+            .or(unset_function)
             .or_else(|| self.relative_after_cd.as_deref().map(changed_directory_why))
             .or(below_changed_home);
         let class = match why {
@@ -807,6 +934,10 @@ pub fn analyze(script: &str, scratch: Option<&Path>, approvals: Option<&Allowlis
 
 fn changed_directory_why(path: &str) -> String {
     format!("the script changes directory, so where `{path}` is cannot be known")
+}
+
+fn unset_function_why(name: &str) -> String {
+    format!("the script may unset the function `{name}`, so what `{name}` runs cannot be known")
 }
 
 fn changed_home_why(path: &str) -> String {
@@ -1038,6 +1169,11 @@ fn joined_path(dir: &str, name: &str) -> String {
     format!("{}/{name}", dir.trim_end_matches('/'))
 }
 
+/// The relative `path` below `dir`, or as written below the directory the script started in.
+fn below(dir: Option<&str>, path: &str) -> String {
+    dir.map_or_else(|| path.to_string(), |dir| joined_path(dir, path))
+}
+
 /// The wrapper `word` runs as: a reserved-word wrapper only when unquoted.
 fn run_as_wrapper(word: &Word) -> Option<&'static Wrapper> {
     let name = word.text.as_str();
@@ -1227,6 +1363,22 @@ mod tests {
         "strings @list",
         "HOME=/home/u/.ssh; cat ~/id_ed25519",
         "HOME=/home/u/.ssh; cd; cat id_ed25519",
+        "rm() { :; }; env rm -rf ~/Documents",
+        "false && python3() { :; }; python3 -c 'print(1)'",
+        "(rm() { :; }); rm -rf ~/Documents",
+        "rm() { :; } | cat; rm -rf ~/Documents",
+        "function rm\n{ :; } & rm -rf ~/Documents",
+        "cd ~; (cd /tmp); cat .ssh/id_ed25519",
+        "cd ~; false && cd /tmp; cat .ssh/id_ed25519",
+        "cd ~; env cd /tmp; cat .ssh/id_ed25519",
+        "rm() { :; } && true & rm -rf ~/Documents",
+        "cd /tmp && true & cat .ssh/id_ed25519",
+        "rm() { :; }; unset -f rm; rm -rf ~/Documents",
+        "rm() { :; }; g() { rm -rf ~/Documents; }; unset rm; g",
+        "eval() { :; }; set -o posix; eval 'rm -rf ~/Documents'",
+        "f() { cat .ssh/id_ed25519; }; cd ~; f",
+        "trap 'cat .ssh/id_ed25519' EXIT; cd ~",
+        "for i in 1 2; do cat .ssh/id_ed25519; cd ~; done",
         "timeout -v 5 python3 -c'print(1)'",
         "timeout --foreground 5 python3 -c'print(1)'",
         "timeout -v 5 dd if=/dev/null of=FILE",
@@ -1525,6 +1677,7 @@ mod tests {
         "sort -t: -k2,2n a | head -n 5 | cut -d' ' -f1",
         "grep -rn --include='*.rs' -e TODO -A 2 src",
         "find . -type f -name '*.rs' -newer a -exec grep -l -e x {} +",
+        "f() { ls; }\ng() (f)\nfunction h\n{ g; }\nf | sort; h; cd sub && cat x",
     ];
 
     /// What a script does to a path other than read it, and whether throughout.
@@ -1643,6 +1796,34 @@ mod tests {
                 matches!(classify(script, Some(scratch)), Class::Unvetted { .. }),
                 "{script:?}"
             );
+        }
+    }
+
+    #[test]
+    fn reads_after_a_cd_are_recorded_wherever_it_may_have_left_the_script() {
+        let cases: &[(&str, &[&str])] = &[
+            ("cd ~/proj && cat a | sort", &["~/proj/a"]),
+            (
+                "cd /nonexistent; cat .ssh/id_ed25519",
+                &["/nonexistent/.ssh/id_ed25519", ".ssh/id_ed25519"],
+            ),
+            ("! cd /nonexistent && cat a", &["/nonexistent/a", "a"]),
+            ("cd -P -- -x && cat a", &["-x/a"]),
+            (
+                "cd proj && true || cat a\ncd sub && cat b",
+                &["proj/a", "a", "proj/sub/b", "sub/b"],
+            ),
+        ];
+        for (script, reads) in cases {
+            let analysis = analyze(script, None, None);
+            let read: Vec<&str> = analysis
+                .effects
+                .iter()
+                .filter(|effect| effect.action == Action::Read)
+                .map(|effect| effect.path.as_str())
+                .collect();
+            assert_eq!(analysis.class, Class::ReadOnly, "{script:?}");
+            assert_eq!(read, *reads, "{script:?}");
         }
     }
 

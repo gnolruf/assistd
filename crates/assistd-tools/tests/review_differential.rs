@@ -436,6 +436,7 @@ const READ_FORMS: &[&str] = &[
     "HOME=/tmp/run; cat ~/work/guarded",
     "HOME=/tmp/run/work/sub; cat ~/../guarded",
     "HOME=/tmp/run; cd; cat work/guarded",
+    "mkdir -- -P; cd -- -P && cat ../guarded",
     "cat < /dev/tcp/127.0.0.1/9",
     "exec 3< /dev/tcp/127.0.0.1/9",
     r#": < "/dev/tcp/127.0.0.1/9""#,
@@ -461,7 +462,8 @@ const READ_FORMS: &[&str] = &[
 /// Programs that run a command; their shims run the real program.
 const REAL_WRAPPERS: &[&str] = &["env", "find", "nice", "nohup", "stdbuf", "timeout", "xargs"];
 
-/// Where each corpus script is placed, at `@@`, besides on its own.
+/// Where each corpus script is placed, at `@@`, besides on its own; the last ones define a
+/// function or change directory where it never takes effect or stops holding, then go on.
 const CONTEXTS: &[&str] = &[
     "@@",
     "( @@\n)",
@@ -486,10 +488,30 @@ const CONTEXTS: &[&str] = &[
     "exec @@",
     "echo a | xargs @@",
     "find . -name a -exec @@ \\;",
+    "false && q() {\n@@\n}\nq",
+    "(q() {\n@@\n})\nq",
+    "q() {\n@@\n} | cat\nq",
+    "q() {\n@@\n}\nenv q",
+    "(cd /tmp)\n@@",
+    "false && cd /tmp\n@@",
+    "env cd /tmp\n@@",
+    "q() {\n@@\n} && true &\nwait\nq",
+    "cd / && true &\nwait\n@@",
+    "q() {\n@@\n}\nunset -f q\nq",
+    "cd /nonexistent\n@@",
+    "! cd /nonexistent && {\n@@\n}",
+    "cd /\nq() {\n@@\n}\ncd ~\nq",
+    "cd /\nfor i in 1 2; do\n@@\ncd ~\ndone",
 ];
 
 /// Contexts that single-quote the script for a builtin to evaluate.
-const QUOTED_CONTEXTS: &[&str] = &["eval '@@'", "trap '@@' EXIT", "command eval '@@'"];
+const QUOTED_CONTEXTS: &[&str] = &[
+    "eval '@@'",
+    "trap '@@' EXIT",
+    "command eval '@@'",
+    "eval() { :; }; set -o posix; eval '@@'",
+    "cd /; trap '@@' EXIT; cd ~",
+];
 
 const PLACEHOLDER: &str = "@@";
 
