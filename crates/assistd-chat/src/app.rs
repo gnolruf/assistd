@@ -259,6 +259,9 @@ pub(super) struct App {
     pub reply_started_at: Option<Instant>,
     /// Whether the daemon expects to compact history during the open reply.
     pub compacting_soon: bool,
+    /// How many task-queue items the open reply waits behind; `None` once its turn has
+    /// the model.
+    pub queued_behind: Option<u32>,
     pub quitting: bool,
     pub spinner: usize,
     /// Transient message shown in the input rule and when it was set.
@@ -509,6 +512,7 @@ impl App {
             model_name,
             reply_started_at: None,
             compacting_soon: false,
+            queued_behind: None,
             quitting: false,
             spinner: 0,
             notice: None,

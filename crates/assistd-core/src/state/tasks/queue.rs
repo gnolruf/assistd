@@ -49,7 +49,7 @@ impl TaskQueue {
         self.state.subscribe()
     }
 
-    /// Add `run` of `task` last, its events tagged with `request_id`.
+    /// Add `run` of `task`, which request `request_id` queued, last.
     pub(in crate::state) fn push(&self, run: TaskRunId, task: TaskRecord, request_id: String) {
         self.state.send_modify(|state| {
             state.waiting.push(Waiting::Run(QueuedRun {
@@ -192,23 +192,6 @@ impl TaskQueue {
             queued.stage = RunStage::NeedsInput(Box::new(prompt));
             true
         });
-    }
-
-    /// Each running run paused on a confirmation nobody has answered yet.
-    pub(in crate::state) fn paused_runs(&self) -> Vec<PausedRun> {
-        self.state
-            .borrow()
-            .running
-            .iter()
-            .filter_map(|queued| match &queued.stage {
-                RunStage::NeedsInput(prompt) => Some(PausedRun {
-                    run: queued.run,
-                    request_id: queued.request_id.clone(),
-                    prompt: PausedPrompt::clone(prompt),
-                }),
-                RunStage::Active | RunStage::Resuming => None,
-            })
-            .collect()
     }
 
     /// Put running run `run`, which gave up its lane to wait on a confirmation or the user's
@@ -382,14 +365,6 @@ impl TaskQueue {
     }
 }
 
-/// A running run paused on `prompt`, with the request id its events are tagged with.
-#[derive(Debug)]
-pub(in crate::state) struct PausedRun {
-    pub(in crate::state) run: TaskRunId,
-    pub(in crate::state) request_id: String,
-    pub(in crate::state) prompt: PausedPrompt,
-}
-
 /// What a queued user turn is handed when it may run: the main lane, and its place in
 /// the user's interaction, which holds the queue from then on.
 #[derive(Debug)]
@@ -445,7 +420,7 @@ struct QueuedTurn {
     start: oneshot::Sender<TurnStart>,
 }
 
-/// One unfinished run, with the request id its events are tagged with.
+/// One unfinished run, with the id of the request that queued it.
 #[derive(Debug, Clone)]
 pub(in crate::state) struct QueuedRun {
     pub(in crate::state) run: TaskRunId,

@@ -10,7 +10,6 @@ use assistd_utils::readiness::ReadinessCell;
 use assistd_voice::VoiceManager;
 
 use super::subsystems::McpServerStatus;
-use super::tasks::TaskService;
 use super::turn_admission::TurnAdmission;
 use crate::bus::EventBus;
 use crate::presence::PresenceManager;
@@ -29,6 +28,5 @@ pub struct StatusService {
     pub(super) web_search: Arc<ReadinessCell<ChildServerStatus>>,
     pub(super) embedder: Arc<EmbedderHandle>,
     pub(super) admission: Arc<TurnAdmission>,
-    pub(super) tasks: Arc<TaskService>,
     pub(super) bus: EventBus,
 }

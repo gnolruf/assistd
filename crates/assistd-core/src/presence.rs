@@ -326,9 +326,14 @@ impl PresenceManager {
         self.wake().await
     }
 
-    /// Acquire a [`RequestGuard`] that holds the daemon `Active`, waking it
-    /// first if needed. While a wake runs, emits `ModelLoading` status on
-    /// `tx` every few seconds. Cancel-safe: dropping it leaves the wake running.
+    /// Acquire a [`RequestGuard`] that holds the daemon `Active`, waking it first if
+    /// needed. Cancel-safe: dropping it leaves the wake running.
+    pub async fn acquire_request_guard(self: &Arc<Self>) -> Result<RequestGuard, PresenceError> {
+        self.acquire_request_guard_inner(None).await
+    }
+
+    /// [`Self::acquire_request_guard`], emitting `ModelLoading` status on `tx` every few
+    /// seconds while a wake runs.
     pub async fn acquire_request_guard_with_progress(
         self: &Arc<Self>,
         request_id: String,

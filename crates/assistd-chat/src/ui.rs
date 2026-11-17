@@ -638,6 +638,7 @@ fn render_thumbnails(
 /// Spinner row for an open reply with its elapsed time, the turn's tokens,
 /// the history's current size and its total including compacted
 /// history, plus a warning when the daemon is about to compact history.
+/// Says what the reply waits behind while its turn is queued.
 fn render_generating_row(
     frame: &mut Frame<'_>,
     row: Rect,
@@ -657,8 +658,12 @@ fn render_generating_row(
             compact_count(total)
         ),
     };
+    let activity = match app.queued_behind {
+        Some(behind) => format!("Waiting behind {behind} in the task queue…"),
+        None => "Generating…".to_string(),
+    };
     let mut spans = vec![Span::styled(
-        format!("{} Generating… ({progress})", app.spinner_char()),
+        format!("{} {activity} ({progress})", app.spinner_char()),
         theme.aside_style(),
     )];
     if app.compacting_soon {

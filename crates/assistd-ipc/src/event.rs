@@ -37,7 +37,6 @@ pub enum EventKind {
     Readiness,
     ContextSize,
     Relay,
-    TaskRun,
     TaskQueue,
     TaskReply,
 }
@@ -147,7 +146,6 @@ impl Event {
             EventBody::Readiness { .. } => EventKind::Readiness,
             EventBody::ContextSize { .. } => EventKind::ContextSize,
             EventBody::Relay { .. } => EventKind::Relay,
-            EventBody::TaskRun { .. } => EventKind::TaskRun,
             EventBody::TaskQueue { .. } => EventKind::TaskQueue,
             EventBody::TaskReply { .. } => EventKind::TaskReply,
             EventBody::VoiceOutputState { .. }
@@ -174,7 +172,6 @@ impl Event {
             | EventBody::TaskRunQueued { .. }
             | EventBody::Queued { .. }
             | EventBody::TaskRefined { .. }
-            | EventBody::TaskPlan { .. }
             | EventBody::TriggerFires { .. }
             | EventBody::McpAuthorizeUrl { .. }
             | EventBody::McpServer { .. }
@@ -387,8 +384,6 @@ pub enum EventBody {
     TaskRunRecord { record: TaskRunRecord },
     /// Run `run` of `task` was queued.
     TaskRunQueued { task: TaskId, run: TaskRunId },
-    /// One event of task run `run`'s turn, which `id` queued; never terminal itself.
-    TaskRun { run: TaskRunId, event: Box<Event> },
     /// The final reply of run `run`, which request `id` queued, of a task that announces its
     /// replies; broadcast only.
     TaskReply {
@@ -410,8 +405,6 @@ pub enum EventBody {
         plan: Plan,
         recommended: ModeRecommendation,
     },
-    /// One event of the planning turn `id` asked for; never terminal itself.
-    TaskPlan { event: Box<Event> },
     /// The URL the user opens to sign MCP server `server` in.
     McpAuthorizeUrl { server: String, url: String },
     /// One configured MCP server.

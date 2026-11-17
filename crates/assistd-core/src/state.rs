@@ -310,7 +310,6 @@ impl AppState {
             web_search: Arc::clone(&subsystems.web_search),
             embedder: Arc::clone(&memory.embedder),
             admission: Arc::clone(&admission),
-            tasks: Arc::clone(&tasks),
             bus: bus.clone(),
         };
         Self {

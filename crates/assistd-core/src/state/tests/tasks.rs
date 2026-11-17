@@ -6,24 +6,13 @@ async fn a_finished_task_run_leaves_the_main_backend_untouched() {
     let (state, conv, branch, task) =
         task_state(backend.clone(), Arc::new(ToolRegistry::default())).await;
     let before = conv.load_branch(branch, HistoryScope::Whole).await.unwrap();
-    let mut bus = state.bus.subscribe(SubscribeFilter {
-        kinds: vec![EventKind::TaskRun],
-    });
 
-    let run = queue_task_run(&state, task).await;
-    let replied = loop {
-        match bus.recv().await.unwrap().body {
-            EventBody::TaskRun { run: seen, event } if seen == run => {
-                if let EventBody::Delta { text } = event.body {
-                    break text;
-                }
-            }
-            other => panic!("unexpected bus event: {other:?}"),
-        }
-    };
+    queue_task_run(&state, task).await;
+    runs_end_unasked(&state, None).await;
     settle_task_runs(&state).await;
 
-    assert_eq!(replied, "summarize my inbox");
+    let runs = state.memory.tasks.runs(task, 1).await.unwrap();
+    assert_eq!(runs[0].reply.as_deref(), Some("summarize my inbox"));
     assert!(backend.seen().users.is_empty());
     assert_eq!(
         conv.load_branch(branch, HistoryScope::Whole).await.unwrap(),
@@ -170,9 +159,11 @@ async fn queue_order_and_pause_follow_moves_and_cancels_across_a_reload() {
 }
 
 /// Asks to fetch from the `host` in its arguments, as `web` asks about a host not yet
-/// approved.
-#[derive(Debug)]
-struct FetchTool;
+/// approved, and records how each call ended.
+#[derive(Debug, Default)]
+struct FetchTool {
+    outcomes: Arc<StdMutex<Vec<&'static str>>>,
+}
 
 #[async_trait::async_trait]
 impl assistd_tools::Tool for FetchTool {
@@ -201,16 +192,18 @@ impl assistd_tools::Tool for FetchTool {
             source: assistd_tools::ConfirmSource::Main,
         };
         let approved = IpcConfirmationGate.confirm(turn, request).await != Approval::Deny;
-        Ok(ToolOutput::text(
-            if approved { "fetched" } else { "denied" },
-            Duration::ZERO,
-        ))
+        let outcome = if approved { "fetched" } else { "denied" };
+        self.outcomes.lock().push(outcome);
+        Ok(ToolOutput::text(outcome, Duration::ZERO))
     }
 }
 
-/// Asks before running a script that only the safety judge can approve unasked.
-#[derive(Debug)]
-struct UnvettedScriptTool;
+/// Asks before running a script that only the safety judge can approve unasked, and
+/// records how each call ended.
+#[derive(Debug, Default)]
+struct UnvettedScriptTool {
+    outcomes: Arc<StdMutex<Vec<&'static str>>>,
+}
 
 #[async_trait::async_trait]
 impl assistd_tools::Tool for UnvettedScriptTool {
@@ -242,10 +235,9 @@ impl assistd_tools::Tool for UnvettedScriptTool {
             source: assistd_tools::ConfirmSource::Main,
         };
         let approved = IpcConfirmationGate.confirm(turn, request).await != Approval::Deny;
-        Ok(ToolOutput::text(
-            if approved { "ran" } else { "denied" },
-            Duration::ZERO,
-        ))
+        let outcome = if approved { "ran" } else { "denied" };
+        self.outcomes.lock().push(outcome);
+        Ok(ToolOutput::text(outcome, Duration::ZERO))
     }
 }
 
@@ -257,8 +249,10 @@ async fn an_auto_task_run_is_judged_against_its_own_prompt_and_nothing_the_user_
         arguments: serde_json::json!({}),
     }]);
     let task_backend = scripted([run_script], "done.");
+    let script_tool = UnvettedScriptTool::default();
+    let outcomes = Arc::clone(&script_tool.outcomes);
     let mut tools = ToolRegistry::new();
-    tools.register(UnvettedScriptTool);
+    tools.register(script_tool);
     let mut config = Config::default();
     config.tools.allow_auto_mode = true;
     let backend = main_backend(task_backend);
@@ -271,24 +265,12 @@ async fn an_auto_task_run_is_judged_against_its_own_prompt_and_nothing_the_user_
     let mut spec = state.memory.tasks.get(task).await.unwrap().spec;
     spec.mode = PermissionMode::Auto;
     state.memory.tasks.save(Some(task), spec).await.unwrap();
-    let mut bus = state.bus.subscribe(SubscribeFilter {
-        kinds: vec![EventKind::TaskRun],
-    });
 
     queue_task_run(&state, task).await;
-    let result = loop {
-        let EventBody::TaskRun { event, .. } = bus.recv().await.unwrap().body else {
-            continue;
-        };
-        match event.body {
-            EventBody::ConfirmRequest { script, .. } => panic!("asked the user: {script}"),
-            EventBody::ToolResult { result, .. } => break result,
-            _ => {}
-        }
-    };
+    runs_end_unasked(&state, None).await;
     settle_task_runs(&state).await;
 
-    assert!(result.output.contains("ran"), "{result:?}");
+    assert_eq!(*outcomes.lock(), ["ran"]);
     let judged = backend.seen().oneshots;
     let [(judge_prompt, _reply)] = judged.as_slice() else {
         panic!("expected one judged command: {judged:?}");
@@ -314,8 +296,10 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
     };
     let steps = vec![fetch("allowed.example"), fetch("other.example")];
     let task_backend = scripted(steps, "done.");
+    let fetch_tool = FetchTool::default();
+    let outcomes = Arc::clone(&fetch_tool.outcomes);
     let mut tools = ToolRegistry::new();
-    tools.register(FetchTool);
+    tools.register(fetch_tool);
     let mut config = Config::default();
     config.timeouts.tool_call_secs = 1;
     let backend = main_backend(task_backend);
@@ -323,26 +307,15 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
     let mut spec = state.memory.tasks.get(task).await.unwrap().spec;
     spec.allowed_hosts = vec!["allowed.example".to_string().try_into().unwrap()];
     state.memory.tasks.save(Some(task), spec).await.unwrap();
-    let mut bus = state.bus.subscribe(SubscribeFilter {
-        kinds: vec![EventKind::TaskRun],
-    });
 
     let run = queue_task_run(&state, task).await;
-    let mut results = Vec::new();
-    let (confirm_id, script) = loop {
-        let EventBody::TaskRun { event, .. } = bus.recv().await.unwrap().body else {
-            continue;
-        };
-        match event.body {
-            EventBody::ConfirmRequest {
-                confirm_id, script, ..
-            } => break (confirm_id, script),
-            EventBody::ToolResult { result, .. } => results.push(result),
-            _ => {}
-        }
-    };
-    assert_eq!(script, "web fetch https://other.example");
-    assert_eq!(results.len(), 1, "the allowed host was fetched unasked");
+    let prompt = await_task_queue(&state, paused_prompt).await;
+    assert_eq!(prompt.script, "web fetch https://other.example");
+    assert_eq!(
+        *outcomes.lock(),
+        ["fetched"],
+        "the allowed host was fetched unasked"
+    );
     assert_eq!(queued_runs(&state), [(run, TaskRunState::NeedsInput)]);
     assert!(
         state
@@ -362,7 +335,7 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
             "a",
             RequestBody::Task(TaskRequest::Confirm {
                 run,
-                confirm_id,
+                confirm_id: prompt.confirm_id.clone(),
                 allow: true,
                 always: false,
             }),
@@ -371,23 +344,13 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
     .await;
     res.unwrap();
     assert_eq!(events, [done("a")]);
-    while results.len() < 2 {
-        let EventBody::TaskRun { event, .. } = bus.recv().await.unwrap().body else {
-            continue;
-        };
-        match event.body {
-            EventBody::ConfirmRequest { script, .. } => panic!("asked again: {script}"),
-            EventBody::ToolResult { result, .. } => results.push(result),
-            _ => {}
-        }
-    }
+    runs_end_unasked(&state, Some(&prompt.confirm_id)).await;
     settle_task_runs(&state).await;
 
-    assert!(
-        results
-            .iter()
-            .all(|result| result.output.contains("fetched")),
-        "the parked fetch outlived the tool deadline: {results:?}"
+    assert_eq!(
+        *outcomes.lock(),
+        ["fetched", "fetched"],
+        "the parked fetch outlived the tool deadline"
     );
     assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
 }
@@ -402,26 +365,16 @@ async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_aski
         }])
     };
     let task_backend = scripted([fetch(), fetch()], "done.");
+    let fetch_tool = FetchTool::default();
+    let outcomes = Arc::clone(&fetch_tool.outcomes);
     let mut tools = ToolRegistry::new();
-    tools.register(FetchTool);
+    tools.register(fetch_tool);
     let backend = main_backend(task_backend);
     let (state, _conv, _branch, task) =
         task_state_with(Config::default(), backend, Arc::new(tools)).await;
-    let mut bus = state.bus.subscribe(SubscribeFilter {
-        kinds: vec![EventKind::TaskRun, EventKind::TaskQueue],
-    });
 
     let run = queue_task_run(&state, task).await;
-    let prompt = loop {
-        if let EventBody::TaskQueue { snapshot } = bus.recv().await.unwrap().body
-            && let Some(prompt) = snapshot.items.into_iter().find_map(|item| match item {
-                QueueItem::Run { prompt, .. } => prompt,
-                QueueItem::UserTurn { .. } => None,
-            })
-        {
-            break prompt;
-        }
-    };
+    let prompt = await_task_queue(&state, paused_prompt).await;
     assert_eq!(
         prompt.host.as_ref().map(HostName::as_str),
         Some("new.example")
@@ -455,24 +408,13 @@ async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_aski
         panic!("unexpected events: {events:?}");
     };
     assert_eq!(spec.allowed_hosts, [prompt.host.clone().unwrap()]);
-    let mut fetched = 0;
-    while fetched < 2 {
-        let EventBody::TaskRun { event, .. } = bus.recv().await.unwrap().body else {
-            continue;
-        };
-        match event.body {
-            EventBody::ConfirmRequest { confirm_id, .. } if confirm_id != prompt.confirm_id => {
-                panic!("asked again about an allowed host")
-            }
-            EventBody::ToolResult { .. } => fetched += 1,
-            _ => {}
-        }
-    }
+    runs_end_unasked(&state, Some(&prompt.confirm_id)).await;
     settle_task_runs(&state).await;
+    assert_eq!(*outcomes.lock(), ["fetched", "fetched"]);
 }
 
 #[tokio::test]
-async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run() {
+async fn a_lagged_subscriber_is_resent_the_queue_with_the_prompt_of_a_paused_run() {
     let fetch = Step::tool_calls(vec![ToolCall {
         id: "c".into(),
         name: "fetch".into(),
@@ -480,27 +422,23 @@ async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run(
     }]);
     let task_backend = scripted([fetch], "done.");
     let mut tools = ToolRegistry::new();
-    tools.register(FetchTool);
+    tools.register(FetchTool::default());
     let backend = main_backend(task_backend);
     let (state, _conv, _branch, task) =
         task_state_with(Config::default(), backend, Arc::new(tools)).await;
-    let kinds = vec![EventKind::TaskRun, EventKind::TaskQueue];
-    let mut bus = state.bus.subscribe(SubscribeFilter {
-        kinds: kinds.clone(),
-    });
     let run = queue_task_run(&state, task).await;
-    while !matches!(bus.recv().await.unwrap().body, EventBody::TaskRun { event, .. }
-        if matches!(event.body, EventBody::ConfirmRequest { .. }))
-    {}
-    drop(bus);
+    let paused_on = await_task_queue(&state, paused_prompt).await;
 
     let (tx, mut rx) = mpsc::channel(1);
     let daemon = Arc::clone(&state);
     let subscriber = tokio::spawn(async move {
         let unpublished = EventSink::unpublished(tx);
+        let filter = SubscribeFilter {
+            kinds: vec![EventKind::TaskQueue],
+        };
         daemon
             .status
-            .handle_subscribe("sub".into(), SubscribeFilter { kinds }, unpublished)
+            .handle_subscribe("sub".into(), filter, unpublished)
             .await;
     });
     assert!(matches!(
@@ -527,28 +465,8 @@ async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run(
         panic!("no queue snapshot after the lag");
     };
     assert_eq!(id, "sub");
-    let prompt = snapshot
-        .items
-        .into_iter()
-        .find_map(|item| match item {
-            QueueItem::Run { prompt, .. } => prompt,
-            QueueItem::UserTurn { .. } => None,
-        })
-        .expect("the snapshot carries the paused prompt");
-    let Some(Event {
-        body: EventBody::TaskRun {
-            run: prompted,
-            event,
-        },
-        ..
-    }) = rx.recv().await
-    else {
-        panic!("the paused prompt was not resent");
-    };
-    let EventBody::ConfirmRequest { confirm_id, .. } = event.body else {
-        panic!("resent {event:?} instead of the prompt");
-    };
-    assert_eq!((prompted, confirm_id), (run, prompt.confirm_id.clone()));
+    let prompt = paused_prompt(snapshot).expect("the snapshot carries the paused prompt");
+    assert_eq!(prompt, paused_on);
 
     drop(rx);
     subscriber.await.unwrap();
@@ -570,7 +488,7 @@ async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run(
 }
 
 #[tokio::test]
-async fn a_refine_streams_its_planning_turn_as_task_plan_events_then_the_rewrite() {
+async fn a_refine_sends_the_rewrite_and_none_of_its_planning_turn() {
     let draft = serde_json::json!({
         "prompt": "Summarize the unread mail in the inbox.",
         "summary": "Reads the inbox.",
@@ -597,24 +515,10 @@ async fn a_refine_streams_its_planning_turn_as_task_plan_events_then_the_rewrite
     let (res, events) = dispatch(&state, Request::new("r", RequestBody::Task(refine))).await;
     res.unwrap();
 
-    let planning_event = |body| {
-        let event = Box::new(Event::new("r", body));
-        Event::new("r", EventBody::TaskPlan { event })
-    };
-    let [found, turn_end, refined, end] = events.as_slice() else {
+    let [refined, end] = events.as_slice() else {
         panic!("unexpected events: {events:?}");
     };
-    let reply = EventBody::Delta {
-        text: "Found the inbox.".into(),
-    };
-    assert_eq!(
-        [found, turn_end, end],
-        [
-            &planning_event(reply),
-            &planning_event(EventBody::Done),
-            &done("r")
-        ]
-    );
+    assert_eq!(end, &done("r"));
     assert!(
         matches!(&refined.body, EventBody::TaskRefined { prompt, .. }
             if prompt.as_str() == "Summarize the unread mail in the inbox."),

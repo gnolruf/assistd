@@ -20,7 +20,6 @@ use assistd_tools::YieldableLane;
 
 use super::lanes::LaneLease;
 use super::tasks::TaskService;
-use crate::bus::EventSink;
 use crate::presence::RequestGuard;
 use crate::recovery::{Component, StatusSeverity};
 
@@ -33,12 +32,9 @@ pub(crate) struct RunLane {
     pub(in crate::state) tasks: Arc<TaskService>,
     pub(in crate::state) task: TaskId,
     pub(in crate::state) run: TaskRunId,
-    /// Tags the run's events.
-    pub(in crate::state) request_id: String,
     pub(in crate::state) held: LaneHold,
     /// The run's backend, moved to the slot of each lane it regains.
     pub(in crate::state) backend: Arc<dyn LlmBackend>,
-    pub(in crate::state) events: EventSink,
     pub(in crate::state) cancel: CancellationToken,
 }
 
@@ -93,11 +89,7 @@ impl RunLane {
         };
         self.backend
             .move_to_slot(lease.slot(SlotHolder::TaskRun(self.run)));
-        let awake = match self
-            .tasks
-            .wake_for_task_run(&self.request_id, &self.events, &self.cancel)
-            .await
-        {
+        let awake = match self.tasks.wake_for_task_run(None, &self.cancel).await {
             Ok(Some(awake)) => Some(awake),
             Ok(None) => return false,
             Err(e) => {

@@ -1,5 +1,5 @@
 //! `TurnDriver`: carries one turn's agent events to its sink, the transcript and the
-//! speech worker, for user turns, task runs and planning turns alike.
+//! speech worker, for user turns and task runs alike.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
