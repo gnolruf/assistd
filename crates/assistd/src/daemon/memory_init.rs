@@ -9,15 +9,15 @@ use anyhow::{Context, Result};
 use assistd_core::branch_replay;
 use assistd_llm::HistoryReplay;
 use assistd_memory::{
-    BranchHistory, BranchId, HistoryScope, MemoryStore, SessionId, SqliteHandle, SqliteMemoryStore,
-    SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore,
+    BranchHistory, BranchId, HistoryScope, MemoryStore, SessionId, SqliteHandle,
+    SqliteTranscriptStore, TaskStore, TranscriptStore,
 };
 use tracing::info;
 
 pub(super) struct MemorySubsystem {
-    pub memory_store: Arc<dyn MemoryStore>,
+    pub memory_store: Arc<MemoryStore>,
     pub transcript_store: Arc<dyn TranscriptStore>,
-    pub task_store: Arc<dyn TaskStore>,
+    pub task_store: Arc<TaskStore>,
     pub session_id: SessionId,
     /// `None` for an unsaved session, inserted with its first message.
     pub branch_id: Option<BranchId>,
@@ -51,7 +51,7 @@ pub(super) async fn init(embedding_enabled: bool) -> Result<MemorySubsystem> {
     })?;
 
     let transcripts = Arc::new(transcript_store(handle.clone(), embedding_enabled).await);
-    let mem_store = Arc::new(SqliteMemoryStore::new(handle.clone()));
+    let mem_store = Arc::new(MemoryStore::new(handle.clone()));
     let (session_id, branch_id, resumed_history) =
         resume_or_start_unsaved_session(transcripts.as_ref(), &db_path).await;
     let relay_answer_files = transcripts
@@ -64,7 +64,7 @@ pub(super) async fn init(embedding_enabled: bool) -> Result<MemorySubsystem> {
     Ok(MemorySubsystem {
         memory_store: mem_store,
         transcript_store: transcripts,
-        task_store: Arc::new(SqliteTaskStore::new(handle.clone())),
+        task_store: Arc::new(TaskStore::new(handle.clone())),
         session_id,
         branch_id,
         resumed_history,

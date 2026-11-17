@@ -1,5 +1,5 @@
 use super::*;
-use crate::sqlite::{SqliteMemoryStore, SqliteTranscriptStore};
+use crate::sqlite::SqliteTranscriptStore;
 use crate::{BranchId, MemoryStore, MessageId, PersistedMessage, PersistedRole, TranscriptStore};
 
 /// The stamp of a file no test has touched since it was indexed.
@@ -81,7 +81,7 @@ async fn embed_chunk(store: &SqliteSemanticStore, chunk_id: ChunkId, vector: &[f
 }
 
 async fn save_memory(handle: &SqliteHandle, key: &str, value: &str) -> MemoryId {
-    SqliteMemoryStore::new(handle.clone())
+    MemoryStore::new(handle.clone())
         .save(key, value.into())
         .await
         .unwrap()
@@ -625,7 +625,7 @@ async fn batch_skips_targets_deleted_before_it_lands() {
     let (handle, store, _temp) = fresh().await;
     let kept = save_memory(&handle, "kept", "v").await;
     let deleted = save_memory(&handle, "deleted", "v").await;
-    SqliteMemoryStore::new(handle.clone())
+    MemoryStore::new(handle.clone())
         .delete("deleted")
         .await
         .unwrap();

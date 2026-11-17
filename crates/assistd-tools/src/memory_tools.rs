@@ -543,9 +543,9 @@ mod tests {
     use assistd_embed::EmbedError;
     use assistd_memory::{
         AdjacentChunks, BranchId, BranchSummary, ChunkId, Embedding, EmbeddingSpace,
-        EmbeddingTarget, FileStamp, IndexPass, MemoryError, MemoryId, MemoryStore, NoMemoryStore,
-        NoSemanticStore, NoTranscriptStore, PersistedMessage, Seq, SqliteHandle, SqliteMemoryStore,
-        SqliteSemanticStore, SqliteTranscriptStore, UnindexedRows,
+        EmbeddingTarget, FileStamp, IndexPass, MemoryError, MemoryId, MemoryStore, NoSemanticStore,
+        PersistedMessage, Seq, SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore,
+        UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -677,12 +677,13 @@ mod tests {
     #[tokio::test]
     async fn reminisce_excludes_the_in_context_part_of_the_session_in_progress() {
         let spy = Arc::new(ScopeSpy::default());
+        let (ops, _dir) = fresh_ops().await;
         let first = SessionId::new();
         let (session_tx, session_rx) = watch::channel(first);
         let tool = ReminisceTool::new(
             ready(Arc::new(FixedEmbedder)),
             spy.clone(),
-            Arc::new(NoTranscriptStore),
+            ops.transcripts.clone(),
             session_rx,
         );
         let query = json!({"query": "the rust daemon", "limit": 3, "session": null});
@@ -897,16 +898,9 @@ mod tests {
         let handle = SqliteHandle::open(&temp.path().join("memory.db"))
             .await
             .unwrap();
-        let mem: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(handle.clone()));
+        let mem = Arc::new(MemoryStore::new(handle.clone()));
         let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle));
         (Arc::new(MemoryOps::new(mem, conv)), temp)
-    }
-
-    fn no_ops() -> Arc<MemoryOps> {
-        Arc::new(MemoryOps::new(
-            Arc::new(NoMemoryStore),
-            Arc::new(NoTranscriptStore),
-        ))
     }
 
     fn remember_tool(ops: Arc<MemoryOps>) -> RememberTool {
@@ -949,7 +943,8 @@ mod tests {
 
     #[tokio::test]
     async fn remember_rejects_invalid_key() {
-        let tool = remember_tool(no_ops());
+        let (ops, _dir) = fresh_ops().await;
+        let tool = remember_tool(ops);
         for bad in ["has spaces", "Editor_Pref", "trailing!", "slash/ed", ""] {
             let err = tool
                 .invoke(
@@ -968,7 +963,8 @@ mod tests {
 
     #[tokio::test]
     async fn remember_save_needs_a_key_but_search_does_not() {
-        let tool = remember_tool(no_ops());
+        let (ops, _dir) = fresh_ops().await;
+        let tool = remember_tool(ops);
         let err = tool
             .invoke(
                 &TurnContext::default(),
@@ -994,14 +990,16 @@ mod tests {
 
     /// Strict mode requires every declared property to be listed as
     /// required and no others to be accepted.
-    #[test]
-    fn schemas_satisfy_strict_mode() {
+    #[tokio::test]
+    async fn schemas_satisfy_strict_mode() {
+        let (ops, _dir) = fresh_ops().await;
+        let transcripts = ops.transcripts.clone();
         let tools: [Box<dyn Tool>; 2] = [
-            Box::new(remember_tool(no_ops())),
+            Box::new(remember_tool(ops)),
             Box::new(ReminisceTool::new(
                 no_embedder(),
                 no_semantic(),
-                Arc::new(NoTranscriptStore),
+                transcripts,
                 watch::channel(SessionId::new()).1,
             )),
         ];

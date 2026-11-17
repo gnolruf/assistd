@@ -717,27 +717,28 @@ mod tests {
     use assistd_ipc::{PresenceState, PresenceTarget};
 
     use super::*;
-    use crate::PresenceManager;
+    use crate::state::tests::TestState;
+    use crate::{PresenceManager, Subsystems};
 
-    fn test_state() -> Arc<AppState> {
-        state_with_backend(Arc::new(assistd_llm::EchoBackend::new()))
+    async fn test_state() -> TestState {
+        state_with_backend(Arc::new(assistd_llm::EchoBackend::new())).await
     }
 
-    fn state_with_backend(backend: Arc<dyn assistd_llm::LlmBackend>) -> Arc<AppState> {
-        state_with(backend, Arc::new(assistd_tools::ToolRegistry::default()))
+    async fn state_with_backend(backend: Arc<dyn assistd_llm::LlmBackend>) -> TestState {
+        state_with(backend, Arc::new(assistd_tools::ToolRegistry::default())).await
     }
 
-    fn state_with(
+    async fn state_with(
         backend: Arc<dyn assistd_llm::LlmBackend>,
         tools: Arc<assistd_tools::ToolRegistry>,
-    ) -> Arc<AppState> {
-        Arc::new(AppState::new(
-            Config::default(),
+    ) -> TestState {
+        let subsystems = Subsystems::new(
             backend,
             PresenceManager::stub(PresenceTarget::Active),
             tools,
             assistd_voice::VoiceManager::new(true),
-        ))
+        );
+        TestState::unsaved(Config::default(), subsystems).await
     }
 
     /// A `serve_at` task on a socket in a fresh temp dir.
@@ -749,7 +750,8 @@ mod tests {
     }
 
     impl TestServer {
-        async fn start(state: Arc<AppState>) -> Self {
+        async fn start(state: &TestState) -> Self {
+            let state = Arc::clone(state);
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("assistd.sock");
             let (shutdown, rx) = oneshot::channel::<()>();
@@ -776,7 +778,7 @@ mod tests {
         }
     }
 
-    async fn with_server<F, Fut, R>(state: Arc<AppState>, body: F) -> R
+    async fn with_server<F, Fut, R>(state: &TestState, body: F) -> R
     where
         F: FnOnce(PathBuf) -> Fut,
         Fut: Future<Output = R>,
@@ -875,7 +877,7 @@ mod tests {
 
     #[tokio::test]
     async fn echoes_query_text_as_delta_then_done() {
-        let server = TestServer::start(test_state()).await;
+        let server = TestServer::start(&test_state().await).await;
         let events = send_request_collect_events(
             &server.path,
             r#"{"type":"query","id":"req-1","text":"ping"}"#,
@@ -890,7 +892,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_connections_sharing_a_request_id_stay_isolated() {
-        with_server(test_state(), |path| async move {
+        with_server(&test_state().await, |path| async move {
             let mut handles = Vec::new();
             for i in 0..16 {
                 let p = path.clone();
@@ -911,7 +913,7 @@ mod tests {
     #[tokio::test]
     async fn first_frame_may_pass_the_control_cap_only_as_a_query() {
         let past_control_cap = "a".repeat(usize::try_from(MAX_CONTROL_REQUEST_BYTES).unwrap());
-        with_server(test_state(), |path| async move {
+        with_server(&test_state().await, |path| async move {
             let query = format!(r#"{{"text":"{past_control_cap}","type":"query","id":"q"}}"#);
             let events = send_request_collect_events(&path, &query).await;
             assert_eq!(events, [delta("q", &past_control_cap), done("q")]);
@@ -937,7 +939,7 @@ mod tests {
 
     #[tokio::test]
     async fn frame_past_the_request_cap_is_rejected() {
-        let event = with_server(test_state(), |path| async move {
+        let event = with_server(&test_state().await, |path| async move {
             let stream = UnixStream::connect(&path).await.unwrap();
             let (read, mut write) = stream.into_split();
             write_past_cap(&mut write, MAX_REQUEST_BYTES).await;
@@ -972,7 +974,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_request_returns_error_event() {
-        with_server(test_state(), |path| async move {
+        with_server(&test_state().await, |path| async move {
             let events = send_request_collect_events(&path, "not json").await;
             assert!(
                 matches!(
@@ -988,11 +990,16 @@ mod tests {
 
     #[tokio::test]
     async fn second_serve_refuses_to_clobber_live_socket() {
-        let server = TestServer::start(test_state()).await;
+        let server = TestServer::start(&test_state().await).await;
 
-        let err = serve_at(&server.path, test_state(), std::future::pending::<()>())
-            .await
-            .expect_err("second serve_at must fail while first is alive");
+        let second = test_state().await;
+        let err = serve_at(
+            &server.path,
+            Arc::clone(&second),
+            std::future::pending::<()>(),
+        )
+        .await
+        .expect_err("second serve_at must fail while first is alive");
         assert!(
             matches!(&err, SocketError::AlreadyRunning { path } if *path == server.path),
             "{err:?}"
@@ -1045,7 +1052,7 @@ mod tests {
 
     #[tokio::test]
     async fn socket_is_owner_only() {
-        let server = TestServer::start(test_state()).await;
+        let server = TestServer::start(&test_state().await).await;
         assert_eq!(mode_of(&server.path), SOCKET_MODE);
         server.stop().await;
     }
@@ -1056,9 +1063,11 @@ mod tests {
         let dir = temp.path().join("assistd-1000");
         let path = dir.join("assistd.sock");
         let server_path = path.clone();
+        let state = test_state().await;
+        let served = Arc::clone(&state);
         let (shutdown, rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            serve_at(&server_path, test_state(), async {
+            serve_at(&server_path, served, async {
                 let _ = rx.await;
             })
             .await
@@ -1077,9 +1086,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), Permissions::from_mode(0o777)).unwrap();
 
+        let state = test_state().await;
         let err = serve_at(
             &dir.path().join("assistd.sock"),
-            test_state(),
+            Arc::clone(&state),
             std::future::pending::<()>(),
         )
         .await
@@ -1098,9 +1108,10 @@ mod tests {
         let link = temp.path().join("link");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
+        let state = test_state().await;
         let err = serve_at(
             &link.join("assistd.sock"),
-            test_state(),
+            Arc::clone(&state),
             std::future::pending::<()>(),
         )
         .await
@@ -1215,8 +1226,9 @@ mod tests {
         let state = state_with_backend(Arc::new(SlowBackend {
             deltas: 3,
             pause: Duration::from_millis(50),
-        }));
-        let server = TestServer::start(state).await;
+        }))
+        .await;
+        let server = TestServer::start(&state).await;
         let (_write, mut reader) = open_connection(
             &server.path,
             &[r#"{"type":"query","id":"s1","text":"go"}"#],
@@ -1236,8 +1248,8 @@ mod tests {
 
     #[tokio::test]
     async fn graceful_shutdown_aborts_after_grace_timeout() {
-        let state = state_with_backend(Arc::new(StuckBackend));
-        let server = TestServer::start(state).await;
+        let state = state_with_backend(Arc::new(StuckBackend)).await;
+        let server = TestServer::start(&state).await;
         let (_write, mut reader) = open_connection(
             &server.path,
             &[r#"{"type":"query","id":"s2","text":"hang"}"#],
@@ -1270,15 +1282,15 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_receives_each_query_event_from_other_client_once() {
-        let state = test_state();
-        with_server(state.clone(), |path| async move {
+        let state = &test_state().await;
+        with_server(state, |path| async move {
             let (_write_a, mut read_a) = open_connection(
                 &path,
                 &[r#"{"type":"subscribe","id":"sub-1","filter":{"kinds":[]}}"#],
                 false,
             )
             .await;
-            wait_for_subscribers(&state, 1).await;
+            wait_for_subscribers(state, 1).await;
 
             let b_events =
                 send_request_collect_events(&path, r#"{"type":"query","id":"q-1","text":"hello"}"#)
@@ -1304,15 +1316,15 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_filter_rejects_unmatched_kinds() {
-        let state = test_state();
-        with_server(state.clone(), |path| async move {
+        let state = &test_state().await;
+        with_server(state, |path| async move {
             let (_write_a, mut read_a) = open_connection(
                 &path,
                 &[r#"{"type":"subscribe","id":"sub-2","filter":{"kinds":["presence"]}}"#],
                 false,
             )
             .await;
-            wait_for_subscribers(&state, 1).await;
+            wait_for_subscribers(state, 1).await;
 
             send_request_collect_events(&path, r#"{"type":"query","id":"q-2","text":"hi"}"#).await;
             send_request_collect_events(
@@ -1344,7 +1356,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_sees_eof_promptly_after_terminal_event() {
-        with_server(test_state(), |path| async move {
+        with_server(&test_state().await, |path| async move {
             let (_write, mut reader) = open_connection(
                 &path,
                 &[r#"{"type":"query","id":"eof-1","text":"ping"}"#],
@@ -1364,8 +1376,8 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_closes_idle_subscriber_without_waiting_out_grace() {
-        let state = test_state();
-        let server = TestServer::start(state.clone()).await;
+        let state = test_state().await;
+        let server = TestServer::start(&state).await;
         let (_write, mut reader) = open_connection(
             &server.path,
             &[r#"{"type":"subscribe","id":"sub-drain","filter":{"kinds":[]}}"#],
@@ -1489,22 +1501,17 @@ mod tests {
         }
     }
 
-    fn gated_tool_state() -> Arc<AppState> {
-        gated_tool_state_at(assistd_tools::Unattended::Never)
+    async fn gated_tool_state() -> TestState {
+        gated_tool_state_at(assistd_tools::Unattended::Never).await
     }
 
-    fn gated_tool_state_at(unattended: assistd_tools::Unattended) -> Arc<AppState> {
+    async fn gated_tool_state_at(unattended: assistd_tools::Unattended) -> TestState {
         let mut tools = assistd_tools::ToolRegistry::new();
         tools.register(GatedTool(unattended));
-        Arc::new(AppState::new(
-            Config::default(),
-            Arc::new(GatedToolBackend {
-                stepped: AtomicBool::new(false),
-            }),
-            PresenceManager::stub(PresenceTarget::Active),
-            Arc::new(tools),
-            assistd_voice::VoiceManager::new(true),
-        ))
+        let backend = Arc::new(GatedToolBackend {
+            stepped: AtomicBool::new(false),
+        });
+        state_with(backend, Arc::new(tools)).await
     }
 
     fn tool_output(ev: &Event) -> Option<&str> {
@@ -1516,7 +1523,7 @@ mod tests {
 
     #[tokio::test]
     async fn dialog_client_answer_reaches_gate_in_spawned_agent_turn() {
-        with_server(gated_tool_state(), |path| async move {
+        with_server(&gated_tool_state().await, |path| async move {
             let (mut write, mut reader) =
                 open_connection(&path, &[r#"{"type":"query","id":"q1","text":"go"}"#], false).await;
 
@@ -1549,7 +1556,7 @@ mod tests {
     #[tokio::test]
     async fn accept_edits_frame_approves_a_scoped_edit_without_a_prompt() {
         with_server(
-            gated_tool_state_at(assistd_tools::Unattended::ScopedEdit),
+            &gated_tool_state_at(assistd_tools::Unattended::ScopedEdit).await,
             |path| async move {
                 let (_write, mut reader) = open_connection(
                     &path,
@@ -1579,7 +1586,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_shot_client_eof_denies_prompt_without_waiting() {
-        with_server(gated_tool_state(), |path| async move {
+        with_server(&gated_tool_state().await, |path| async move {
             let (_write, mut reader) =
                 open_connection(&path, &[r#"{"type":"query","id":"q1","text":"go"}"#], true).await;
             let events =
@@ -1661,7 +1668,7 @@ mod tests {
     #[tokio::test]
     async fn client_disconnect_mid_turn_releases_the_turn_lock() {
         with_server(
-            state_with_backend(Arc::new(FloodBackend)),
+            &state_with_backend(Arc::new(FloodBackend)).await,
             |path| async move {
                 let (first, reader, write) = open_query_and_read_first_event(&path, "gone").await;
                 assert!(
@@ -1691,10 +1698,15 @@ mod tests {
             .write_all(b"{\"type\":\"query\",\"id\":\"bye\",\"text\":\"go\"}\n")
             .await
             .unwrap();
-        let state = state_with_backend(Arc::new(FloodBackend));
+        let state = state_with_backend(Arc::new(FloodBackend)).await;
         let (_drain_tx, drain_rx) = watch::channel(false);
         let large_frames = Arc::new(Semaphore::new(LARGE_FRAME_SLOTS));
-        let connection = tokio::spawn(handle_connection(server, state, large_frames, drain_rx));
+        let connection = tokio::spawn(handle_connection(
+            server,
+            Arc::clone(&state),
+            large_frames,
+            drain_rx,
+        ));
 
         let mut reader = BufReader::new(client_read);
         read_hello(&mut reader).await;
@@ -1832,8 +1844,8 @@ mod tests {
         tools.register(SilentHangingTool {
             dropped: dropped.clone(),
         });
-        let state = state_with(Arc::new(HangingCallBackend::default()), Arc::new(tools));
-        with_server(state, |path| async move {
+        let state = state_with(Arc::new(HangingCallBackend::default()), Arc::new(tools)).await;
+        with_server(&state, |path| async move {
             let (write, mut reader) =
                 open_connection(&path, &[r#"{"type":"query","id":"h1","text":"go"}"#], true).await;
             loop {

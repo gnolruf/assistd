@@ -1,5 +1,5 @@
-//! Persistent memory: the key/value, transcript, and semantic stores, their
-//! SQLite implementations, and no-op fallbacks for when memory is disabled.
+//! Persistent memory: the key/value, transcript, task, and semantic stores over one
+//! SQLite database, and the semantic store's no-op fallback for when embedding is off.
 
 mod chunking;
 mod error;
@@ -14,7 +14,7 @@ mod transcripts;
 
 pub use error::{BackendError, MemoryError, Result};
 pub use ids::{BranchId, ChunkId, DocumentId, MemoryId, MessageId, Seq, SessionId, TurnId};
-pub use memories::{MemoryRecord, MemoryStore, NoMemoryStore, SavedMemory};
+pub use memories::{MemoryRecord, SavedMemory};
 pub use relay_traces::{
     PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, PersistedRelayStep,
 };
@@ -24,14 +24,11 @@ pub use semantic::{
     SemanticStore, SessionScope, SourcePointer, UnindexedRows,
 };
 pub use sqlite::{
-    SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTaskStore, SqliteTranscriptStore,
+    MemoryStore, SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore, TaskStore,
 };
-pub use tasks::{
-    NoTaskStore, PrunedRuns, RecoveredQueue, TaskRecord, TaskRunEnd, TaskStore, UndecodableTask,
-    WaitingRun,
-};
+pub use tasks::{PrunedRuns, RecoveredQueue, TaskRecord, TaskRunEnd, UndecodableTask, WaitingRun};
 pub use transcripts::{
     AppendedMessage, BranchHistory, BranchInfo, BranchSummary, HistoryRow, HistoryScope,
-    MessageKind, NoTranscriptStore, OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall,
-    Reasoning, ResumeCandidate, ToolOutcome, TranscriptStore, TurnStats, UndoOutcome,
+    MessageKind, OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall, Reasoning,
+    ResumeCandidate, ToolOutcome, TranscriptStore, TurnStats, UndoOutcome,
 };

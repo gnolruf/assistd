@@ -1,31 +1,28 @@
-//! SQLite-backed [`MemoryStore`] over the `memories` table.
+//! The key/value [`MemoryStore`] over the `memories` table.
 
-use async_trait::async_trait;
 use rusqlite::{OptionalExtension, Row};
 
-use crate::{MemoryId, MemoryRecord, MemoryStore, Result, SavedMemory};
+use crate::{MemoryId, MemoryRecord, Result, SavedMemory};
 
 use super::connection::{Erasing, SqliteHandle};
 use super::timestamp::{now_millis, timestamp_at};
 
-/// SQLite-backed [`MemoryStore`].
+/// Persistent string-keyed, string-valued memory.
 #[derive(Debug, Clone)]
-pub struct SqliteMemoryStore {
+pub struct MemoryStore {
     handle: SqliteHandle,
 }
 
-impl SqliteMemoryStore {
+impl MemoryStore {
     /// Store over the shared database handle.
     pub fn new(handle: SqliteHandle) -> Self {
         Self { handle }
     }
-}
 
-#[async_trait]
-impl MemoryStore for SqliteMemoryStore {
-    /// A changed value bumps `updated_at`, drops the row's embedding (by schema
-    /// trigger), and truncates the WAL so the old value leaves no trace.
-    async fn save(&self, key: &str, value: String) -> Result<SavedMemory> {
+    /// Persist `value` under `key`, overwriting any existing value. A changed value
+    /// bumps `updated_at`, drops the row's embedding (by schema trigger), and
+    /// truncates the WAL so the old value leaves no trace.
+    pub async fn save(&self, key: &str, value: String) -> Result<SavedMemory> {
         let key = key.to_string();
         let now = now_millis();
         self.handle
@@ -52,14 +49,16 @@ impl MemoryStore for SqliteMemoryStore {
             .await
     }
 
-    async fn load(&self, key: &str) -> Result<Option<String>> {
+    /// Value stored at `key`, or `None` when absent.
+    pub async fn load(&self, key: &str) -> Result<Option<String>> {
         let key = key.to_string();
         self.handle
             .read("memory load", move |c| value_at(c, &key))
             .await
     }
 
-    async fn delete(&self, key: &str) -> Result<()> {
+    /// Remove `key`. No-op when already absent.
+    pub async fn delete(&self, key: &str) -> Result<()> {
         let key = key.to_string();
         self.handle
             .write_erasing("memory delete", move |tx| {
@@ -75,7 +74,8 @@ impl MemoryStore for SqliteMemoryStore {
             .await
     }
 
-    async fn delete_by_id(&self, id: MemoryId) -> Result<Option<String>> {
+    /// Remove the row with `id`; returns its key, or `None` when no row matched.
+    pub async fn delete_by_id(&self, id: MemoryId) -> Result<Option<String>> {
         self.handle
             .write_erasing("memory delete_by_id", move |tx| {
                 let key = tx
@@ -93,7 +93,8 @@ impl MemoryStore for SqliteMemoryStore {
             .await
     }
 
-    async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
+    /// Full rows whose key starts with `prefix` (case-sensitive), sorted by key.
+    pub async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
         let pattern = glob_prefix_pattern(prefix);
         self.handle
             .read("memory list_full", move |c| {
@@ -149,12 +150,12 @@ mod tests {
     use super::*;
 
     /// The returned temp dir must outlive the store.
-    async fn fresh() -> (SqliteMemoryStore, tempfile::TempDir) {
+    async fn fresh() -> (MemoryStore, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
         let handle = SqliteHandle::open(&temp.path().join("memory.db"))
             .await
             .unwrap();
-        (SqliteMemoryStore::new(handle), temp)
+        (MemoryStore::new(handle), temp)
     }
 
     #[tokio::test]

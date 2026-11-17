@@ -165,10 +165,13 @@ erDiagram
         text prompt
         text triggers "JSON array"
         int enabled
-        text grants "JSON array"
-        text plan "JSON, NULL until approved"
         int created_at
         int updated_at
+        int next_fire_at "NULL until computed, or when nothing is due"
+        int mode "0 manual, 1 accept edits, 2 auto"
+        text allowed_hosts "JSON array"
+        int announce
+        int kept_runs "NULL keeps the configured default"
     }
     task_runs {
         int id PK
@@ -181,6 +184,11 @@ erDiagram
         int started_at
         int ended_at "set once finished"
         text reply "the final reply, set when succeeded"
+        int queue_pos "queued runs start in this order"
+    }
+    task_queue {
+        int id PK "always 0"
+        int paused
     }
 ```
 
@@ -248,13 +256,14 @@ never outlives the text it was computed from.
 
 **`tasks`** holds saved prompts run without the user opening a
 conversation, one row per unique `name`, with the triggers that start
-them and the plan and grants approved for the prompt. Saving a task
-whose `prompt` changed clears `plan` and `grants` in the same
-transaction, so an approval never outlives the prompt it was made for.
+them, the permission mode their runs get, the hosts those runs fetch
+from unasked, and how many finished runs to keep.
 **`task_runs`** records each run: the trigger that fired it, its state,
-and, once it succeeds, its final reply. Deleting a task deletes its runs
-and their transcript sessions, except the active session, which stays
-as an ordinary one.
+its place in the queue while it waits, and, once it succeeds, its final
+reply. Deleting a task deletes its runs and their transcript sessions,
+except the active session, which stays as an ordinary one.
+**`task_queue`** has a row only once the queue has been paused or
+resumed, saying which.
 
 ## Embeddings
 
@@ -327,13 +336,15 @@ similarity by at most 0.0005.
   1024-dimension vectors per page.
 - The data directory is created `0700` and the database and its
   `-wal`, `-shm`, and `-journal` files are kept `0600`.
-- The schema version lives in `PRAGMA user_version` and migrations run
-  through `rusqlite_migration` when the database opens. A schema change
-  is a new migration appended after the existing ones.
+- The whole schema is one `rusqlite_migration` step, applied when an
+  empty database opens and recorded as version 1 in
+  `PRAGMA user_version`. A schema change is a new migration appended
+  after it.
 - The daemon refuses to start when the database cannot be opened or
-  migrated, including one written by a newer `assistd` (a `user_version`
-  above the binary's). It never runs without persistence and never
-  replaces the file itself.
+  migrated, including one whose `user_version` is above the binary's:
+  one written by a newer `assistd`, or by a release from before the
+  schema became a single version. It never runs without persistence
+  and never replaces the file itself.
 - Resetting is manual: stop the daemon and move `memory.db` and its
   `-wal` and `-shm` files aside; the next start creates an empty
   database. A schema change may require a reset instead of shipping a

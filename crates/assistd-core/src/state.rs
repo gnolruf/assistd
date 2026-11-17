@@ -15,21 +15,21 @@ use tracing::warn;
 use assistd_config::Config;
 use assistd_embed::EmbedError;
 use assistd_ipc::{Event, EventBody, Request, RequestBody, Role, TaskRequest, WakeWordOp};
-use assistd_llm::{LlmBackend, LlmError, LlmHealthProbe};
-use assistd_memory::{MemoryError, PersistedRole, SessionId};
-use assistd_tools::{JUDGE_TIMEOUT, SafetyJudge, ToolRegistry, TurnContext};
-use assistd_voice::{CaptureUnavailable, ListenError, VoiceInputError, VoiceManager};
+use assistd_llm::{LlmError, LlmHealthProbe};
+use assistd_memory::{MemoryError, PersistedRole};
+use assistd_tools::{JUDGE_TIMEOUT, SafetyJudge, TurnContext};
+use assistd_voice::{CaptureUnavailable, ListenError, VoiceInputError};
 
 use self::persistence::TranscriptLog;
 use self::query::TurnDeps;
 use self::tasks::TaskDeps;
 use self::turn_admission::TurnAdmission;
 use self::voice_handlers::HeardPrompt;
+use crate::PresenceError;
 use crate::bus::{EventBus, EventSink};
 use crate::judge::BackendJudgeModel;
 use crate::planner::{PlanError, Planner};
 use crate::presence::PresenceLlmHealthProbe;
-use crate::{PresenceError, PresenceManager};
 
 pub(crate) mod branches;
 pub(crate) mod capabilities;
@@ -217,22 +217,6 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// An `AppState` with no-op memory and embedding backends, on a new, unsaved session
-    /// with one model lane.
-    pub fn new(
-        config: Config,
-        llm: Arc<dyn LlmBackend>,
-        presence: Arc<PresenceManager>,
-        tools: Arc<ToolRegistry>,
-        voice: Arc<VoiceManager>,
-    ) -> Self {
-        let subsystems = Subsystems::new(llm, presence, tools, voice);
-        let memory = MemoryStack::disabled(config.embedding.clone());
-        let session_ctx = Arc::new(SessionContext::new(SessionId::new(), None));
-        let one_slot = watch::channel(NonZeroU32::MIN).1;
-        Self::from_parts(config, subsystems, memory, session_ctx, one_slot)
-    }
-
     /// Assemble the state over `subsystems` and `memory`, on the session `session_ctx`
     /// points at, with as many model lanes as `slots`, the server's slot count, reports.
     pub fn from_parts(
@@ -569,4 +553,4 @@ fn wire_timestamp(at: DateTime<Utc>) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

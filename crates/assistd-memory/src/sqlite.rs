@@ -11,7 +11,7 @@ mod timestamp;
 mod transcripts;
 
 pub use connection::SqliteHandle;
-pub use memories::SqliteMemoryStore;
+pub use memories::MemoryStore;
 pub use semantic::SqliteSemanticStore;
-pub use tasks::SqliteTaskStore;
+pub use tasks::TaskStore;
 pub use transcripts::SqliteTranscriptStore;
