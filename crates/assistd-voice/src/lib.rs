@@ -10,6 +10,7 @@ pub use assistd_ipc::VoiceCaptureState;
 
 pub mod controller;
 mod device;
+mod download;
 pub mod error;
 pub mod gpu;
 pub mod listen;
@@ -23,6 +24,7 @@ pub mod vad;
 pub mod worker;
 
 pub use controller::{SpeakDecision, SpeakingGuard, VoiceOutputController};
+pub use download::DownloadError;
 pub use error::{VoiceInputError, VoiceOutputError, VoiceWorkerError};
 pub use listen::{
     ContinuousListener, Heard, ListenError, MicContinuousListener, NoContinuousListener, SileroVad,

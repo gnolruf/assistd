@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_config::{SttEncoder, TranscriptionConfig};
-use assistd_utils::hf::download::{self, DownloadError, ensure_cached_id};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rustix::fs::{MemfdFlags, memfd_create};
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig};
 
+use crate::download::{self, DownloadError, ensure_cached_id};
 use crate::gpu;
 use crate::transcribe::{Transcriber, TranscriptionError};
 use crate::vad::{self, SAMPLE_RATE_HZ, SpeechDetector, secs_to_samples};

@@ -6,7 +6,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum SpeechError {
     #[error(transparent)]
-    Download(#[from] assistd_utils::hf::download::DownloadError),
+    Download(#[from] crate::download::DownloadError),
 
     #[error(
         "voice {voice} has no tokens.txt beside it; stock rhasspy/piper-voices files do not \

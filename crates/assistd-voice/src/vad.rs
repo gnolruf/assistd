@@ -6,10 +6,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use assistd_config::TranscriptionConfig;
-use assistd_utils::hf::download;
 use num_traits::ToPrimitive;
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
+use crate::download;
 use crate::transcribe::TranscriptionError;
 
 /// Silero VAD v6.2, pinned to one commit.

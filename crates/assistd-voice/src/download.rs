@@ -7,14 +7,13 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use assistd_utils::hf::{HfFileId, InvalidHfId};
+use assistd_utils::http::remote_client_builder;
 use futures_util::StreamExt;
 use reqwest::header::RANGE;
 use reqwest::{Client, ClientBuilder, Response, StatusCode, redirect};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-
-use super::{HfFileId, InvalidHfId};
-use crate::http::remote_client_builder;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Longest wait for the next chunk before a download counts as stalled.
@@ -67,7 +66,7 @@ pub enum DownloadError {
 
 /// Parse `"<owner>/<repo>[@<revision>]:<file>"`, rejecting any path that
 /// could escape the cache directory.
-pub fn parse_id(id: &str) -> Result<HfFileId, DownloadError> {
+fn parse_id(id: &str) -> Result<HfFileId, DownloadError> {
     HfFileId::parse(id).map_err(|reason| DownloadError::InvalidId {
         id: id.to_string(),
         reason,
@@ -76,13 +75,13 @@ pub fn parse_id(id: &str) -> Result<HfFileId, DownloadError> {
 
 /// `$XDG_CACHE_HOME/assistd/<subdir>/`, falling back to
 /// `~/.cache/assistd/<subdir>/`. Errors when no home directory can be found.
-pub fn default_cache_dir(subdir: &str) -> Result<PathBuf, DownloadError> {
+pub(crate) fn default_cache_dir(subdir: &str) -> Result<PathBuf, DownloadError> {
     let base = dirs::cache_dir().ok_or(DownloadError::NoCacheDir)?;
     Ok(base.join("assistd").join(subdir))
 }
 
 /// Where `id` lives under `cache_dir`; pinned revisions get their own directory.
-pub fn cached_path(cache_dir: &Path, id: &HfFileId) -> PathBuf {
+fn cached_path(cache_dir: &Path, id: &HfFileId) -> PathBuf {
     let repo_dir = id.repo().replace('/', "__");
     let repo_dir = match id.revision() {
         Some(revision) => format!("{repo_dir}@{revision}"),
@@ -92,12 +91,15 @@ pub fn cached_path(cache_dir: &Path, id: &HfFileId) -> PathBuf {
 }
 
 /// Path to the cached file for `hf_id`, downloading it first if missing.
-pub async fn ensure_cached(hf_id: &str, cache_dir: &Path) -> Result<PathBuf, DownloadError> {
+pub(crate) async fn ensure_cached(hf_id: &str, cache_dir: &Path) -> Result<PathBuf, DownloadError> {
     ensure_cached_id(&parse_id(hf_id)?, cache_dir).await
 }
 
 /// Path to the cached file for `id`, downloading it first if missing.
-pub async fn ensure_cached_id(id: &HfFileId, cache_dir: &Path) -> Result<PathBuf, DownloadError> {
+pub(crate) async fn ensure_cached_id(
+    id: &HfFileId,
+    cache_dir: &Path,
+) -> Result<PathBuf, DownloadError> {
     let dest = cached_path(cache_dir, id);
     ensure_file(id, &dest).await?;
     Ok(dest)
@@ -107,7 +109,7 @@ pub async fn ensure_cached_id(id: &HfFileId, cache_dir: &Path) -> Result<PathBuf
 /// advisory lock. A part left by an interrupted run is resumed when Hugging Face reports
 /// the file's SHA-256 and truncated otherwise; a part failing the checksum is deleted.
 /// Fails when connecting or a read stalls past its timeout or the file exceeds 8 GiB.
-pub async fn ensure_file(id: &HfFileId, dest: &Path) -> Result<(), DownloadError> {
+async fn ensure_file(id: &HfFileId, dest: &Path) -> Result<(), DownloadError> {
     if is_cached(dest).await? {
         tracing::debug!(
             target: "assistd::hf::download",

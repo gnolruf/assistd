@@ -20,7 +20,7 @@ pub enum TranscriptionError {
     EmptyAudio,
 
     #[error(transparent)]
-    Download(#[from] assistd_utils::hf::download::DownloadError),
+    Download(#[from] crate::download::DownloadError),
 
     #[error("failed to load the speech-to-text model: {0}")]
     ModelLoad(String),
