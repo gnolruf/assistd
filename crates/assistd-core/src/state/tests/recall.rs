@@ -5,8 +5,11 @@ struct ConstantEmbedder;
 
 #[async_trait::async_trait]
 impl assistd_embed::Embedder for ConstantEmbedder {
-    async fn embed(&self, _text: String) -> Result<Vec<f32>, EmbedError> {
+    async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, EmbedError> {
         Ok(vec![1.0])
+    }
+    async fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        Ok(vec![vec![1.0]; texts.len()])
     }
     fn model(&self) -> &'static str {
         "constant"

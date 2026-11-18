@@ -7,7 +7,7 @@ use std::time::Duration;
 use assistd_config::{Config, NonBlankString};
 use assistd_core::AppState;
 use assistd_embed::{
-    EmbedServerSpec, Embedder, EmbedderHandle, LlamaEmbedder, spawn_embedder_task,
+    EmbedServerSpec, Embedder, EmbedderHandle, LlamaEmbedder, TaskPrefixes, spawn_embedder_task,
 };
 use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_memory::{
@@ -228,6 +228,7 @@ async fn adopt_space_then_serve(
         model: embedder.model().to_owned(),
         dim: embedder.dim(),
         server_args: startup.config.custom_args.clone().into(),
+        document_prefix: startup.config.document_prefix.clone(),
     };
     if let Err(reason) = adopt_space(state.memory.semantic.as_ref(), &space).await {
         tracing::warn!("embedding: {reason}; semantic search disabled this run");
@@ -283,6 +284,10 @@ async fn start_server(
     match LlamaEmbedder::new(
         config.listen_addr(),
         config.model.to_string(),
+        TaskPrefixes {
+            document: config.document_prefix.clone(),
+            query: config.query_prefix.clone(),
+        },
         assistd_embed::REQUEST_TIMEOUT,
         Some(api_key),
         Some(server.status()),
@@ -303,8 +308,8 @@ async fn adopt_space(semantic: &dyn SemanticStore, space: &EmbeddingSpace) -> Re
         Ok(Some(replaced)) => {
             info!(
                 "embedding: dropped every stored vector for re-embedding; they came from \
-                 model={}, dim={}, args={:?}",
-                replaced.model, replaced.dim, replaced.server_args
+                 model={}, dim={}, args={:?}, document_prefix={:?}",
+                replaced.model, replaced.dim, replaced.server_args, replaced.document_prefix
             );
             Ok(())
         }

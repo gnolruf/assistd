@@ -159,13 +159,13 @@ mod tests {
 
     #[async_trait]
     impl Embedder for ScriptedEmbedder {
-        async fn embed(&self, text: String) -> Result<Vec<f32>, EmbedError> {
-            self.embed_batch(&[text.as_str()])
+        async fn embed_query(&self, query: &str) -> Result<Vec<f32>, EmbedError> {
+            self.embed_documents(&[query])
                 .await?
                 .pop()
                 .ok_or(EmbedError::Disabled)
         }
-        async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        async fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
             self.calls
                 .lock()
                 .unwrap()

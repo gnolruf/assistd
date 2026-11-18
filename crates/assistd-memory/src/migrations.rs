@@ -210,10 +210,11 @@ END;
 
 -- At most one row: the embedding space every stored vector is in.
 CREATE TABLE embedding_meta (
-    id          INTEGER PRIMARY KEY CHECK (id = 0),
-    model       TEXT NOT NULL,
-    dim         INTEGER NOT NULL CHECK (dim > 0),
-    server_args TEXT NOT NULL
+    id              INTEGER PRIMARY KEY CHECK (id = 0),
+    model           TEXT NOT NULL,
+    dim             INTEGER NOT NULL CHECK (dim > 0),
+    server_args     TEXT NOT NULL,
+    document_prefix TEXT NOT NULL
 ) STRICT;
 
 -- `next_fire_at` is NULL until the scheduler computes it after a save, or when nothing

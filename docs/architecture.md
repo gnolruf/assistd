@@ -687,7 +687,10 @@ embeddings table is pending. Each write wakes a background task, which
 pages through the pending rows, sends batches to the embedding server
 (a second, smaller llama-server child process configured under
 `[embedding]`), and inserts the resulting vectors into the semantic
-store. A pass cut short by the server or the database is retried with
+store. Many embedding models are trained with a task prefix on each
+input, so the embedder puts `embedding.document_prefix` before text
+that is stored and `embedding.query_prefix` before a query; callers
+say which of the two a text is and never build a prefix. A pass cut short by the server or the database is retried with
 backoff, so nothing is dropped. A row the server rejects for its own
 content is marked and skipped until `assistd memory reindex` retries
 it. A `remember` search embeds its query and ranks saved memories by

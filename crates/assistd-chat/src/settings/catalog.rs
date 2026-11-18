@@ -123,6 +123,8 @@ pub(crate) const SECTIONS: &[Section] = &[
         &[],
         &[
             setting("embedding.model"),
+            setting("embedding.document_prefix"),
+            setting("embedding.query_prefix"),
             setting("embedding.top_k"),
             setting("embedding.auto_inject"),
             setting("embedding.min_similarity"),

@@ -1,5 +1,6 @@
 //! HTTP client for llama-server's `/v1/embeddings` endpoint.
 
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ const ERROR_BODY_CHARS: usize = 200;
 
 #[derive(Serialize)]
 struct EmbedRequest<'a> {
-    input: &'a [&'a str],
+    input: &'a [Cow<'a, str>],
     model: &'a str,
 }
 
@@ -33,12 +34,23 @@ struct EmbedDatum {
     embedding: Vec<f32>,
 }
 
+/// The text a model is trained to see before each input, by what the input is for.
+/// An empty prefix sends that input as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskPrefixes {
+    /// Goes before text that is stored to be searched.
+    pub document: String,
+    /// Goes before a query that searches the stored text.
+    pub query: String,
+}
+
 /// [`Embedder`] backed by a llama-server running with `--embedding`.
 #[derive(Debug)]
 pub struct LlamaEmbedder {
     client: reqwest::Client,
     base_url: String,
     model: String,
+    prefixes: TaskPrefixes,
     dim: usize,
     server: Option<ChildServerStatus>,
 }
@@ -50,6 +62,7 @@ impl LlamaEmbedder {
     pub async fn new(
         addr: SocketAddr,
         model: String,
+        prefixes: TaskPrefixes,
         request_timeout: Duration,
         api_key: Option<&ApiKey>,
         server: Option<ChildServerStatus>,
@@ -68,11 +81,12 @@ impl LlamaEmbedder {
             client,
             base_url: format!("http://{addr}"),
             model,
+            prefixes,
             dim: 0,
             server,
         };
         embedder.dim = embedder
-            .post_embeddings(&["x"])
+            .post_embeddings(&[Cow::Borrowed("x")])
             .await?
             .first()
             .map_or(0, Vec::len);
@@ -101,7 +115,7 @@ impl LlamaEmbedder {
         }
     }
 
-    async fn post_embeddings(&self, input: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+    async fn post_embeddings(&self, input: &[Cow<'_, str>]) -> Result<Vec<Vec<f32>>, EmbedError> {
         self.require_serving()?;
         let url = format!("{}/v1/embeddings", self.base_url);
         let body = EmbedRequest {
@@ -132,25 +146,17 @@ impl LlamaEmbedder {
         let parsed: EmbedResponse = serde_json::from_slice(&body).map_err(EmbedError::Decode)?;
         order_by_index(parsed.data, input.len())
     }
-}
 
-#[async_trait]
-impl Embedder for LlamaEmbedder {
-    async fn embed(&self, text: String) -> Result<Vec<f32>, EmbedError> {
-        self.embed_batch(&[text.as_str()])
-            .await?
-            .pop()
-            .ok_or(EmbedError::CountMismatch {
-                got: 0,
-                expected: 1,
-            })
-    }
-
-    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+    async fn embed_prefixed(
+        &self,
+        prefix: &str,
+        texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, EmbedError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        self.post_embeddings(texts)
+        let input: Vec<Cow<'_, str>> = texts.iter().map(|text| prefixed(prefix, text)).collect();
+        self.post_embeddings(&input)
             .await?
             .into_iter()
             .map(|raw| {
@@ -167,6 +173,23 @@ impl Embedder for LlamaEmbedder {
             })
             .collect()
     }
+}
+
+#[async_trait]
+impl Embedder for LlamaEmbedder {
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>, EmbedError> {
+        self.embed_prefixed(&self.prefixes.query, &[query])
+            .await?
+            .pop()
+            .ok_or(EmbedError::CountMismatch {
+                got: 0,
+                expected: 1,
+            })
+    }
+
+    async fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        self.embed_prefixed(&self.prefixes.document, texts).await
+    }
 
     fn model(&self) -> &str {
         &self.model
@@ -174,6 +197,14 @@ impl Embedder for LlamaEmbedder {
 
     fn dim(&self) -> usize {
         self.dim
+    }
+}
+
+fn prefixed<'a>(prefix: &str, text: &'a str) -> Cow<'a, str> {
+    if prefix.is_empty() {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(format!("{prefix}{text}"))
     }
 }
 
@@ -282,10 +313,24 @@ mod tests {
         (addr, server)
     }
 
+    fn prefixes() -> TaskPrefixes {
+        TaskPrefixes {
+            document: "doc: ".into(),
+            query: "query: ".into(),
+        }
+    }
+
     async fn embedder_at(addr: SocketAddr) -> LlamaEmbedder {
-        LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), None, None)
-            .await
-            .expect("probe succeeds")
+        LlamaEmbedder::new(
+            addr,
+            "m".into(),
+            prefixes(),
+            Duration::from_secs(5),
+            None,
+            None,
+        )
+        .await
+        .expect("probe succeeds")
     }
 
     fn probe_response() -> Value {
@@ -314,7 +359,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embed_batch_sends_one_request_and_returns_normalised_vectors_in_input_order() {
+    async fn embed_documents_sends_one_prefixed_request_and_returns_normalised_vectors_in_input_order()
+     {
         let (addr, server) = serve(vec![
             probe_response(),
             json!({ "data": [
@@ -325,7 +371,10 @@ mod tests {
         .await;
         let embedder = embedder_at(addr).await;
 
-        let vectors = embedder.embed_batch(&["first", "second"]).await.unwrap();
+        let vectors = embedder
+            .embed_documents(&["first", "second"])
+            .await
+            .unwrap();
         let expected = [[0.6, 0.8], [0.0, 1.0]];
         assert_eq!(vectors.len(), expected.len());
         for (got, want) in vectors.iter().zip(&expected) {
@@ -338,12 +387,13 @@ mod tests {
 
         let bodies = server.await.unwrap();
         assert_eq!(bodies.len(), 2);
-        assert_eq!(bodies[1]["input"], json!(["first", "second"]));
+        assert_eq!(bodies[0]["input"], json!(["x"]));
+        assert_eq!(bodies[1]["input"], json!(["doc: first", "doc: second"]));
         assert_eq!(bodies[1]["model"], "m");
     }
 
     #[tokio::test]
-    async fn embed_batch_rejects_any_vector_with_the_wrong_dimension() {
+    async fn embed_documents_rejects_any_vector_with_the_wrong_dimension() {
         let (addr, server) = serve(vec![
             probe_response(),
             json!({ "data": [
@@ -354,7 +404,7 @@ mod tests {
         .await;
         let embedder = embedder_at(addr).await;
 
-        let err = embedder.embed_batch(&["a", "b"]).await.unwrap_err();
+        let err = embedder.embed_documents(&["a", "b"]).await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -410,9 +460,15 @@ mod tests {
         for (label, state, pid, supervisor_running) in cases {
             let (ready_tx, status) = scripted_status(state, pid);
             let _supervisor = supervisor_running.then_some(ready_tx);
-            let result =
-                LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), None, Some(status))
-                    .await;
+            let result = LlamaEmbedder::new(
+                addr,
+                "m".into(),
+                prefixes(),
+                Duration::from_secs(5),
+                None,
+                Some(status),
+            )
+            .await;
             assert!(
                 matches!(result, Err(EmbedError::NotReady)),
                 "{label}: {result:?}"
@@ -434,21 +490,27 @@ mod tests {
         ])
         .await;
         let (ready_tx, status) = scripted_status(ReadyState::Ready, Some(7));
-        let embedder =
-            LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), None, Some(status))
-                .await
-                .expect("probe succeeds while serving");
+        let embedder = LlamaEmbedder::new(
+            addr,
+            "m".into(),
+            prefixes(),
+            Duration::from_secs(5),
+            None,
+            Some(status),
+        )
+        .await
+        .expect("probe succeeds while serving");
 
         ready_tx.send_replace(ReadyState::BackingOff { attempt: 1 });
-        let refused = embedder.embed("private memory".into()).await;
+        let refused = embedder.embed_query("private memory").await;
         assert!(matches!(refused, Err(EmbedError::NotReady)), "{refused:?}");
 
         ready_tx.send_replace(ReadyState::Ready);
-        let vector = embedder.embed("after restart".into()).await.unwrap();
+        let vector = embedder.embed_query("after restart").await.unwrap();
         assert_eq!(vector, vec![0.0, 1.0]);
 
         let bodies = server.await.unwrap();
         assert_eq!(bodies.len(), 2);
-        assert_eq!(bodies[1]["input"], json!(["after restart"]));
+        assert_eq!(bodies[1]["input"], json!(["query: after restart"]));
     }
 }
