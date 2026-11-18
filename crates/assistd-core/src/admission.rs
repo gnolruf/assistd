@@ -1,5 +1,5 @@
-//! How a user turn reaches the main model lane when a task run may hold it, as
-//! `[tasks] interruption` says.
+//! `TurnAdmission`: who may use the model next. How a user turn reaches the main model
+//! lane when a task run may hold it, as `[tasks] interruption` says.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -12,10 +12,14 @@ use tokio_util::sync::CancellationToken;
 use assistd_config::{Config, TaskInterruption};
 use assistd_ipc::{Event, EventBody, InteractionHold, TaskQueueSnapshot};
 
-use super::interaction::{InteractionState, InteractionTurn, UserInteraction};
-use super::lanes::ModelLanes;
+use self::interaction::{InteractionState, InteractionTurn, UserInteraction};
+use self::lanes::ModelLanes;
+use self::queue::{TaskQueue, TurnStart};
 use crate::bus::EventSink;
-use crate::tasks::queue::{TaskQueue, TurnStart};
+
+pub(crate) mod interaction;
+pub(crate) mod lanes;
+pub(crate) mod queue;
 
 /// Longest preview of a queued user turn's text, in characters.
 const TURN_PREVIEW_CHARS: usize = 80;
@@ -23,10 +27,10 @@ const TURN_PREVIEW_CHARS: usize = 80;
 /// What a user turn holds: the main lane, the main backend against branch
 /// operations, and its place in the user's interaction.
 #[derive(Debug)]
-pub(super) struct MainLaneTurn {
-    pub(super) lane: OwnedMutexGuard<()>,
-    pub(super) user_turn: OwnedMutexGuard<()>,
-    pub(super) turn: InteractionTurn,
+pub(crate) struct MainLaneTurn {
+    pub(crate) lane: OwnedMutexGuard<()>,
+    pub(crate) user_turn: OwnedMutexGuard<()>,
+    pub(crate) turn: InteractionTurn,
 }
 
 /// A user turn waiting in the task queue, taken out again if dropped before it starts.
@@ -62,7 +66,7 @@ pub(crate) struct TurnAdmission {
 
 impl TurnAdmission {
     /// Admission over as many lanes as `slots`, the server's slot count, reports.
-    pub(super) fn new(config: Arc<Config>, slots: watch::Receiver<NonZeroU32>) -> Self {
+    pub(crate) fn new(config: Arc<Config>, slots: watch::Receiver<NonZeroU32>) -> Self {
         let agent_turn_lock = Arc::new(Mutex::new(()));
         Self {
             config,
@@ -83,7 +87,7 @@ impl TurnAdmission {
 
     /// Cancel every turn started so far, queued or running; later turns
     /// are unaffected.
-    pub(super) fn interrupt_turns(&self) {
+    pub(crate) fn interrupt_turns(&self) {
         let interrupted = std::mem::replace(&mut *self.interrupt.lock(), CancellationToken::new());
         interrupted.cancel();
     }
@@ -100,7 +104,7 @@ impl TurnAdmission {
     }
 
     /// Whether a run on the main lane must give it to the user's interaction now.
-    pub(super) fn run_must_yield(&self) -> bool {
+    pub(crate) fn run_must_yield(&self) -> bool {
         self.config.tasks.interruption == TaskInterruption::Interrupt
             && self.interaction_holds_queue()
     }
@@ -134,7 +138,7 @@ impl TurnAdmission {
 
     /// Wait for the main lane for query `id`'s turn, getting past a task run that holds it
     /// as `[tasks] interruption` says; `None` when the turn was dropped from the queue.
-    pub(super) async fn take_main_lane(
+    pub(crate) async fn take_main_lane(
         &self,
         id: &str,
         text: &str,

@@ -1,6 +1,7 @@
 //! Daemon orchestration: the agent loop, presence state machine, IPC socket server,
 //! `AppState` dispatcher and saved-task scheduling.
 
+mod admission;
 pub mod agent;
 mod build_tools;
 pub mod bus;
@@ -17,6 +18,8 @@ pub mod socket;
 pub mod state;
 pub mod subagent;
 pub mod tasks;
+mod transcript;
+mod turn_driver;
 mod vision;
 mod vram;
 
@@ -34,10 +37,11 @@ pub use relay::{RelayDeps, sweep_relay_answers};
 pub use presence::{PresenceError, PresenceManager, RequestGuard, VramShortfall, WakeRoom};
 pub use state::{
     AppState, BranchService, DispatchError, McpAccountError, McpAccounts, McpHost, McpLogin,
-    McpServerStatus, McpService, MemoryStack, Query, Requester, SessionContext, StatusService,
-    Subsystems, TurnOrigin, TurnService, VoiceService, branch_replay,
+    McpServerStatus, McpService, MemoryStack, Query, Requester, StatusService, Subsystems,
+    TurnOrigin, TurnService, VoiceService, branch_replay,
 };
 pub use subagent::{RelayReport, SubAgentError, SubAgentRunner};
-pub use tasks::{TaskRunner, TaskService};
+pub use tasks::{TaskError, TaskRunner, TaskService};
+pub use transcript::SessionContext;
 pub use vision::VisionRevalidator;
 pub use vram::VramLedger;

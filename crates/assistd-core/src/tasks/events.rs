@@ -22,7 +22,7 @@ use super::event_triggers::{Occurrence, event_trigger, fires_on};
 /// Wakes the event watcher when a task changes, and holds when each task's event
 /// triggers last fired and why each trigger whose watch is retrying last stopped.
 #[derive(Debug, Default)]
-pub(crate) struct TaskEvents {
+pub(super) struct TaskEvents {
     changed: Notify,
     last_fired: StdMutex<HashMap<TaskId, Instant>>,
     watch_failures: StdMutex<HashMap<(TaskId, TaskTrigger), String>>,
@@ -37,7 +37,7 @@ struct EventWatches {
 
 impl TaskEvents {
     /// Have the event watcher match its watches to the enabled triggers now.
-    pub(crate) fn rewatch(&self) {
+    pub(super) fn rewatch(&self) {
         self.changed.notify_one();
     }
 
@@ -56,7 +56,7 @@ impl TaskEvents {
     }
 
     /// Why a watch for one of `task`'s triggers last stopped, while it is retrying.
-    pub(crate) fn watch_failure(&self, task: TaskId) -> Option<String> {
+    pub(super) fn watch_failure(&self, task: TaskId) -> Option<String> {
         self.watch_failures
             .lock()
             .iter()
@@ -65,14 +65,14 @@ impl TaskEvents {
     }
 
     /// Note that the watch for `trigger` of `task` stopped because of `reason`.
-    pub(crate) fn record_watch_failure(&self, task: TaskId, trigger: &TaskTrigger, reason: String) {
+    pub(super) fn record_watch_failure(&self, task: TaskId, trigger: &TaskTrigger, reason: String) {
         self.watch_failures
             .lock()
             .insert((task, trigger.clone()), reason);
     }
 
     /// Note that the watch for `trigger` of `task` is running.
-    pub(crate) fn clear_watch_failure(&self, task: TaskId, trigger: &TaskTrigger) {
+    pub(super) fn clear_watch_failure(&self, task: TaskId, trigger: &TaskTrigger) {
         self.watch_failures.lock().remove(&(task, trigger.clone()));
     }
 
@@ -113,7 +113,7 @@ impl TaskService {
     }
 
     /// Queue a run of every enabled task with an event trigger that fires on `occurrence`.
-    pub(crate) async fn fire_event_triggers(&self, occurrence: Occurrence) {
+    pub(super) async fn fire_event_triggers(&self, occurrence: Occurrence) {
         for record in self.enabled_tasks().await.into_iter().flatten() {
             let fired = record.spec.triggers.iter().find_map(|trigger| {
                 let (event, cooldown) = event_trigger(trigger)?;
@@ -127,7 +127,7 @@ impl TaskService {
 
     /// Queue a run of task `task` for its watched `trigger`, if it is still enabled
     /// and still has it.
-    pub(crate) async fn fire_watched_trigger(&self, task: TaskId, trigger: &TaskTrigger) {
+    pub(super) async fn fire_watched_trigger(&self, task: TaskId, trigger: &TaskTrigger) {
         let Some((_, cooldown)) = event_trigger(trigger) else {
             return;
         };

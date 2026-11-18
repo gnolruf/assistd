@@ -1,8 +1,6 @@
 //! Branch and session handlers, plus the session-title generator.
 
 use std::collections::HashMap;
-use std::io::ErrorKind;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -18,16 +16,15 @@ use assistd_memory::{
     BranchHistory, BranchId, BranchSummary, HistoryRow, HistoryScope, MessageId, MessageKind,
     PersistedRelayStep, PersistedToolCall, Seq, SessionId, TranscriptStore, TurnStats, UndoOutcome,
 };
-use assistd_tools::policy::on_blocking_pool;
 
-use super::persistence::TranscriptLog;
-use super::relay_trace::wire_relay_steps;
-use super::session::SessionContext;
-use super::turn_admission::TurnAdmission;
 use super::{DispatchError, FailedStep, wire_role, wire_timestamp};
+use crate::admission::TurnAdmission;
 use crate::bus::EventBus;
 use crate::bus::EventSink;
 use crate::presence::PresenceManager;
+use crate::relay::delete_answer_files;
+use crate::transcript::relay_trace::wire_relay_steps;
+use crate::transcript::{SessionContext, TranscriptLog};
 
 const MAX_TITLE_CHARS: usize = 80;
 const MAX_TITLE_PROMPT_CHARS: usize = 1024;
@@ -149,7 +146,7 @@ impl BranchService {
     ) {
         let trimmed: String = user_text.chars().take(MAX_TITLE_PROMPT_CHARS).collect();
         let branches = Arc::clone(self);
-        self.transcript.tracker.spawn(async move {
+        self.transcript.spawn_tracked(async move {
             let Some(title) = branches.session_title_for_turn(session, &trimmed).await else {
                 return;
             };
@@ -282,7 +279,7 @@ impl BranchService {
                 .context("/undo")?,
         };
         if outcome.removed_messages > 0 {
-            self.transcript.user_ledger.forget_last_turn();
+            self.transcript.forget_last_user_turn();
             if let Err(e) = self.llm.truncate_to_last_real_user().await {
                 warn!(
                     target: "assistd::state",
@@ -372,7 +369,7 @@ impl BranchService {
             .as_ref()
             .and_then(|s| Some((compaction_marker(&rows, s)?, s.duration_ms)));
         let replay = branch_replay(&rows, summary);
-        self.transcript.user_ledger.invalidate();
+        self.transcript.forget_user_history();
         if let Err(e) = self.llm.replace_history(replay).await {
             warn!(
                 target: "assistd::state",
@@ -477,7 +474,7 @@ impl BranchService {
         }
         self.session_ctx.replace(new_session, None).await;
         let empty = HistoryReplay::default();
-        self.transcript.user_ledger.invalidate();
+        self.transcript.forget_user_history();
         if let Err(e) = self.llm.replace_history(empty).await {
             warn!(
                 target: "assistd::state",
@@ -660,26 +657,4 @@ fn is_within_recency(latest: Option<DateTime<Utc>>, recency_secs: u64) -> bool {
             age >= TimeDelta::zero() && age <= window
         }
     }
-}
-
-/// Delete saved relay answers no stored step names any more; one already gone is fine.
-pub(crate) async fn delete_answer_files(files: Vec<PathBuf>) {
-    if files.is_empty() {
-        return;
-    }
-    on_blocking_pool(move || {
-        for file in &files {
-            if let Err(error) = std::fs::remove_file(file)
-                && error.kind() != ErrorKind::NotFound
-            {
-                warn!(
-                    target: "assistd::state",
-                    file = %file.display(),
-                    %error,
-                    "cannot delete a saved relay answer"
-                );
-            }
-        }
-    })
-    .await;
 }

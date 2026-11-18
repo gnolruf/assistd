@@ -12,13 +12,12 @@ use tracing::{debug, warn};
 use assistd_ipc::{Event, EventBody, SuspendReason, TaskQueueOp, TaskQueueSnapshot, TaskRunId};
 use assistd_memory::{TaskRunEnd, WaitingRun};
 
-use super::TaskService;
-use super::queue::{Cancelled, NextStart, QueueOpError, TurnStart};
 use super::runs::DAEMON_STOPPED;
+use super::{TaskError, TaskService};
+use crate::admission::interaction::InteractionState;
+use crate::admission::lanes::{LaneLease, ModelLanes, changed_or_pending};
+use crate::admission::queue::{Cancelled, NextStart, QueueOpError, TurnStart};
 use crate::bus::EventSink;
-use crate::state::DispatchError;
-use crate::state::interaction::InteractionState;
-use crate::state::lanes::{LaneLease, ModelLanes, changed_or_pending};
 
 /// The `id` broadcast `TaskQueue` events carry.
 const TASK_QUEUE_EVENT_ID: &str = "task_queue";
@@ -56,7 +55,7 @@ impl TaskService {
         id: String,
         op: TaskQueueOp,
         tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), TaskError> {
         self.apply_task_queue_op(op).await?;
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())

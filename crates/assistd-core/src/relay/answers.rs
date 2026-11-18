@@ -1,10 +1,13 @@
-//! The startup sweep of saved sub-agent answers no stored relay step names any more.
+//! Deleting saved sub-agent answers no stored relay step names any more: the startup
+//! sweep, and the files a deleted turn, run or task releases.
 
 use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
+
+use assistd_tools::policy::on_blocking_pool;
 
 /// Delete every answer under `answers_dir` that `kept` does not name, then each
 /// session directory left empty. Must run before any relay saves an answer.
@@ -56,6 +59,28 @@ fn sweep_session(session_dir: &Path, kept: &HashSet<PathBuf>) -> usize {
 /// `remove_dir` refuses a directory that still holds anything.
 fn remove_if_empty(dir: &Path) {
     let _ = std::fs::remove_dir(dir);
+}
+
+/// Delete saved relay answers no stored step names any more; one already gone is fine.
+pub(crate) async fn delete_answer_files(files: Vec<PathBuf>) {
+    if files.is_empty() {
+        return;
+    }
+    on_blocking_pool(move || {
+        for file in &files {
+            if let Err(error) = std::fs::remove_file(file)
+                && error.kind() != ErrorKind::NotFound
+            {
+                warn!(
+                    target: "assistd::relay",
+                    file = %file.display(),
+                    %error,
+                    "cannot delete a saved relay answer"
+                );
+            }
+        }
+    })
+    .await;
 }
 
 #[cfg(test)]

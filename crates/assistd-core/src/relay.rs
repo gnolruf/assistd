@@ -36,6 +36,7 @@ mod answers;
 mod role;
 mod sizing;
 
+pub(crate) use answers::delete_answer_files;
 pub use answers::sweep_relay_answers;
 
 const RELAY: &str = "relay";

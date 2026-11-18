@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -15,30 +15,24 @@ use assistd_ipc::{Attachment, Event, EventBody, ImageAttachment, PlanMode};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent};
 use assistd_memory::{PersistedMessage, SemanticStore, SessionId};
 use assistd_tools::{ConfirmRouter, HostReads, ToolCatalog, TurnContext};
-use assistd_voice::{
-    SpeakDecision, SpeakingGuard, VoiceManager, VoiceOutput, VoiceOutputController,
-};
+use assistd_voice::VoiceManager;
 use assistd_wm::WindowManager;
 
 use super::branches::BranchService;
 use super::chat_focus::ChatFocusSlot;
 use super::context::{combine_context_blocks, voice_approvals_note};
 use super::host_reads::BranchHostReads;
-use super::persistence::TranscriptLog;
-use super::session::SessionContext;
-use super::transcript_writer::PersistTarget;
-use super::turn_admission::{MainLaneTurn, TurnAdmission};
-use super::turn_driver::{SpeechPipeline, TurnDriver};
 use super::wire::decode_wire_attachments;
 use super::{DispatchError, FailedStep};
+use crate::admission::{MainLaneTurn, TurnAdmission};
 use crate::agent::{Agent, AgentSpec};
 use crate::bus::{EventBus, EventSink};
 use crate::planner::Planner;
 use crate::presence::{PresenceManager, RequestGuard};
 use crate::recovery::{Component, spawn_supervised};
+use crate::transcript::{PersistTarget, SessionContext, TranscriptLog};
+use crate::turn_driver::{SpeechPipeline, TurnDriver, run_speech_worker};
 use crate::vision::VisionRevalidator;
-
-const SENTENCE_PREVIEW_CHARS: usize = 60;
 
 /// One prompt to run as a user turn.
 #[derive(Debug)]
@@ -438,70 +432,4 @@ pub(super) async fn finish_interrupted_before_start(
     );
     let _ = tx.send(Event::new(id, EventBody::Done)).await;
     Ok(())
-}
-
-pub(crate) async fn run_speech_worker(
-    voice_output: Arc<VoiceOutputController>,
-    events_bus: broadcast::Sender<Event>,
-    id: String,
-    start_epoch: u64,
-    mut speech_rx: mpsc::Receiver<String>,
-) {
-    let mut speaking: Option<SpeakingGuard> = None;
-    while let Some(sentence) = speech_rx.recv().await {
-        match voice_output.should_speak(start_epoch) {
-            SpeakDecision::Speak => {
-                let Ok(output) = voice_output.output() else {
-                    continue;
-                };
-                if speaking.is_none() {
-                    let _ = events_bus.send(Event::new(
-                        id.clone(),
-                        EventBody::SpeakingState { speaking: true },
-                    ));
-                    speaking = Some(voice_output.begin_speaking());
-                }
-                voice_output.remember_spoken(&sentence);
-                speak_sentence(&voice_output, output.as_ref(), sentence, start_epoch).await;
-            }
-            SpeakDecision::DropSilent | SpeakDecision::DropForSkip => {}
-        }
-    }
-    if let Ok(output) = voice_output.output()
-        && let Err(e) = output.wait_idle().await
-    {
-        debug!(
-            target: "assistd::voice",
-            error = %e,
-            "voice_output.wait_idle failed (non-fatal)"
-        );
-    }
-    if speaking.take().is_some() {
-        let _ = events_bus.send(Event::new(id, EventBody::SpeakingState { speaking: false }));
-    }
-}
-
-/// Speak one sentence, then cancel playback if a skip landed meanwhile,
-/// since `speak()` may append audio after the skip cleared the queue.
-async fn speak_sentence(
-    voice_output: &VoiceOutputController,
-    output: &dyn VoiceOutput,
-    sentence: String,
-    start_epoch: u64,
-) {
-    let preview: String = sentence.chars().take(SENTENCE_PREVIEW_CHARS).collect();
-    if let Err(e) = output.speak(sentence).await {
-        warn!(
-            target: "assistd::voice",
-            error = %e,
-            sentence_preview = %preview,
-            "voice_output.speak failed; sentence dropped"
-        );
-    }
-    if matches!(
-        voice_output.should_speak(start_epoch),
-        SpeakDecision::DropForSkip
-    ) {
-        output.cancel().await;
-    }
 }

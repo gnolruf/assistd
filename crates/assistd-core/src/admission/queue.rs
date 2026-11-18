@@ -14,8 +14,8 @@ use assistd_ipc::{
 };
 use assistd_memory::{MemoryError, TaskRecord};
 
-use crate::state::interaction::InteractionTurn;
-use crate::state::lanes::LaneLease;
+use super::interaction::InteractionTurn;
+use super::lanes::LaneLease;
 
 /// Why a change to the task queue was refused.
 #[derive(Debug, Error)]
@@ -65,7 +65,7 @@ impl TaskQueue {
 
     /// Queue the user turn of query `id`, which `start` is handed once it may run: behind
     /// the user turns already waiting, else last. Returns how many items are ahead of it.
-    pub(crate) fn push_turn(
+    pub(super) fn push_turn(
         &self,
         id: String,
         preview: String,
@@ -86,7 +86,7 @@ impl TaskQueue {
         behind
     }
 
-    pub(crate) fn has_waiting_turns(&self) -> bool {
+    pub(super) fn has_waiting_turns(&self) -> bool {
         self.state
             .borrow()
             .waiting
@@ -317,7 +317,7 @@ impl TaskQueue {
 
     /// The queue as the wire shows it, beside the lanes' `holders` and the interaction's
     /// `held`.
-    pub(crate) fn snapshot(
+    pub(super) fn snapshot(
         &self,
         holders: Vec<LaneHolder>,
         held: Option<InteractionHold>,

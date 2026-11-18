@@ -39,11 +39,11 @@ impl UserInteraction {
         self.state.subscribe()
     }
 
-    pub(in crate::state) fn state(&self) -> InteractionState {
+    pub(super) fn state(&self) -> InteractionState {
         *self.state.borrow()
     }
 
-    pub(in crate::state) fn is_open(&self) -> bool {
+    pub(super) fn is_open(&self) -> bool {
         self.state() != InteractionState::Idle
     }
 

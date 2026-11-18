@@ -1,12 +1,12 @@
 //! `TurnDriver`: carries one turn's agent events to its sink, the transcript and the
-//! speech worker, for user turns and task runs alike.
+//! speech worker, for user turns and task runs alike; and the speech worker itself.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use assistd_config::SynthesisConfig;
 use assistd_ipc::{Event, EventBody, EventKind, RelayEvent, ToolReport};
@@ -16,17 +16,20 @@ use assistd_memory::{
 };
 use assistd_utils::time::saturating_millis;
 use assistd_utils::token_counter::TokenCounter;
-use assistd_voice::SentenceBuffer;
+use assistd_voice::{
+    SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutput, VoiceOutputController,
+};
 
-use super::persistence::TranscriptLog;
-use super::relay_trace::RelayTraceBuilder;
-use super::transcript_writer::PersistTarget;
 use crate::bus::EventSink;
+use crate::transcript::relay_trace::RelayTraceBuilder;
+use crate::transcript::{PersistTarget, TranscriptLog};
 
 const LAST_DELTA_DEBOUNCE: Duration = Duration::from_millis(100);
 
+const SENTENCE_PREVIEW_CHARS: usize = 60;
+
 /// Splits a spoken turn's reply into sentences for the speech worker.
-pub(super) struct SpeechPipeline {
+pub(crate) struct SpeechPipeline {
     tx: mpsc::Sender<String>,
     sentences: SentenceBuffer,
     partial_flush: Option<Duration>,
@@ -35,7 +38,7 @@ pub(super) struct SpeechPipeline {
 
 impl SpeechPipeline {
     /// A pipeline shaped by `synthesis`, and the sentences it will produce.
-    pub(super) fn new(synthesis: &SynthesisConfig) -> (Self, mpsc::Receiver<String>) {
+    pub(crate) fn new(synthesis: &SynthesisConfig) -> (Self, mpsc::Receiver<String>) {
         let (tx, rx) = mpsc::channel::<String>(32);
         let pipeline = Self {
             tx,
@@ -390,7 +393,7 @@ impl TurnDriver {
     }
 
     /// Speak the turn's reply through `speech`.
-    pub(super) fn speaking(mut self, speech: SpeechPipeline) -> Self {
+    pub(crate) fn speaking(mut self, speech: SpeechPipeline) -> Self {
         self.speech = Some(speech);
         self
     }
@@ -495,4 +498,70 @@ fn tool_calls_message(
         })
         .collect();
     PersistedMessage::assistant_tool_calls(content, persisted, reasoning)
+}
+
+pub(crate) async fn run_speech_worker(
+    voice_output: Arc<VoiceOutputController>,
+    events_bus: broadcast::Sender<Event>,
+    id: String,
+    start_epoch: u64,
+    mut speech_rx: mpsc::Receiver<String>,
+) {
+    let mut speaking: Option<SpeakingGuard> = None;
+    while let Some(sentence) = speech_rx.recv().await {
+        match voice_output.should_speak(start_epoch) {
+            SpeakDecision::Speak => {
+                let Ok(output) = voice_output.output() else {
+                    continue;
+                };
+                if speaking.is_none() {
+                    let _ = events_bus.send(Event::new(
+                        id.clone(),
+                        EventBody::SpeakingState { speaking: true },
+                    ));
+                    speaking = Some(voice_output.begin_speaking());
+                }
+                voice_output.remember_spoken(&sentence);
+                speak_sentence(&voice_output, output.as_ref(), sentence, start_epoch).await;
+            }
+            SpeakDecision::DropSilent | SpeakDecision::DropForSkip => {}
+        }
+    }
+    if let Ok(output) = voice_output.output()
+        && let Err(e) = output.wait_idle().await
+    {
+        debug!(
+            target: "assistd::voice",
+            error = %e,
+            "voice_output.wait_idle failed (non-fatal)"
+        );
+    }
+    if speaking.take().is_some() {
+        let _ = events_bus.send(Event::new(id, EventBody::SpeakingState { speaking: false }));
+    }
+}
+
+/// Speak one sentence, then cancel playback if a skip landed meanwhile,
+/// since `speak()` may append audio after the skip cleared the queue.
+async fn speak_sentence(
+    voice_output: &VoiceOutputController,
+    output: &dyn VoiceOutput,
+    sentence: String,
+    start_epoch: u64,
+) {
+    let preview: String = sentence.chars().take(SENTENCE_PREVIEW_CHARS).collect();
+    if let Err(e) = output.speak(sentence).await {
+        warn!(
+            target: "assistd::voice",
+            error = %e,
+            sentence_preview = %preview,
+            "voice_output.speak failed; sentence dropped"
+        );
+    }
+    if matches!(
+        voice_output.should_speak(start_epoch),
+        SpeakDecision::DropForSkip
+    ) {
+        output.cancel().await;
+    }
 }

@@ -20,7 +20,7 @@ pub(super) const WRITE_QUEUE_CAPACITY: usize = 256;
 /// opened, and the turn's row once the write opening it has landed.
 #[derive(Debug, Clone)]
 pub(crate) struct PersistTarget {
-    pub(super) branch: BranchId,
+    branch: BranchId,
     turn: Arc<OnceLock<TurnId>>,
     ledger: SharedLedger,
 }

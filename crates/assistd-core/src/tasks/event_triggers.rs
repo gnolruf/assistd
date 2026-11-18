@@ -13,7 +13,7 @@ use super::fire_times::TriggerError;
 
 /// Something that happened which every task's event triggers are checked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Occurrence {
+pub(super) enum Occurrence {
     DaemonStarted,
     SessionUnlocked,
     /// A run of `task` finished, not by being cancelled.
@@ -24,7 +24,7 @@ pub(crate) enum Occurrence {
 }
 
 /// `trigger`'s event and cool-down when it is an event trigger.
-pub(crate) fn event_trigger(trigger: &TaskTrigger) -> Option<(&TaskEvent, Duration)> {
+pub(super) fn event_trigger(trigger: &TaskTrigger) -> Option<(&TaskEvent, Duration)> {
     match trigger {
         TaskTrigger::Event {
             event,
@@ -35,7 +35,7 @@ pub(crate) fn event_trigger(trigger: &TaskTrigger) -> Option<(&TaskEvent, Durati
 }
 
 /// Whether `event` fires on `occurrence`.
-pub(crate) fn fires_on(event: &TaskEvent, occurrence: Occurrence) -> bool {
+pub(super) fn fires_on(event: &TaskEvent, occurrence: Occurrence) -> bool {
     match (event, occurrence) {
         (TaskEvent::DaemonStarted, Occurrence::DaemonStarted)
         | (TaskEvent::SessionUnlocked, Occurrence::SessionUnlocked) => true,
@@ -59,7 +59,7 @@ pub(crate) fn fires_on(event: &TaskEvent, occurrence: Occurrence) -> bool {
 
 /// Tilde-expand every watched path in `triggers`, refusing one that is relative or
 /// cannot be read.
-pub(crate) async fn resolve_watched_paths(
+pub(super) async fn resolve_watched_paths(
     triggers: &mut [TaskTrigger],
 ) -> Result<(), TriggerError> {
     for trigger in triggers {
@@ -87,7 +87,7 @@ pub(crate) async fn resolve_watched_paths(
 /// Refuse a `TaskFinished` trigger in `triggers`, the new triggers of task `saving`
 /// (`None` for a task not saved yet), that waits on a task missing from `tasks` or on
 /// a chain leading back to `saving`.
-pub(crate) fn check_chain(
+pub(super) fn check_chain(
     saving: Option<TaskId>,
     triggers: &[TaskTrigger],
     tasks: &[TaskRecord],
