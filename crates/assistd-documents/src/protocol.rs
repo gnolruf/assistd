@@ -1,29 +1,56 @@
 //! Line-delimited JSON spoken between the daemon and its extraction worker over
 //! the worker's stdin and stdout.
 
+use std::convert::Infallible;
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 /// Most bytes of text one file yields; a longer text is cut there.
 pub const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 
+/// Most pages of one file the worker reports; a longer file is cut there.
+pub const MAX_PAGES: usize = 20_000;
+
+/// Most bytes of the PNG one page is rendered to; a larger image is a failed render.
+pub const MAX_PAGE_IMAGE_BYTES: usize = 12 * 1024 * 1024;
+
+/// [`MAX_PAGE_IMAGE_BYTES`] in padded base64, four characters to three bytes.
+const MAX_PAGE_IMAGE_BASE64_BYTES: usize = MAX_PAGE_IMAGE_BYTES.div_ceil(3) * 4;
+
 /// Most bytes of one line the daemon reads from the worker: [`MAX_TEXT_BYTES`]
-/// with every byte escaped to JSON's six, and room for the rest of the message.
-pub(crate) const MAX_REPLY_LINE_BYTES: usize = 6 * MAX_TEXT_BYTES + 1024;
+/// with every byte escaped to JSON's six, the quotes and comma of [`MAX_PAGES`]
+/// pages, and room for the rest of the message. A page image in base64 is shorter.
+pub(crate) const MAX_REPLY_LINE_BYTES: usize = 6 * MAX_TEXT_BYTES + 3 * MAX_PAGES + 1024;
+
+/// What separates one page's text from the next in a file's joined text.
+const PAGE_BREAK: &str = "\n\n";
 
 /// A line from the other side that is not a message this build knows.
 #[derive(Debug, Error)]
 #[error("malformed extraction-worker message: {0}")]
 pub(crate) struct ProtocolError(#[from] serde_json::Error);
 
-/// Daemon → worker: extract the text of one file, answered with a
-/// [`FromWorker::Reply`] of the same id.
+/// Daemon → worker: one task on one file, answered with the [`FromWorker`]
+/// message of the same id that the task names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Request {
     pub(crate) id: u64,
     pub(crate) path: String,
     /// The largest file read, in bytes; a larger one is skipped.
     pub(crate) max_file_bytes: u64,
+    pub(crate) task: Task,
+}
+
+/// What the worker does with a request's file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum Task {
+    /// Extract its text, answered with a [`FromWorker::Reply`].
+    Extract,
+    /// Render one page of a PDF, counted from zero, answered with a
+    /// [`FromWorker::Rendered`].
+    RenderPage { page: u32 },
 }
 
 /// Worker → daemon.
@@ -36,6 +63,10 @@ pub(crate) enum FromWorker {
         id: u64,
         extraction: Extraction,
     },
+    Rendered {
+        id: u64,
+        page: RenderedPage,
+    },
 }
 
 /// What the worker made of one file.
@@ -46,6 +77,14 @@ pub enum Extraction {
         /// At most [`MAX_TEXT_BYTES`] long.
         text: String,
         /// Whether the file held more text than `text` carries.
+        truncated: bool,
+    },
+    /// A file made of pages, such as a PDF.
+    Pages {
+        /// Each page's text in page order, empty for a page without a text layer.
+        /// At most [`MAX_PAGES`] pages and [`MAX_TEXT_BYTES`] in all.
+        pages: Vec<String>,
+        /// Whether the file held more pages or text than `pages` carries.
         truncated: bool,
     },
     Skipped {
@@ -63,12 +102,108 @@ impl Extraction {
         Self::Text { text, truncated }
     }
 
-    /// This extraction with its text held to [`MAX_TEXT_BYTES`], whatever the
-    /// worker sent.
+    /// The pages of `texts` up to [`MAX_PAGES`] pages and [`MAX_TEXT_BYTES`] in
+    /// all, the page that crosses the limit cut at a character boundary and left
+    /// out when nothing of it fits. Stops at the first error.
+    pub(crate) fn of_pages<E>(
+        texts: impl IntoIterator<Item = Result<String, E>>,
+    ) -> Result<Self, E> {
+        let mut texts = texts.into_iter();
+        let mut pages = Vec::new();
+        let mut room = MAX_TEXT_BYTES;
+        while pages.len() < MAX_PAGES && room > 0 {
+            let Some(text) = texts.next() else {
+                return Ok(Self::Pages {
+                    pages,
+                    truncated: false,
+                });
+            };
+            let mut text = text?;
+            if text.len() > room {
+                text.truncate(text.floor_char_boundary(room));
+                pages.extend(Some(text).filter(|cut| !cut.is_empty()));
+                return Ok(Self::Pages {
+                    pages,
+                    truncated: true,
+                });
+            }
+            room -= text.len();
+            pages.push(text);
+        }
+        let truncated = texts.next().is_some();
+        Ok(Self::Pages { pages, truncated })
+    }
+
+    /// This extraction with its text held to [`MAX_TEXT_BYTES`] and its pages to
+    /// [`MAX_PAGES`], whatever the worker sent.
     pub(crate) fn capped(self) -> Self {
         match self {
             Self::Text { text, .. } if text.len() > MAX_TEXT_BYTES => Self::of_text(text),
+            Self::Pages { pages, truncated } => {
+                let Ok(capped) = Self::of_pages(pages.into_iter().map(Ok::<_, Infallible>));
+                capped.truncated_if(truncated)
+            }
             extraction => extraction,
+        }
+    }
+
+    /// This extraction as a daemon that transcribes no page indexes it: the pages
+    /// that have text joined into one, and a file whose pages have none skipped
+    /// as [`SkipReason::NoTextLayer`].
+    pub fn with_pages_joined(self) -> Self {
+        let Self::Pages { pages, truncated } = self else {
+            return self;
+        };
+        let texts: Vec<&str> = pages
+            .iter()
+            .map(|page| page.trim())
+            .filter(|page| !page.is_empty())
+            .collect();
+        if texts.is_empty() {
+            return Self::Skipped {
+                reason: SkipReason::NoTextLayer,
+            };
+        }
+        Self::of_text(texts.join(PAGE_BREAK)).truncated_if(truncated)
+    }
+
+    /// This extraction, marked truncated when `source_was_cut`.
+    fn truncated_if(mut self, source_was_cut: bool) -> Self {
+        if let Self::Text { truncated, .. } | Self::Pages { truncated, .. } = &mut self {
+            *truncated |= source_was_cut;
+        }
+        self
+    }
+}
+
+/// What the worker made of one page asked for as an image.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RenderedPage {
+    Image {
+        /// A PNG of at most [`MAX_PAGE_IMAGE_BYTES`], in standard base64.
+        png_base64: String,
+    },
+    /// The page shows nothing but its background.
+    Blank,
+    Failed {
+        reason: SkipReason,
+    },
+}
+
+impl RenderedPage {
+    /// This page with its image held to [`MAX_PAGE_IMAGE_BYTES`], whatever the
+    /// worker sent.
+    pub(crate) fn capped(self) -> Self {
+        match self {
+            Self::Image { png_base64 } if png_base64.len() > MAX_PAGE_IMAGE_BASE64_BYTES => {
+                Self::Failed {
+                    reason: SkipReason::ExtractorFailed {
+                        message: "the page image is larger than the worker may send".into(),
+                    },
+                }
+            }
+            page => page,
         }
     }
 }
@@ -86,6 +221,11 @@ pub enum SkipReason {
     TooLarge,
     #[error("not valid text in its encoding")]
     NotDecodable,
+    #[error("needs a password")]
+    PasswordProtected,
+    /// Every page is an image, and no page was transcribed.
+    #[error("no text layer")]
+    NoTextLayer,
     #[error("cannot be read: {message}")]
     Unreadable { message: String },
     #[error("extraction failed: {message}")]
@@ -128,18 +268,25 @@ mod tests {
 
     #[test]
     fn every_message_round_trips_as_one_line() {
-        round_trips(&[Request {
+        let request = |task| Request {
             id: u64::MAX,
             path: "/home/someone/notes/Line \"one\"\nline two.md".into(),
             max_file_bytes: 20 * 1024 * 1024,
-        }]);
+            task,
+        };
+        round_trips(&[
+            request(Task::Extract),
+            request(Task::RenderPage { page: u32::MAX }),
+        ]);
         let reasons = [
             SkipReason::Unsupported {
-                mime: "application/pdf".into(),
+                mime: "application/zip".into(),
             },
             SkipReason::Binary,
             SkipReason::TooLarge,
             SkipReason::NotDecodable,
+            SkipReason::PasswordProtected,
+            SkipReason::NoTextLayer,
             SkipReason::Unreadable {
                 message: "No such file or directory (os error 2)".into(),
             },
@@ -166,16 +313,68 @@ mod tests {
                     truncated: true,
                 },
             },
+            FromWorker::Reply {
+                id: 0,
+                extraction: Extraction::Pages {
+                    pages: vec!["# Page one\n\nBody.".into(), String::new()],
+                    truncated: true,
+                },
+            },
+            FromWorker::Rendered {
+                id: 0,
+                page: RenderedPage::Image {
+                    png_base64: "iVBORw0KGgo=".into(),
+                },
+            },
+            FromWorker::Rendered {
+                id: 0,
+                page: RenderedPage::Blank,
+            },
+            FromWorker::Rendered {
+                id: 0,
+                page: RenderedPage::Failed {
+                    reason: SkipReason::PasswordProtected,
+                },
+            },
         ]);
         round_trips(&messages);
     }
 
     #[test]
-    fn the_longest_text_fits_the_reply_line_however_it_escapes() {
-        let reply = FromWorker::Reply {
+    fn the_longest_reply_fits_the_reply_line_however_it_escapes() {
+        let text = FromWorker::Reply {
             id: u64::MAX,
             extraction: Extraction::of_text("\u{1}".repeat(MAX_TEXT_BYTES + 1)),
         };
-        assert!(encode(&reply).len() <= MAX_REPLY_LINE_BYTES);
+        let texts = (0..=MAX_PAGES).map(|_| Ok::<_, Infallible>("\u{1}".repeat(1024)));
+        let Ok(extraction) = Extraction::of_pages(texts);
+        let Extraction::Pages { pages, truncated } = &extraction else {
+            panic!("pages come back as pages");
+        };
+        assert!(*truncated);
+        assert_eq!(pages.iter().map(String::len).sum::<usize>(), MAX_TEXT_BYTES);
+        let empty_pages = (0..=MAX_PAGES).map(|_| Ok::<_, Infallible>(String::new()));
+        let Ok(empty) = Extraction::of_pages(empty_pages);
+        let image = FromWorker::Rendered {
+            id: u64::MAX,
+            page: RenderedPage::Image {
+                png_base64: "A".repeat(MAX_PAGE_IMAGE_BASE64_BYTES),
+            },
+        };
+        let replies = [
+            text,
+            FromWorker::Reply {
+                id: u64::MAX,
+                extraction,
+            },
+            FromWorker::Reply {
+                id: u64::MAX,
+                extraction: empty,
+            },
+            image,
+        ];
+        for reply in replies {
+            assert!(encode(&reply).len() <= MAX_REPLY_LINE_BYTES);
+        }
     }
 }

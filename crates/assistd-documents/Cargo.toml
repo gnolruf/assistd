@@ -7,9 +7,13 @@ rust-version.workspace = true
 
 [dependencies]
 assistd-utils = { workspace = true }
+base64 = { workspace = true }
 encoding_rs = { workspace = true }
 html2text = { workspace = true }
+image = { workspace = true }
+num-traits = { workspace = true }
 parking_lot = { workspace = true }
+pdf_oxide = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

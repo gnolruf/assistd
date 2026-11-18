@@ -3,11 +3,16 @@
 
 mod extract;
 mod extractor;
+mod pdf;
 mod protocol;
+#[cfg(test)]
+mod sample_pdf;
 mod serve;
 mod supervisor;
 
 pub use extractor::{Extractor, ExtractorError};
-pub use protocol::{Extraction, MAX_TEXT_BYTES, SkipReason};
+pub use protocol::{
+    Extraction, MAX_PAGE_IMAGE_BYTES, MAX_PAGES, MAX_TEXT_BYTES, RenderedPage, SkipReason,
+};
 pub use serve::{ServeError, serve};
 pub use supervisor::{WorkerCommand, supervise};

@@ -11,10 +11,10 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
-use crate::protocol::{Extraction, FromWorker, Request, SkipReason};
+use crate::protocol::{Extraction, FromWorker, RenderedPage, Request, SkipReason, Task};
 
 /// How long the worker has to answer one request before it is restarted.
-const EXTRACTION_DEADLINE: Duration = Duration::from_secs(120);
+const REQUEST_DEADLINE: Duration = Duration::from_secs(120);
 
 /// A request the worker did not get to answer.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -30,8 +30,15 @@ pub enum ExtractorError {
 #[derive(Debug)]
 struct Connection {
     outgoing: mpsc::UnboundedSender<Request>,
-    pending: Option<(u64, oneshot::Sender<Extraction>)>,
+    pending: Option<(u64, Awaited)>,
     unresponsive: Option<oneshot::Sender<()>>,
+}
+
+/// Where the answer to the pending request goes, by the message that carries it.
+#[derive(Debug)]
+enum Awaited {
+    Extraction(oneshot::Sender<Extraction>),
+    Page(oneshot::Sender<RenderedPage>),
 }
 
 /// The extraction worker as the daemon sees it for its whole lifetime: how far
@@ -83,47 +90,86 @@ impl Extractor {
         path: &Path,
         max_file_bytes: u64,
     ) -> Result<Extraction, ExtractorError> {
+        let skipped = |reason| Extraction::Skipped { reason };
         let Some(path) = path.to_str() else {
-            return Ok(Extraction::Skipped {
-                reason: SkipReason::Unreadable {
-                    message: "its path is not valid UTF-8".into(),
-                },
-            });
+            return Ok(skipped(path_not_utf8()));
         };
-        let _turn = self.turn.lock().await;
-        self.readiness()?;
-        let (id, mut reply) = self.send_request(path.to_owned(), max_file_bytes)?;
-        if let Ok(answered) = tokio::time::timeout(EXTRACTION_DEADLINE, &mut reply).await {
-            return answered.map_err(|_| ExtractorError::Exited);
-        }
-        if self.abandon(id) {
-            return Ok(Extraction::Skipped {
-                reason: SkipReason::TimedOut,
-            });
-        }
-        reply.await.map_err(|_| ExtractorError::Exited)
+        let (reply_tx, reply) = oneshot::channel();
+        let request = PendingRequest {
+            path: path.to_owned(),
+            max_file_bytes,
+            task: Task::Extract,
+            awaited: Awaited::Extraction(reply_tx),
+        };
+        let answered = self.answer(request, reply).await?;
+        Ok(answered.unwrap_or_else(|| skipped(SkipReason::TimedOut)))
     }
 
-    fn send_request(
+    /// Page `page` of the PDF at `path`, counted from zero, as an image, under the
+    /// limits and the deadline of [`Self::extract`]; a page the worker does not
+    /// render in time is a failed one.
+    pub async fn render_page(
         &self,
-        path: String,
+        path: &Path,
         max_file_bytes: u64,
-    ) -> Result<(u64, oneshot::Receiver<Extraction>), ExtractorError> {
+        page: u32,
+    ) -> Result<RenderedPage, ExtractorError> {
+        let failed = |reason| RenderedPage::Failed { reason };
+        let Some(path) = path.to_str() else {
+            return Ok(failed(path_not_utf8()));
+        };
+        let (reply_tx, reply) = oneshot::channel();
+        let request = PendingRequest {
+            path: path.to_owned(),
+            max_file_bytes,
+            task: Task::RenderPage { page },
+            awaited: Awaited::Page(reply_tx),
+        };
+        let answered = self.answer(request, reply).await?;
+        Ok(answered.unwrap_or_else(|| failed(SkipReason::TimedOut)))
+    }
+
+    /// Send `request` once the worker is free and wait for `reply`; `None` when
+    /// the worker missed the deadline, which gets it restarted.
+    async fn answer<T>(
+        &self,
+        request: PendingRequest,
+        mut reply: oneshot::Receiver<T>,
+    ) -> Result<Option<T>, ExtractorError> {
+        let _turn = self.turn.lock().await;
+        self.readiness()?;
+        let id = self.send_request(request)?;
+        if let Ok(answered) = tokio::time::timeout(REQUEST_DEADLINE, &mut reply).await {
+            return answered.map(Some).map_err(|_| ExtractorError::Exited);
+        }
+        if self.abandon(id) {
+            return Ok(None);
+        }
+        reply.await.map(Some).map_err(|_| ExtractorError::Exited)
+    }
+
+    fn send_request(&self, request: PendingRequest) -> Result<u64, ExtractorError> {
+        let PendingRequest {
+            path,
+            max_file_bytes,
+            task,
+            awaited,
+        } = request;
         let mut connection = self.connection.lock();
         let connection = connection.as_mut().ok_or(ExtractorError::Exited)?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (reply_tx, reply_rx) = oneshot::channel();
-        connection.pending = Some((id, reply_tx));
+        connection.pending = Some((id, awaited));
         let request = Request {
             id,
             path,
             max_file_bytes,
+            task,
         };
         connection
             .outgoing
             .send(request)
             .map_err(|_| ExtractorError::Exited)?;
-        Ok((id, reply_rx))
+        Ok(id)
     }
 
     /// Give up on request `id` and flag its worker unresponsive; false when the
@@ -175,18 +221,47 @@ impl Extractor {
         self.connection.lock().take();
     }
 
-    /// Act on one message from the worker: it is ready, or it answered.
+    /// Act on one message from the worker: it is ready, or it answered. An answer
+    /// the pending request did not ask for is ignored.
     pub(crate) fn receive(&self, message: FromWorker) {
         match message {
             FromWorker::Ready => self.set_readiness(Ok(())),
             FromWorker::Reply { id, extraction } => {
-                let reply = self.connection.lock().as_mut().and_then(|connection| {
-                    connection.pending.take_if(|(pending, _)| *pending == id)
-                });
-                if let Some((_, reply)) = reply {
+                let awaited =
+                    self.take_pending(id, |awaited| matches!(awaited, Awaited::Extraction(_)));
+                if let Some(Awaited::Extraction(reply)) = awaited {
                     let _ = reply.send(extraction.capped());
                 }
             }
+            FromWorker::Rendered { id, page } => {
+                let awaited = self.take_pending(id, |awaited| matches!(awaited, Awaited::Page(_)));
+                if let Some(Awaited::Page(reply)) = awaited {
+                    let _ = reply.send(page.capped());
+                }
+            }
         }
+    }
+
+    /// The pending request when it is `id` and `expects` the answer that arrived.
+    fn take_pending(&self, id: u64, expects: impl Fn(&Awaited) -> bool) -> Option<Awaited> {
+        let mut connection = self.connection.lock();
+        let pending = &mut connection.as_mut()?.pending;
+        pending
+            .take_if(|(pending, awaited)| *pending == id && expects(awaited))
+            .map(|(_, awaited)| awaited)
+    }
+}
+
+/// One request on its way to the worker, and where its answer goes.
+struct PendingRequest {
+    path: String,
+    max_file_bytes: u64,
+    task: Task,
+    awaited: Awaited,
+}
+
+fn path_not_utf8() -> SkipReason {
+    SkipReason::Unreadable {
+        message: "its path is not valid UTF-8".into(),
     }
 }

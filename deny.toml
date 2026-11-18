@@ -37,6 +37,10 @@ ignore = [
     # Drop once those crates have moved off chrono.
     { id = "RUSTSEC-2026-0543", reason = "chrono, used directly and required by croner, oauth2, rmcp and schemars" },
     { id = "RUSTSEC-2026-0555", reason = "chrono-tz, a dev-dependency of assistd-core for time-zone tests" },
+    # ttf-parser is flagged unmaintained, not vulnerable. pdf_oxide requires
+    # it to read the fonts in a PDF, which happens only in the sandboxed
+    # extraction worker. Drop once pdf_oxide moves to another font parser.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser, required by pdf_oxide" },
 ]
 
 # ---------------------------------------------------------------------------
@@ -73,6 +77,12 @@ allow = ["MPL-2.0"]
 # public-domain dedication with no conditions on downstream use.
 name = "notify"
 allow = ["CC0-1.0"]
+
+[[licenses.exceptions]]
+# arrayref (via tiny-skia, which pdf_oxide renders PDF pages with) is
+# BSD-2-Clause: permissive, asking only that its notice be kept.
+name = "arrayref"
+allow = ["BSD-2-Clause"]
 
 # The next three only run inside sherpa-onnx-sys's build script, which
 # downloads and unpacks its prebuilt library archive; none of them is

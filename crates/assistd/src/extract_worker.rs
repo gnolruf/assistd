@@ -3,8 +3,9 @@
 
 use anyhow::Result;
 
-/// Log filter when `RUST_LOG` is unset.
-const DEFAULT_LOG_DIRECTIVES: &str = "info";
+/// Log filter when `RUST_LOG` is unset; the PDF library's remarks on each file
+/// it reads and on the fonts it finds are left out.
+const DEFAULT_LOG_DIRECTIVES: &str = "info,pdf_oxide=error,fontdb=error";
 
 /// Serve the daemon until it closes the worker's stdin.
 pub(crate) async fn run() -> Result<()> {
