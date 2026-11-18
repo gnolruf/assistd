@@ -38,10 +38,10 @@ pub use policy::{
     Allowlist, AllowlistError, Approval, ApprovalGate, Approvals, CONFIRM_TIMEOUT, ConfirmRouter,
     ConfirmationGate, ConfirmationRequest, FileScope, HomeAccess, IpcConfirmationGate,
     JUDGE_TIMEOUT, JudgeContext, JudgeModel, JudgedClass, JudgedCommand, NoPendingConfirm,
-    NoPendingReview, PromptParking, Protected, Risk, SCRATCH_MARKER, SafetyJudge, SandboxError,
-    SandboxInfo, SandboxPrograms, SandboxRequest, SandboxedCommand, ScopeError, ScratchCap,
-    SearchPath, SharedDirs, StandingApprovals, ToolSandbox, ToolsDisabled, Unattended, Verdict,
-    probe_sandbox,
+    NoPendingReview, PromptParking, Protected, ReaderProgram, ReaderSandbox, ReaderSandboxError,
+    Risk, SCRATCH_MARKER, SafetyJudge, SandboxError, SandboxInfo, SandboxPrograms, SandboxRequest,
+    SandboxedCommand, ScopeError, ScratchCap, SearchPath, SharedDirs, StandingApprovals,
+    ToolSandbox, ToolsDisabled, Unattended, Verdict, probe_sandbox,
 };
 pub use presentation::{OutputCap, PresentSpec};
 pub use quarantine::{Egress, Quarantine, QuarantineError};

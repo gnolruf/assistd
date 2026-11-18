@@ -10,8 +10,8 @@ use assistd_core::planner::PlanningTools;
 use assistd_core::{BuildToolsDeps, McpServerStatus, RelayDeps};
 use assistd_memory::SessionId;
 use assistd_tools::{
-    ApprovalGate, ConfirmationGate, IpcConfirmationGate, MemoryOps, ToolRegistry, ToolSandbox,
-    ToolsDisabled, VisionGate,
+    ApprovalGate, ConfirmationGate, IpcConfirmationGate, MemoryOps, SandboxInfo, ToolRegistry,
+    ToolSandbox, ToolsDisabled, VisionGate,
 };
 use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::readiness::ReadinessCell;
@@ -30,8 +30,8 @@ pub(super) struct ToolsSubsystem {
     pub planning: PlanningTools,
     pub mcp_servers: Vec<McpServerStatus>,
     pub mcp_fleet: Option<Arc<McpFleet>>,
-    /// Set when no sandbox is available, so the registry is empty.
-    pub disabled: Option<ToolsDisabled>,
+    /// The sandbox the tools run in; without one the registry is empty.
+    pub sandbox: Result<Arc<SandboxInfo>, ToolsDisabled>,
 }
 
 /// The subsystems the tools reach.
@@ -60,7 +60,7 @@ pub(super) fn init(
                 planning: PlanningTools::default(),
                 mcp_servers: Vec::new(),
                 mcp_fleet: None,
-                disabled: Some(reason),
+                sandbox: Err(reason),
             });
         }
     };
@@ -76,7 +76,7 @@ pub(super) fn init(
         config,
         config_path,
         overflow_dir: overflow_dir.clone(),
-        sandbox,
+        sandbox: Arc::clone(&sandbox),
         confirmation_gate: gate,
         vision_gate: deps.vision_gate,
         memory_ops: Arc::new(MemoryOps::new(
@@ -102,6 +102,6 @@ pub(super) fn init(
         planning: built.planning,
         mcp_servers,
         mcp_fleet,
-        disabled: None,
+        sandbox: Ok(sandbox),
     })
 }

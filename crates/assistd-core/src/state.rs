@@ -275,6 +275,7 @@ impl AppState {
             mcp_servers: Arc::clone(&subsystems.mcp_servers),
             tools_disabled: subsystems.tools_disabled.clone(),
             web_search: Arc::clone(&subsystems.web_search),
+            documents: Arc::clone(&subsystems.documents),
             embedder: Arc::clone(&memory.embedder),
             admission: Arc::clone(&admission),
             bus: bus.clone(),

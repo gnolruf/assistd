@@ -165,7 +165,7 @@ fn as_os_strs<'flags>(flags: impl IntoIterator<Item = &'flags OsString>) -> Vec<
 
 /// `bwrap` in a new capped scope, keeping only [`kept_env`] of the daemon's
 /// environment.
-fn scoped_bwrap(programs: &SandboxPrograms) -> ProcCommand {
+pub(super) fn scoped_bwrap(programs: &SandboxPrograms) -> ProcCommand {
     let mut cmd = ProcCommand::from(programs.scope.command(&programs.bwrap));
     cmd.envs(kept_env(std::env::vars_os()));
     cmd
@@ -173,7 +173,7 @@ fn scoped_bwrap(programs: &SandboxPrograms) -> ProcCommand {
 
 /// Have bwrap load the seccomp filter that keeps the command off every Unix
 /// socket, from the returned descriptor, which only `cmd`'s child may inherit.
-fn load_seccomp_filter(cmd: &mut ProcCommand) -> io::Result<OwnedFd> {
+pub(super) fn load_seccomp_filter(cmd: &mut ProcCommand) -> io::Result<OwnedFd> {
     let filter = seccomp::filter_fd()?;
     cmd.arg("--seccomp").arg(filter.as_raw_fd().to_string());
     Ok(filter)
@@ -197,8 +197,12 @@ fn bind_inputs(cmd: &mut ProcCommand, inputs: &[InputBind]) -> io::Result<Vec<Ow
 /// End `cmd`'s bwrap flags, unsetting what the scope added to the
 /// environment, and run `program` with `args` under `prlimit`'s
 /// [`RESOURCE_LIMITS`] and `choom`'s [`OOM_SCORE_ADJUSTMENT`].
-fn run_limited<I, S>(cmd: &mut ProcCommand, programs: &SandboxPrograms, program: &str, args: I)
-where
+pub(super) fn run_limited<I, S>(
+    cmd: &mut ProcCommand,
+    programs: &SandboxPrograms,
+    program: impl AsRef<OsStr>,
+    args: I,
+) where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
@@ -249,10 +253,21 @@ fn default_bwrap_flags_for(home: Option<&SandboxHome>, access: HomeAccess) -> Ve
     flags
 }
 
-/// Read-only `/usr` and [`QUARANTINE_ETC`], the [`QUARANTINE_SYSTEM_LINKS`],
-/// fresh `/tmp`, `/dev` and `/proc`, [`ISOLATION_FLAGS`], and `home` as
-/// `$HOME` and working directory. Reads the host's system links.
+/// [`system_flags`] with `home` as `$HOME` and working directory. Reads the
+/// host's system links.
 fn quarantine_flags(home: &Path) -> Vec<OsString> {
+    let mut flags = system_flags();
+    flags.extend(["--setenv", "HOME"].map(OsString::from));
+    flags.push(home.into());
+    flags.push("--chdir".into());
+    flags.push(home.into());
+    flags
+}
+
+/// Read-only `/usr` and [`QUARANTINE_ETC`], the [`QUARANTINE_SYSTEM_LINKS`],
+/// fresh `/tmp`, `/dev` and `/proc`, [`ISOLATION_FLAGS`], and the sandbox's
+/// `PATH`: none of the host but its programs. Reads the host's system links.
+pub(super) fn system_flags() -> Vec<OsString> {
     let mut flags: Vec<OsString> = ["--ro-bind", "/usr", "/usr"].map(OsString::from).into();
     for link in QUARANTINE_SYSTEM_LINKS {
         let mirror = match std::fs::read_link(link) {
@@ -268,12 +283,9 @@ fn quarantine_flags(home: &Path) -> Vec<OsString> {
         ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
             .into_iter()
             .chain(ISOLATION_FLAGS)
+            .chain(["--setenv", "PATH", SANDBOX_PATH])
             .map(OsString::from),
     );
-    flags.extend(["--setenv", "HOME"].map(OsString::from));
-    flags.push(home.into());
-    flags.extend(["--setenv", "PATH", SANDBOX_PATH, "--chdir"].map(OsString::from));
-    flags.push(home.into());
     flags
 }
 

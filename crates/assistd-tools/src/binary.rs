@@ -1,22 +1,6 @@
 //! Telling binary bytes from text, so that only text reaches the model.
 
-/// How much of a buffer's head [`sniff_binary`] looks at for a NUL byte.
-pub(crate) const SNIFF_LEN: usize = 8192;
-
-/// `Some(mime)` if the bytes look binary: a recognised non-text magic
-/// number, or a NUL byte in the first 8 KB (GNU grep's heuristic).
-pub(crate) fn sniff_binary(bytes: &[u8]) -> Option<String> {
-    if let Some(t) = infer::get(bytes) {
-        let mime = t.mime_type();
-        if !mime.starts_with("text/") {
-            return Some(mime.to_string());
-        }
-    }
-    if bytes[..bytes.len().min(SNIFF_LEN)].contains(&0u8) {
-        return Some("application/octet-stream".to_string());
-    }
-    None
-}
+use assistd_utils::binary::sniff_binary;
 
 /// Why `raw` must not reach the model: a sniffed MIME type (or
 /// `application/octet-stream`) for NUL bytes, `invalid-utf8`, or
@@ -27,7 +11,8 @@ pub(crate) fn binary_label(raw: &[u8]) -> Option<String> {
     }
 
     if raw.contains(&0u8) {
-        return Some(sniff_binary(raw).unwrap_or_else(|| "application/octet-stream".into()));
+        let mime = sniff_binary(raw).unwrap_or("application/octet-stream");
+        return Some(mime.to_owned());
     }
 
     let Ok(s) = std::str::from_utf8(raw) else {

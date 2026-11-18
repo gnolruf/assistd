@@ -192,6 +192,7 @@ dependencies = [
  "assistd-chat",
  "assistd-config",
  "assistd-core",
+ "assistd-documents",
  "assistd-embed",
  "assistd-ipc",
  "assistd-llm",
@@ -241,6 +242,7 @@ name = "assistd-core"
 version = "0.6.0"
 dependencies = [
  "assistd-config",
+ "assistd-documents",
  "assistd-embed",
  "assistd-ipc",
  "assistd-llm",
@@ -270,6 +272,23 @@ dependencies = [
  "tracing",
  "uuid",
  "zbus",
+]
+
+[[package]]
+name = "assistd-documents"
+version = "0.6.0"
+dependencies = [
+ "assistd-utils",
+ "encoding_rs",
+ "html2text",
+ "parking_lot 0.13.0",
+ "rustix 1.1.6",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -430,6 +449,7 @@ dependencies = [
 name = "assistd-utils"
 version = "0.6.0"
 dependencies = [
+ "infer",
  "parking_lot 0.13.0",
  "procfs",
  "reqwest",

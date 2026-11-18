@@ -370,6 +370,12 @@ async fn readiness_lists_every_background_subsystem() {
                     reason: "not configured".into()
                 }
             ),
+            readiness(
+                StartupComponent::DocumentIndexing,
+                ComponentReadiness::Unavailable {
+                    reason: "not configured".into()
+                }
+            ),
             readiness(mcp("fs"), ComponentReadiness::Starting),
             readiness(
                 mcp("git"),

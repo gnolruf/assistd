@@ -17,6 +17,8 @@ pub enum StartupComponent {
     Embedding,
     /// The SearXNG instance behind web search.
     WebSearch,
+    /// The worker that extracts text from the files under the index roots.
+    DocumentIndexing,
     Mcp {
         server: String,
     },
@@ -29,6 +31,7 @@ impl fmt::Display for StartupComponent {
             StartupComponent::Speech => f.write_str("speech"),
             StartupComponent::Embedding => f.write_str("semantic memory"),
             StartupComponent::WebSearch => f.write_str("web search"),
+            StartupComponent::DocumentIndexing => f.write_str("document indexing"),
             StartupComponent::Mcp { server } => write!(f, "MCP {server}"),
         }
     }

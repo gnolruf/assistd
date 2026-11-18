@@ -9,14 +9,18 @@ use crate::bus::{EventBus, EventSink};
 const STARTUP_EVENT_ID: &str = "startup";
 
 impl StatusService {
-    /// Every background subsystem with its current readiness: voice,
-    /// embedding, web search, then each configured MCP server.
+    /// Every background subsystem with its current readiness: voice, embedding,
+    /// web search, document indexing, then each configured MCP server.
     pub fn startup_readiness(&self) -> Vec<(StartupComponent, ComponentReadiness)> {
         let embedding = (
             StartupComponent::Embedding,
             self.embedder.readiness().into(),
         );
         let web_search = (StartupComponent::WebSearch, self.web_search.get().into());
+        let documents = (
+            StartupComponent::DocumentIndexing,
+            self.documents.readiness().into(),
+        );
         let mcp = self.mcp_servers.iter().map(|server| {
             (
                 StartupComponent::Mcp {
@@ -28,7 +32,7 @@ impl StatusService {
         self.voice
             .readiness()
             .into_iter()
-            .chain([embedding, web_search])
+            .chain([embedding, web_search, documents])
             .chain(mcp)
             .collect()
     }

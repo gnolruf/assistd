@@ -24,6 +24,7 @@ mod home;
 mod inert;
 mod mounts;
 mod probe;
+mod reader;
 mod scope;
 mod scratch_cap;
 mod seccomp;
@@ -33,6 +34,7 @@ pub(crate) use home::is_within_visible_home_entry;
 #[cfg(any(test, feature = "test-support"))]
 pub use inert::inert_sandbox;
 pub use probe::{SandboxError, probe_sandbox};
+pub use reader::{ReaderProgram, ReaderSandbox, ReaderSandboxError};
 pub use scope::ScopeError;
 pub(crate) use scratch_cap::Guarded;
 pub use scratch_cap::{SCRATCH_MARKER, ScratchCap};
