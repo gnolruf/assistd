@@ -1,5 +1,5 @@
-//! Daemon orchestration: the agent loop, presence state machine, IPC socket server and
-//! `AppState` dispatcher.
+//! Daemon orchestration: the agent loop, presence state machine, IPC socket server,
+//! `AppState` dispatcher and saved-task scheduling.
 
 pub mod agent;
 mod build_tools;
@@ -16,6 +16,7 @@ mod scratch;
 pub mod socket;
 pub mod state;
 pub mod subagent;
+pub mod tasks;
 mod vision;
 mod vram;
 
@@ -34,8 +35,9 @@ pub use presence::{PresenceError, PresenceManager, RequestGuard, VramShortfall, 
 pub use state::{
     AppState, BranchService, DispatchError, McpAccountError, McpAccounts, McpHost, McpLogin,
     McpServerStatus, McpService, MemoryStack, Query, Requester, SessionContext, StatusService,
-    Subsystems, TaskRunner, TaskService, TurnOrigin, TurnService, VoiceService, branch_replay,
+    Subsystems, TurnOrigin, TurnService, VoiceService, branch_replay,
 };
 pub use subagent::{RelayReport, SubAgentError, SubAgentRunner};
+pub use tasks::{TaskRunner, TaskService};
 pub use vision::VisionRevalidator;
 pub use vram::VramLedger;

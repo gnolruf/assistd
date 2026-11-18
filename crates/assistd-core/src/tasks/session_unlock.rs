@@ -32,7 +32,7 @@ enum UnlockWatchError {
 impl TaskService {
     /// Fire every `SessionUnlocked` trigger each time the user's graphical session's
     /// `LockedHint` turns false, for as long as the future runs.
-    pub(in crate::state) async fn watch_session_unlocks(self: Arc<Self>) {
+    pub(crate) async fn watch_session_unlocks(self: Arc<Self>) {
         let mut changes = match session_property_changes().await {
             Ok(changes) => changes,
             Err(e) => {

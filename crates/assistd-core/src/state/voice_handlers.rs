@@ -12,8 +12,8 @@ use assistd_config::Config;
 use assistd_ipc::{Event, EventBody, ListenPhase, PlanMode, VoiceCaptureState};
 use assistd_voice::{VoiceCapture, VoiceManager};
 
-use super::query::{Query, TurnOrigin, finish_interrupted_before_start};
 use super::turn_admission::TurnAdmission;
+use super::turns::{Query, TurnOrigin, finish_interrupted_before_start};
 use super::wakeword_handlers::{MicError, MicSession};
 use super::{DispatchError, FailedStep};
 use crate::bus::EventSink;

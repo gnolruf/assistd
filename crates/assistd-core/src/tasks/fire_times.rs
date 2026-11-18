@@ -47,7 +47,7 @@ pub enum TriggerError {
 
 /// Refuse a trigger in `triggers` with an invalid cron expression, or an `At` time not
 /// after `now` unless `stored`, the task's saved triggers, already holds it.
-pub(in crate::state) fn check_triggers<Tz: TimeZone>(
+pub(crate) fn check_triggers<Tz: TimeZone>(
     triggers: &[TaskTrigger],
     stored: &[TaskTrigger],
     now: &DateTime<Tz>,
@@ -72,7 +72,7 @@ pub(in crate::state) fn check_triggers<Tz: TimeZone>(
 }
 
 /// The earliest time any of `triggers` fires after `after`, in `after`'s time zone.
-pub(in crate::state) fn next_fire<Tz: TimeZone>(
+pub(crate) fn next_fire<Tz: TimeZone>(
     triggers: &[TaskTrigger],
     after: &DateTime<Tz>,
 ) -> Option<DateTime<Utc>> {
@@ -84,7 +84,7 @@ pub(in crate::state) fn next_fire<Tz: TimeZone>(
 }
 
 /// The first `count` times `trigger` fires after `after`, soonest first.
-pub(in crate::state) fn upcoming_fires<Tz: TimeZone>(
+pub(crate) fn upcoming_fires<Tz: TimeZone>(
     trigger: &TaskTrigger,
     after: &DateTime<Tz>,
     count: usize,
@@ -100,7 +100,7 @@ pub(in crate::state) fn upcoming_fires<Tz: TimeZone>(
 /// The trigger that fires now that `due`, the recorded next fire time, has passed at
 /// `now`: one whose fire time is no more than [`ON_TIME_GRACE`] old, else one that
 /// missed a fire time since `due` and runs missed fires once. `None` skips them all.
-pub(in crate::state) fn fired_trigger<'a, Tz: TimeZone>(
+pub(crate) fn fired_trigger<'a, Tz: TimeZone>(
     triggers: &'a [TaskTrigger],
     due: &DateTime<Tz>,
     now: &DateTime<Tz>,

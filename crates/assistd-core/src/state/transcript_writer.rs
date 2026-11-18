@@ -19,7 +19,7 @@ pub(super) const WRITE_QUEUE_CAPACITY: usize = 256;
 /// Where a turn's messages are written: the branch current when the turn
 /// opened, and the turn's row once the write opening it has landed.
 #[derive(Debug, Clone)]
-pub(super) struct PersistTarget {
+pub(crate) struct PersistTarget {
     pub(super) branch: BranchId,
     turn: Arc<OnceLock<TurnId>>,
     ledger: SharedLedger,

@@ -21,9 +21,8 @@ use assistd_tools::{JUDGE_TIMEOUT, SafetyJudge, TurnContext};
 use assistd_voice::{CaptureUnavailable, ListenError, VoiceInputError};
 
 use self::persistence::TranscriptLog;
-use self::query::TurnDeps;
-use self::tasks::TaskDeps;
 use self::turn_admission::TurnAdmission;
+use self::turns::TurnDeps;
 use self::voice_handlers::HeardPrompt;
 use crate::PresenceError;
 use crate::agent::AgentSpec;
@@ -31,6 +30,9 @@ use crate::bus::{EventBus, EventSink};
 use crate::judge::BackendJudgeModel;
 use crate::planner::{PlanError, Planner};
 use crate::presence::PresenceLlmHealthProbe;
+use crate::tasks::{
+    QueueOpError, TaskConfirmError, TaskDeps, TaskPlanError, TaskService, TriggerError,
+};
 
 pub(crate) mod branches;
 pub(crate) mod capabilities;
@@ -44,7 +46,6 @@ pub(crate) mod memory_handlers;
 pub(crate) mod memory_stack;
 pub(crate) mod persistence;
 pub(crate) mod presence_handlers;
-pub(crate) mod query;
 pub(crate) mod readiness;
 pub(crate) mod relay_trace;
 pub(crate) mod run_lane;
@@ -53,10 +54,10 @@ pub(crate) mod session;
 pub(crate) mod status_service;
 pub(crate) mod subscribe;
 pub(crate) mod subsystems;
-pub(crate) mod tasks;
 pub(crate) mod transcript_writer;
 pub(crate) mod turn_admission;
 pub(crate) mod turn_driver;
+pub(crate) mod turns;
 pub(crate) mod voice_handlers;
 pub(crate) mod wakeword_handlers;
 pub(crate) mod wire;
@@ -64,16 +65,10 @@ pub(crate) mod wire;
 pub use self::branches::{BranchService, branch_replay};
 pub use self::mcp_handlers::{McpAccountError, McpAccounts, McpHost, McpLogin, McpService};
 pub use self::memory_stack::MemoryStack;
-pub use self::query::{Query, TurnOrigin, TurnService};
 pub use self::session::SessionContext;
 pub use self::status_service::StatusService;
 pub use self::subsystems::{McpServerStatus, Subsystems};
-pub use self::tasks::TaskService;
-pub use self::tasks::confirms::TaskConfirmError;
-pub use self::tasks::fire_times::TriggerError;
-pub use self::tasks::plans::TaskPlanError;
-pub use self::tasks::queue::QueueOpError;
-pub use self::tasks::runner::TaskRunner;
+pub use self::turns::{Query, TurnOrigin, TurnService};
 pub use self::voice_handlers::VoiceService;
 pub use self::wakeword_handlers::MicError;
 pub use self::wire::AttachmentError;
@@ -178,7 +173,7 @@ impl DispatchError {
 }
 
 /// Names the step of a request a failure happened in.
-trait FailedStep<T> {
+pub(crate) trait FailedStep<T> {
     fn context(self, context: &'static str) -> Result<T, DispatchError>;
 }
 
@@ -538,7 +533,7 @@ fn planner(config: &Config, subsystems: &Subsystems, agents: AgentSpec) -> Plann
 }
 
 /// A judge asking `model`, when `tools.allow_auto_mode` allows Auto mode.
-fn safety_judge(config: &Config, model: BackendJudgeModel) -> Option<SafetyJudge> {
+pub(crate) fn safety_judge(config: &Config, model: BackendJudgeModel) -> Option<SafetyJudge> {
     config
         .tools
         .allow_auto_mode

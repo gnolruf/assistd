@@ -1,4 +1,5 @@
-//! `handle_query`: per-turn agent loop driver.
+//! `TurnService`: runs each user turn from its `Query` through admission, the agent loop,
+//! persistence and the spoken reply.
 
 use std::sync::Arc;
 
@@ -439,7 +440,7 @@ pub(super) async fn finish_interrupted_before_start(
     Ok(())
 }
 
-pub(super) async fn run_speech_worker(
+pub(crate) async fn run_speech_worker(
     voice_output: Arc<VoiceOutputController>,
     events_bus: broadcast::Sender<Event>,
     id: String,

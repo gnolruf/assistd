@@ -23,7 +23,7 @@ const CHECKED_FIRES: usize = 3;
 
 impl TaskService {
     /// Route one `Task` request to its handler.
-    pub(in crate::state) async fn dispatch(
+    pub(crate) async fn dispatch(
         self: &Arc<Self>,
         id: String,
         req: TaskRequest,

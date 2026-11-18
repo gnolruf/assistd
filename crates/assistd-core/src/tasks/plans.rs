@@ -38,7 +38,7 @@ pub(super) struct RefineAsk {
 
 /// The planning backend of the latest refine since the daemon started.
 #[derive(Debug, Default)]
-pub(in crate::state) struct TaskPlans {
+pub(crate) struct TaskPlans {
     latest: StdMutex<Option<PlanningSession>>,
 }
 

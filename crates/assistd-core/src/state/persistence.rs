@@ -24,7 +24,7 @@ use crate::recovery::spawn_supervised;
 /// The transcript of every turn: queues writes for the single writer task and
 /// tracks the background work that follows a turn.
 #[derive(Debug)]
-pub(super) struct TranscriptLog {
+pub(crate) struct TranscriptLog {
     transcripts: Arc<dyn TranscriptStore>,
     /// The embedding worker's wake signal, when embedding is enabled.
     embed_wake: Option<Arc<Notify>>,
@@ -56,7 +56,7 @@ impl TranscriptLog {
     }
 
     /// The store the log writes to.
-    pub(super) fn store(&self) -> &Arc<dyn TranscriptStore> {
+    pub(crate) fn store(&self) -> &Arc<dyn TranscriptStore> {
         &self.transcripts
     }
 
@@ -85,7 +85,7 @@ impl TranscriptLog {
     }
 
     /// [`Self::open_user_turn`] for a task run's turn on its new, empty `branch`.
-    pub(super) async fn open_task_run_turn(
+    pub(crate) async fn open_task_run_turn(
         &self,
         branch: BranchId,
         prompt: PersistedMessage,

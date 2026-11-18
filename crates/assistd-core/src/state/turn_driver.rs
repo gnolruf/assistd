@@ -352,7 +352,7 @@ enum NextLlmEvent {
 
 /// Drives one turn: every agent event is persisted, sent to the turn's sink, and spoken
 /// when the turn has a speech pipeline.
-pub(super) struct TurnDriver {
+pub(crate) struct TurnDriver {
     translator: TurnTranslator,
     events: EventSink,
     speech: Option<SpeechPipeline>,
@@ -361,7 +361,7 @@ pub(super) struct TurnDriver {
 impl TurnDriver {
     /// A driver for turn `id` writing to `persist` in `transcript`, `None` when the turn
     /// is not persisted, and sending to `events`.
-    pub(super) fn new(
+    pub(crate) fn new(
         id: String,
         transcript: Arc<TranscriptLog>,
         persist: Option<PersistTarget>,
@@ -398,7 +398,7 @@ impl TurnDriver {
     /// Forward the turn's events until the agent finishes. A client that leaves cancels
     /// the turn through `cancel`, and its wind-down events are still persisted and
     /// published. Returns the turn's final reply once it emitted `Done`.
-    pub(super) async fn drive(
+    pub(crate) async fn drive(
         mut self,
         mut llm_rx: mpsc::Receiver<LlmEvent>,
         cancel: &CancellationToken,

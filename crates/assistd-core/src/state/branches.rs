@@ -663,7 +663,7 @@ fn is_within_recency(latest: Option<DateTime<Utc>>, recency_secs: u64) -> bool {
 }
 
 /// Delete saved relay answers no stored step names any more; one already gone is fine.
-pub(super) async fn delete_answer_files(files: Vec<PathBuf>) {
+pub(crate) async fn delete_answer_files(files: Vec<PathBuf>) {
     if files.is_empty() {
         return;
     }

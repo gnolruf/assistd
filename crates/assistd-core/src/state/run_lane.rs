@@ -19,9 +19,9 @@ use assistd_llm::{
 use assistd_tools::YieldableLane;
 
 use super::lanes::LaneLease;
-use super::tasks::TaskService;
 use crate::presence::RequestGuard;
 use crate::recovery::{Component, StatusSeverity};
+use crate::tasks::TaskService;
 
 /// Why a yielded run's step ended without running.
 const CANCELLED_WHILE_YIELDED: &str = "the task run was cancelled while it waited for the model";
@@ -29,18 +29,18 @@ const CANCELLED_WHILE_YIELDED: &str = "the task run was cancelled while it waite
 /// A task run's hold on a model lane and on the daemon staying awake.
 #[derive(Debug)]
 pub(crate) struct RunLane {
-    pub(in crate::state) tasks: Arc<TaskService>,
-    pub(in crate::state) task: TaskId,
-    pub(in crate::state) run: TaskRunId,
-    pub(in crate::state) held: LaneHold,
+    pub(crate) tasks: Arc<TaskService>,
+    pub(crate) task: TaskId,
+    pub(crate) run: TaskRunId,
+    pub(crate) held: LaneHold,
     /// The run's backend, moved to the slot of each lane it regains.
-    pub(in crate::state) backend: Arc<dyn LlmBackend>,
-    pub(in crate::state) cancel: CancellationToken,
+    pub(crate) backend: Arc<dyn LlmBackend>,
+    pub(crate) cancel: CancellationToken,
 }
 
 /// The lane and wake a [`RunLane`] holds now, if any.
 #[derive(Debug)]
-pub(in crate::state) struct LaneHold(watch::Sender<Option<Held>>);
+pub(crate) struct LaneHold(watch::Sender<Option<Held>>);
 
 #[derive(Debug)]
 struct Held {
@@ -51,7 +51,7 @@ struct Held {
 
 impl LaneHold {
     /// Holding `lease`'s lane with the daemon kept awake by `awake`.
-    pub(in crate::state) fn new(lease: LaneLease, awake: RequestGuard) -> Self {
+    pub(crate) fn new(lease: LaneLease, awake: RequestGuard) -> Self {
         Self(watch::Sender::new(Some(Held {
             lease,
             _awake: Some(awake),
@@ -61,7 +61,7 @@ impl LaneHold {
 
 impl RunLane {
     /// Whether the run holds the main lane now.
-    pub(in crate::state) fn on_main_lane(&self) -> bool {
+    pub(crate) fn on_main_lane(&self) -> bool {
         self.held
             .0
             .borrow()
@@ -69,13 +69,13 @@ impl RunLane {
             .is_some_and(|held| held.lease.on_main_lane())
     }
 
-    pub(in crate::state) fn release(&self) {
+    pub(crate) fn release(&self) {
         self.held.0.send_replace(None);
     }
 
     /// Wait first in the queue for a lane, move the backend to its slot, and wake the
     /// model; `false` when the run was cancelled first.
-    pub(in crate::state) async fn regain(&self) -> bool {
+    pub(crate) async fn regain(&self) -> bool {
         let Some(lane) = self.tasks.deps.admission.task_queue.resume_first(self.run) else {
             return false;
         };
@@ -143,9 +143,9 @@ impl YieldableLane for RunLane {
 /// A task run's backend whose model steps give way to the user's interaction:
 /// before each step, and mid-step by discarding what streamed so far.
 #[derive(Debug)]
-pub(in crate::state) struct YieldingBackend {
-    pub(in crate::state) inner: Arc<dyn TurnBackend>,
-    pub(in crate::state) lane: Arc<RunLane>,
+pub(crate) struct YieldingBackend {
+    pub(crate) inner: Arc<dyn TurnBackend>,
+    pub(crate) lane: Arc<RunLane>,
 }
 
 #[async_trait]

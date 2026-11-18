@@ -14,8 +14,8 @@ use assistd_ipc::{Event, EventBody, InteractionHold, TaskQueueSnapshot};
 
 use super::interaction::{InteractionState, InteractionTurn, UserInteraction};
 use super::lanes::ModelLanes;
-use super::tasks::queue::{TaskQueue, TurnStart};
 use crate::bus::EventSink;
+use crate::tasks::queue::{TaskQueue, TurnStart};
 
 /// Longest preview of a queued user turn's text, in characters.
 const TURN_PREVIEW_CHARS: usize = 80;
@@ -45,16 +45,16 @@ impl Drop for QueuedTurnGuard<'_> {
 /// take, the user's interaction, the queue of waiting runs and turns, and the token
 /// that interrupts turns.
 #[derive(Debug)]
-pub(super) struct TurnAdmission {
+pub(crate) struct TurnAdmission {
     config: Arc<Config>,
     /// The main model lane, held by user turns and by a task run on it.
-    pub(super) agent_turn_lock: Arc<Mutex<()>>,
+    pub(crate) agent_turn_lock: Arc<Mutex<()>>,
     /// Serialises user turns with the branch operations that edit the main backend's history.
-    pub(super) user_turn_lock: Arc<Mutex<()>>,
-    pub(super) lanes: Arc<ModelLanes>,
+    pub(crate) user_turn_lock: Arc<Mutex<()>>,
+    pub(crate) lanes: Arc<ModelLanes>,
     /// The user's interaction, which holds the task queue off a lone lane.
-    pub(super) interaction: Arc<UserInteraction>,
-    pub(super) task_queue: TaskQueue,
+    pub(crate) interaction: Arc<UserInteraction>,
+    pub(crate) task_queue: TaskQueue,
     /// Parent of every turn's cancellation token; an interrupt cancels it
     /// and installs a fresh one.
     interrupt: StdMutex<CancellationToken>,
@@ -77,7 +77,7 @@ impl TurnAdmission {
 
     /// A token for a turn starting now, cancelled by the next
     /// [`Self::interrupt_turns`].
-    pub(super) fn turn_cancellation(&self) -> CancellationToken {
+    pub(crate) fn turn_cancellation(&self) -> CancellationToken {
         self.interrupt.lock().child_token()
     }
 
@@ -89,13 +89,13 @@ impl TurnAdmission {
     }
 
     /// The task queue and the model lanes as they stand.
-    pub(super) fn queue_snapshot(&self) -> TaskQueueSnapshot {
+    pub(crate) fn queue_snapshot(&self) -> TaskQueueSnapshot {
         self.task_queue
             .snapshot(self.lanes.holders(), self.interaction_hold())
     }
 
     /// Whether the user's interaction keeps task runs off the model's only lane.
-    pub(super) fn interaction_holds_queue(&self) -> bool {
+    pub(crate) fn interaction_holds_queue(&self) -> bool {
         self.lanes.is_single() && self.interaction.is_open()
     }
 
@@ -120,7 +120,7 @@ impl TurnAdmission {
 
     /// How long the user's interaction stays open after its last reply finishes:
     /// `resume_after_idle_secs`, or the wake word's follow-up window when longer.
-    pub(super) fn interaction_quiet_time(&self) -> Duration {
+    pub(crate) fn interaction_quiet_time(&self) -> Duration {
         let idle = Duration::from_secs(self.config.tasks.resume_after_idle_secs.get().into());
         let voice = &self.config.voice;
         if voice.enabled && voice.wakeword.enabled {
