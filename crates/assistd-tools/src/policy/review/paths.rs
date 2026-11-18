@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use crate::policy::path_class::{admits_edit, canonical_existing};
+use assistd_utils::path::canonical_existing;
+
+use crate::policy::path_class::admits_edit;
 use crate::policy::shell::Word;
 
 /// Characters after which the text of a word is only known at run time.

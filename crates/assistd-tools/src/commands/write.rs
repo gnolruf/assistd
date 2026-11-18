@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_ipc::ConfirmSource;
-use assistd_utils::path::{lexical_clean, tilde_remainder};
+use assistd_utils::path::{lexical_clean, split_at_existing, tilde_remainder};
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
 use rustix::fs::{FileType, Mode, OFlags};
@@ -18,7 +18,7 @@ use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
     Action, Analysis, Approval, Class, Confirmation, ConfirmationGate, ConfirmationRequest, Effect,
     PathGuards, Review, Risk, SandboxInfo, Unattended, admits_edit, guarded_review,
-    on_blocking_pool, split_at_existing,
+    on_blocking_pool,
 };
 
 /// Leading characters of the content shown when asking to confirm a write.

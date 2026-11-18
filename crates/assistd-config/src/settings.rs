@@ -104,6 +104,10 @@ impl SettingValue for Vec<String> {
     const KIND: SettingKind = SettingKind::List(ListItem::Text);
 }
 
+impl SettingValue for Vec<AbsoluteDir> {
+    const KIND: SettingKind = SettingKind::List(ListItem::Text);
+}
+
 impl SettingValue for NonEmpty<WritablePath> {
     const KIND: SettingKind = SettingKind::List(ListItem::Text);
 }

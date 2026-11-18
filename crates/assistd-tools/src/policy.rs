@@ -37,8 +37,8 @@ pub use confirm::{
 pub(crate) use egress::EgressPolicy;
 pub use file_scope::{ConfinedRoot, FileScope};
 pub use judge::{JUDGE_TIMEOUT, JudgeModel, JudgedCommand, SafetyJudge, Verdict};
+pub(crate) use path_class::admits_edit;
 pub use path_class::{GuardRoots, PathGuards, PathVerdict};
-pub(crate) use path_class::{admits_edit, split_at_existing};
 pub use review::{Action, Analysis, Class, Confirmation, Effect, analyze, classify};
 #[cfg(any(test, feature = "test-support"))]
 pub use sandbox::inert_sandbox;

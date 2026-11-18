@@ -1,5 +1,6 @@
-//! Home-directory expansion and lexical cleaning for user-supplied paths.
+//! Home-directory expansion, lexical cleaning and symlink resolution for user-supplied paths.
 
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 /// What follows the tilde when `raw` is exactly `~` or starts with `~/`;
@@ -52,6 +53,37 @@ pub fn lexical_clean(path: &Path) -> PathBuf {
         result.push(component.as_os_str());
     }
     result
+}
+
+/// The deepest existing ancestor of `path`, or `path` itself, and the rest of `path` below it.
+pub fn split_at_existing(path: &Path) -> (PathBuf, PathBuf) {
+    let mut anchor = path.to_path_buf();
+    let mut tail = PathBuf::new();
+    loop {
+        if anchor.symlink_metadata().is_ok() {
+            return (anchor, tail);
+        }
+        let Some(parent) = anchor.parent() else {
+            return (path.to_path_buf(), PathBuf::new());
+        };
+        let Some(file_name) = anchor.file_name() else {
+            return (anchor, tail);
+        };
+        let mut new_tail = PathBuf::from(file_name);
+        if !tail.as_os_str().is_empty() {
+            new_tail.push(&tail);
+        }
+        tail = new_tail;
+        anchor = parent.to_path_buf();
+    }
+}
+
+/// `path` with its deepest existing ancestor canonicalized and the rest cleaned
+/// lexically; `None` when that ancestor cannot be resolved.
+pub fn canonical_existing(path: &Path) -> Option<PathBuf> {
+    let (anchor, tail) = split_at_existing(path);
+    let anchor = fs::canonicalize(anchor).ok()?;
+    Some(lexical_clean(&anchor.join(tail)))
 }
 
 #[cfg(test)]

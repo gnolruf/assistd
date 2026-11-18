@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_ipc::{ActionOutlook, HostName, PermissionMode, PlannedAction};
+use assistd_utils::path::canonical_existing;
 use assistd_utils::program::find_program;
 
 use super::allowlist::{Allowlist, ApprovalScope, SearchPath, Verdict};
 use super::approvals::{ApprovalGate, Approvals};
-use super::path_class::canonical_existing;
 use crate::commands::wm::unlaunchable_app;
 use crate::{MCP_TOOL_NAME_PREFIX, ToolRegistry};
 

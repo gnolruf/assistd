@@ -7,6 +7,7 @@ pub mod compositor;
 pub mod custom_args;
 pub mod defaults;
 pub mod document;
+pub mod documents;
 pub mod embedding;
 pub mod errors;
 mod home_path;
@@ -29,6 +30,7 @@ pub use chat::ChatConfig;
 pub use compositor::{Compositor, CompositorConfig, CompositorType};
 pub use custom_args::{CustomArgs, EmbeddingServer, ModelServer, ServerKind};
 pub use document::ConfigDocument;
+pub use documents::DocumentsConfig;
 pub use embedding::{EmbeddingConfig, EmbeddingModel};
 pub use errors::{
     AbsoluteDirError, BlankStringError, ConfigError, ConfigIssue, CustomArgsError,

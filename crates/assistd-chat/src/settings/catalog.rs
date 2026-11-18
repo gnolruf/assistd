@@ -134,6 +134,17 @@ pub(crate) const SECTIONS: &[Section] = &[
     ),
     feature(
         Tab::Tools,
+        "Documents",
+        enable("documents.enabled"),
+        &["embedding.enabled"],
+        &[
+            setting("documents.roots"),
+            setting("documents.exclude"),
+            setting("documents.max_file_mb"),
+        ],
+    ),
+    feature(
+        Tab::Tools,
         "Search",
         enable("search.enabled"),
         &[],

@@ -9,7 +9,7 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use assistd_utils::path::{expand_tilde, lexical_clean, tilde_remainder};
+use assistd_utils::path::{canonical_existing, expand_tilde, lexical_clean, tilde_remainder};
 
 use super::review::{Action, Analysis, Class, Effect};
 
@@ -463,36 +463,6 @@ fn typed_entries(dir: &Path) -> io::Result<Vec<(PathBuf, FileType)>> {
 /// Whether a recursive operation on `path` reaches `tree`: it lies below `path` and exists.
 fn holds(path: &Path, tree: &Path) -> bool {
     tree.starts_with(path) && tree.symlink_metadata().is_ok()
-}
-
-/// The deepest existing ancestor of `path`, or `path` itself, and the rest of `path` below it.
-pub(crate) fn split_at_existing(path: &Path) -> (PathBuf, PathBuf) {
-    let mut anchor = path.to_path_buf();
-    let mut tail = PathBuf::new();
-    loop {
-        if anchor.symlink_metadata().is_ok() {
-            return (anchor, tail);
-        }
-        let Some(parent) = anchor.parent() else {
-            return (path.to_path_buf(), PathBuf::new());
-        };
-        let Some(file_name) = anchor.file_name() else {
-            return (anchor, tail);
-        };
-        let mut new_tail = PathBuf::from(file_name);
-        if !tail.as_os_str().is_empty() {
-            new_tail.push(&tail);
-        }
-        tail = new_tail;
-        anchor = parent.to_path_buf();
-    }
-}
-
-/// `path` with its deepest existing ancestor canonicalized and the rest cleaned lexically.
-pub(crate) fn canonical_existing(path: &Path) -> Option<PathBuf> {
-    let (anchor, tail) = split_at_existing(path);
-    let anchor = std::fs::canonicalize(anchor).ok()?;
-    Some(lexical_clean(&anchor.join(tail)))
 }
 
 /// Whether `raw` names a directory through its contents (`dir/`, `dir/.`), so a symlink in
