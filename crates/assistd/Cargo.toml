@@ -24,6 +24,7 @@ dirs = { workspace = true }
 assistd-chat   = { workspace = true, optional = true }
 assistd-config = { workspace = true }
 assistd-core   = { workspace = true }
+assistd-documents = { workspace = true }
 assistd-embed  = { workspace = true }
 assistd-ipc    = { workspace = true, features = ["client"] }
 assistd-llm    = { workspace = true }

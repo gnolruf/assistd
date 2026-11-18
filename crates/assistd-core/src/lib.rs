@@ -5,6 +5,7 @@ mod admission;
 pub mod agent;
 mod build_tools;
 pub mod bus;
+mod documents;
 pub mod gpu_monitor;
 pub mod idle_monitor;
 mod judge;
@@ -29,6 +30,7 @@ pub use build_tools::{
     probe_tool_sandbox,
 };
 pub use bus::{BusSubscription, ClientGone, EventBus, EventSink};
+pub use documents::{DocumentsUnavailable, extract_worker_command};
 pub use recovery::{
     Component, StatusSeverity, drain_join_set, install_panic_hook, spawn_supervised,
 };

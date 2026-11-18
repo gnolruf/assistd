@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use assistd_documents::Extractor;
 use assistd_ipc::{ComponentReadiness, McpServerState, McpTransportKind};
 use assistd_llm::{LlmBackend, SlotStash};
 use assistd_tools::{ToolCatalog, ToolRegistry, ToolsDisabled};
@@ -77,6 +78,8 @@ pub struct Subsystems {
     pub mcp_accounts: Option<Arc<dyn McpAccounts>>,
     /// Readiness of the SearXNG instance web search goes through.
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
+    /// Extracts the text of files under the index roots.
+    pub documents: Arc<Extractor>,
     pub tools_disabled: Option<ToolsDisabled>,
     /// Keeps each holder's slot state while another uses the slot.
     pub slot_stash: Option<Arc<SlotStash>>,
@@ -84,7 +87,7 @@ pub struct Subsystems {
 
 impl Subsystems {
     /// Bundle the required subsystems, with no planning tools, no window manager, no vision
-    /// revalidator, no MCP servers, and no web search.
+    /// revalidator, no MCP servers, no web search, and no document extraction.
     pub fn new(
         llm: Arc<dyn LlmBackend>,
         presence: Arc<PresenceManager>,
@@ -104,6 +107,7 @@ impl Subsystems {
             web_search: Arc::new(ReadinessCell::new(Readiness::Unavailable(
                 "not configured".into(),
             ))),
+            documents: Arc::new(Extractor::unavailable("not configured")),
             tools_disabled: None,
             slot_stash: None,
         }
@@ -142,6 +146,12 @@ impl Subsystems {
     /// Track the web search instance's startup.
     pub fn with_web_search(mut self, web_search: Arc<ReadinessCell<ChildServerStatus>>) -> Self {
         self.web_search = web_search;
+        self
+    }
+
+    /// Extract document text through `documents`.
+    pub fn with_documents(mut self, documents: Arc<Extractor>) -> Self {
+        self.documents = documents;
         self
     }
 

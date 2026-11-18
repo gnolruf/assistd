@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use assistd_config::Config;
+use assistd_documents::Extractor;
 use assistd_embed::EmbedderHandle;
 use assistd_tools::ToolsDisabled;
 use assistd_utils::child_server::ChildServerStatus;
@@ -26,6 +27,7 @@ pub struct StatusService {
     pub(super) mcp_servers: Arc<[McpServerStatus]>,
     pub(super) tools_disabled: Option<ToolsDisabled>,
     pub(super) web_search: Arc<ReadinessCell<ChildServerStatus>>,
+    pub(super) documents: Arc<Extractor>,
     pub(super) embedder: Arc<EmbedderHandle>,
     pub(super) admission: Arc<TurnAdmission>,
     pub(super) bus: EventBus,

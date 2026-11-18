@@ -14,6 +14,7 @@ use client::{listen, mcp, memory, presence, ptt, task, voice_ctl};
 
 mod client;
 mod daemon;
+mod extract_worker;
 #[cfg(feature = "tray")]
 mod tray;
 mod voice_worker;
@@ -113,6 +114,11 @@ enum Commands {
     /// spawns this itself.
     #[command(hide = true)]
     VoiceWorker,
+
+    /// Extract document text over stdin and stdout; the daemon spawns this
+    /// itself, in a sandbox.
+    #[command(hide = true)]
+    ExtractWorker,
 }
 
 /// The `RUST_LOG` filter when it is set and parses, else `default_directives`.
@@ -183,5 +189,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Task(args) => task::run(args).await,
         Commands::Mcp(args) => mcp::run(args).await,
         Commands::VoiceWorker => voice_worker::run().await,
+        Commands::ExtractWorker => extract_worker::run().await,
     }
 }

@@ -1,5 +1,5 @@
-//! Daemon entrypoint: bring up the subsystems, serve IPC while the model, voice,
-//! embedding, search and MCP servers start in the background, tear down in order.
+//! Daemon entrypoint: bring up the subsystems, serve IPC while the model, voice, embedding,
+//! search, document extraction and MCP servers start in the background, tear down in order.
 
 use std::collections::HashSet;
 use std::fs::DirBuilder;
@@ -28,6 +28,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use documents_init::{DocumentsService, DocumentsStartup};
 use embed_init::{EmbeddingHandles, EmbeddingService, EmbeddingStages, EmbeddingStartup};
 use mcp_init::{McpFleet, McpService};
 use memory_init::MemorySubsystem;
@@ -38,6 +39,7 @@ use voice_init::VoiceService;
 use warmup::Warmup;
 
 mod background_start;
+mod documents_init;
 mod embed_init;
 mod mcp_init;
 mod memory_init;
@@ -52,6 +54,10 @@ mod wm_init;
 const DEFAULT_LOG_DIRECTIVES: &str = "info";
 
 const RELAY_DIR_MODE: u32 = 0o700;
+
+/// The running daemon's own image, which stays this build even after the
+/// file on disk is replaced.
+const SELF_EXE: &str = "/proc/self/exe";
 
 /// Command-line arguments for the `daemon` subcommand.
 #[derive(Args)]
@@ -129,16 +135,8 @@ async fn start(
     let vision_revalidator = build_vision_revalidator(&config, &api_key, &presence, &health_probe)?;
     let voice = VoiceManager::new(config.voice.synthesis.enabled);
 
-    let vram = open_vram_ledger(&config, &presence);
-
-    let gpu_monitor_handle = gpu_monitor::spawn_monitor(
-        &config.sleep,
-        vram.clone(),
-        presence.clone(),
-        stages.intake.subscribe(),
-    );
-    let idle_monitor_handle =
-        idle_monitor::spawn_monitor(&config.sleep, presence.clone(), stages.intake.subscribe());
+    let (gpu_monitor_handle, idle_monitor_handle) =
+        spawn_presence_monitors(&config, &presence, stages);
 
     let (embed, embed_startup) = embed_init::prepare(&config, &api_key, &memory.sqlite_handle);
     let (web_search, search_startup) = search_init::prepare(&config);
@@ -169,6 +167,8 @@ async fn start(
         },
     )?;
 
+    let (documents, documents_startup) = documents_init::prepare(&config, tools.sandbox.as_deref());
+
     replay_history(llm.as_ref(), std::mem::take(&mut memory.resumed_history)).await;
 
     let subsystems = Subsystems::new(llm, presence.clone(), tools.registry, voice.clone())
@@ -176,7 +176,8 @@ async fn start(
         .with_vision_revalidator(vision_revalidator.clone())
         .with_mcp_servers(tools.mcp_servers, tools.mcp_fleet.clone())
         .with_web_search(web_search)
-        .with_tools_disabled(tools.disabled)
+        .with_documents(documents)
+        .with_tools_disabled(tools.sandbox.err())
         .with_planning_tools(tools.planning)
         .with_slot_stash(slot_stash);
 
@@ -196,6 +197,7 @@ async fn start(
             vision: vision_revalidator,
             embed: embed_startup,
             search: search_startup,
+            documents: documents_startup,
             mcp: tools.mcp_fleet,
         },
         stages,
@@ -211,6 +213,7 @@ async fn start(
             voice: background.voice,
             embed: background.embed,
             search: background.search,
+            documents: background.documents,
             window,
             mcp: background.mcp,
             intake_tasks: IntakeTasks {
@@ -226,6 +229,7 @@ struct BackgroundStarts {
     vision: Arc<VisionRevalidator>,
     embed: Option<EmbeddingStartup>,
     search: Option<SearchStartup>,
+    documents: Option<DocumentsStartup>,
     mcp: Option<Arc<McpFleet>>,
 }
 
@@ -234,12 +238,13 @@ struct BackgroundServices {
     voice: VoiceService,
     embed: EmbeddingService,
     search: SearchService,
+    documents: DocumentsService,
     mcp: McpService,
 }
 
-/// Start the search and MCP servers at once, and the voice worker and the
-/// embedding server once the model load has settled so none of them loads
-/// onto the GPU beside it.
+/// Start the search and MCP servers and the extraction worker at once, and the
+/// voice worker and the embedding server once the model load has settled so
+/// none of them loads onto the GPU beside it.
 fn spawn_background_starts(
     state: &Arc<AppState>,
     starts: BackgroundStarts,
@@ -276,6 +281,11 @@ fn spawn_background_starts(
         .map_or_else(SearchService::disabled, |startup| {
             startup.spawn(state.clone(), stages.search.subscribe())
         });
+    let documents = starts
+        .documents
+        .map_or_else(DocumentsService::disabled, |startup| {
+            startup.spawn(state.clone(), stages.tools.subscribe())
+        });
     let mcp = starts
         .mcp
         .map_or_else(McpService::disabled, |fleet| fleet.spawn(state.mcp.host()));
@@ -284,6 +294,7 @@ fn spawn_background_starts(
         voice,
         embed,
         search,
+        documents,
         mcp,
     }
 }
@@ -463,6 +474,27 @@ fn build_main_backend(
     )?
     .with_slot_stash(slot_stash);
     Ok(Arc::new(llm))
+}
+
+/// Start the GPU-contention and idle monitors that drive `presence`, each `None`
+/// when it is off; both stop on the intake stage.
+fn spawn_presence_monitors(
+    config: &Config,
+    presence: &Arc<PresenceManager>,
+    stages: &ShutdownStages,
+) -> (Option<JoinHandle<()>>, Option<JoinHandle<()>>) {
+    let gpu_monitor = gpu_monitor::spawn_monitor(
+        &config.sleep,
+        open_vram_ledger(config, presence),
+        Arc::clone(presence),
+        stages.intake.subscribe(),
+    );
+    let idle_monitor = idle_monitor::spawn_monitor(
+        &config.sleep,
+        Arc::clone(presence),
+        stages.intake.subscribe(),
+    );
+    (gpu_monitor, idle_monitor)
 }
 
 /// The VRAM ledger, checked by `presence` before every wake; `None` when the GPU

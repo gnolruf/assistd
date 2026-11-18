@@ -106,10 +106,16 @@ jobs:
           cargo doc --workspace --no-deps --locked \
             --features assistd-llm/test-support,assistd-mcp/test-support,assistd-voice/test-support
 
+      # The extraction worker's sandbox drops LD_LIBRARY_PATH and shows only
+      # the binary's own directories, so the binary needs the libraries
+      # beside it, where its runpath looks. rust-cache prunes the copies.
       - name: Test
         env:
           LD_LIBRARY_PATH: ${{ env.SHERPA_ONNX_LIB_DIR }}
         run: |
+          mkdir -p target/debug
+          cp "$SHERPA_ONNX_LIB_DIR"/libsherpa-onnx-c-api.so \
+            "$SHERPA_ONNX_LIB_DIR"/libonnxruntime.so target/debug/
           cargo test --workspace --locked \
             --features assistd-llm/test-support,assistd-mcp/test-support,assistd-voice/test-support
 

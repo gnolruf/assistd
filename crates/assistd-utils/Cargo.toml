@@ -12,6 +12,7 @@ test-support = []
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 rustix = { workspace = true }
 procfs = { workspace = true }
+infer = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 tempfile = { workspace = true }

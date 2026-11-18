@@ -11,6 +11,7 @@ sway = ["assistd-wm/sway"]
 
 [dependencies]
 assistd-config = { workspace = true }
+assistd-documents = { workspace = true }
 assistd-embed = { workspace = true }
 assistd-ipc = { workspace = true }
 assistd-llm = { workspace = true }

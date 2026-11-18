@@ -13,9 +13,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::info;
 
-/// The running daemon's own image, which stays this build even after the
-/// file on disk is replaced.
-const SELF_EXE: &str = "/proc/self/exe";
+use super::SELF_EXE;
 
 /// The hidden subcommand the worker runs as.
 const WORKER_SUBCOMMAND: &str = "voice-worker";

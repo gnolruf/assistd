@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout_at};
 use tracing::info;
 
+use super::documents_init::DocumentsService;
 use super::embed_init::EmbeddingService;
 use super::mcp_init::McpService;
 use super::memory_init::MemorySubsystem;
@@ -74,6 +75,7 @@ pub(super) struct DaemonShutdown {
     pub(super) voice: VoiceService,
     pub(super) embed: EmbeddingService,
     pub(super) search: SearchService,
+    pub(super) documents: DocumentsService,
     pub(super) window: WindowSubsystem,
     pub(super) mcp: McpService,
     pub(super) intake_tasks: IntakeTasks,
@@ -107,6 +109,7 @@ impl DaemonShutdown {
             deadline.bound("window manager", self.window.shutdown()),
             deadline.bound("MCP servers", self.mcp.shutdown()),
             deadline.bound("web search", self.search.shutdown()),
+            deadline.bound("extraction worker", self.documents.shutdown()),
             deadline.bound(
                 "embedding",
                 self.embed

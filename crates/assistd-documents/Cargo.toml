@@ -1,0 +1,24 @@
+[package]
+name = "assistd-documents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+assistd-utils = { workspace = true }
+encoding_rs = { workspace = true }
+html2text = { workspace = true }
+parking_lot = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "io-std", "process"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

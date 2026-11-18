@@ -1,6 +1,6 @@
 # Architecture
 
-`assistd` is a Rust workspace split into thirteen library crates plus a
+`assistd` is a Rust workspace split into fourteen library crates plus a
 binary. This page maps the crates, the external processes the daemon
 supervises, and the path a user query takes from keypress to spoken
 reply.
@@ -26,6 +26,7 @@ flowchart TB
         mcp["<b>assistd-mcp</b><br/>stdio + HTTP client (rmcp)"]
         memory[("<b>assistd-memory</b><br/>SQLite stores")]
         embed["<b>assistd-embed</b><br/>embedding worker"]
+        documents["<b>assistd-documents</b><br/>text extraction worker"]
         search["<b>assistd-search</b><br/>SearXNG launch spec + client"]
     end
 
@@ -40,7 +41,7 @@ flowchart TB
     clients -- "Unix socket · line-delimited JSON<br/>Request / Event" --> bin
     bin --> core
     bin --> mcp & search
-    core --> llm & tools & voice & wm & memory & embed & search
+    core --> llm & tools & voice & wm & memory & embed & search & documents
     tools --> memory & wm & search
     mcp --> tools
     embed --> memory
@@ -59,7 +60,8 @@ flowchart TB
 | `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | every other `assistd-*` crate                                                    |
 | `assistd-chat`   | The `assistd chat` terminal window and the `assistd settings` panel, a client that only reads and writes the socket. | `config`, `ipc`, `utils`                                                         |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
-| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, `build_tools()` factory. | `config`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
+| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
+| `assistd-documents` | Document text extraction in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `utils`                                                         |
@@ -67,7 +69,7 @@ flowchart TB
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `SemanticStore`, `TaskStore`.   | `ipc`                                                                            |
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
-| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs, non-blocking regular-file open, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the chat-template token list and its neutraliser for text and JSON, terminal-safe escaping of daemon-supplied text, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
+| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs, binary-content sniffing, non-blocking regular-file open, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the chat-template token list and its neutraliser for text and JSON, terminal-safe escaping of daemon-supplied text, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
 | `assistd-voice`  | `VoiceInput` (Parakeet STT, Silero VAD and wake-phrase keyword spotting through sherpa-onnx) + `VoiceOutput` (sherpa-onnx TTS, played through rodio) + per-sentence `SpeakDecision` + the Hugging Face downloader that caches their models, run in a supervised `voice-worker` child behind daemon-side proxies. | `config`, `ipc`, `utils`                                                         |
 | `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`. | `config`, `utils`                                                                |
 
@@ -103,8 +105,9 @@ child process in the background, reporting `PresenceState::Waking` until
 the model has loaded (queries wait for it; requests that need no model
 are served at once). Voice and the embedding server start after the
 model, so neither loads onto the GPU while it does, and the SearXNG
-instance and MCP servers start straight away; none of them holds up the
-socket. `RequestBody::GetReadiness` reports how far each has got as one
+instance, the MCP servers and the document extraction worker start straight
+away; none of them holds up the socket. `RequestBody::GetReadiness` reports
+how far each has got as one
 `EventBody::Readiness` per subsystem, and the daemon broadcasts the same event as each one settles. The chat names
 whatever is still starting, and the tray tooltip lists every subsystem's
 state. The server takes
@@ -710,6 +713,47 @@ embeds every row still pending, whether written during startup or left
 over from an earlier run. Semantic search, reindex, `remember`
 searches and `reminisce` report "embedding is still starting" (or why it is
 unavailable) until then, and per-turn context injection skips recall.
+
+### Document extraction (`assistd-documents`)
+
+Indexing a file starts with turning it into text, which means parsing files
+the user did not necessarily write. That never happens in the daemon: with
+`documents.enabled` and at least one root, the daemon runs an extraction
+worker, the hidden `assistd extract-worker` subcommand, and asks it for one
+file at a time over line-delimited JSON on its stdin and stdout. A request
+names a file and the largest size to read; the reply is the file's text, cut
+at 4 MiB with a flag saying so, or a `SkipReason`: an unsupported type (a
+recognised binary format, with its MIME type), binary, too large, not
+decodable, unreadable, extractor failed, or timed out.
+
+Plain text, Markdown and source code are decoded with `encoding_rs`, as UTF-8
+or as the encoding their byte-order mark names, and kept as they are; text
+that is not valid in that encoding is skipped rather than patched with
+replacement characters. A file `cat` would call binary is skipped. `.html`,
+`.htm` and `.xhtml` files are rendered to text with `html2text`, headings as
+Markdown headings so the chunker cuts at them.
+
+The worker runs in `ReaderSandbox`, a bwrap profile that `assistd-tools`
+builds from the tool sandbox's programs: read-only `/usr`, the merged-`/usr`
+links and the few `/etc` entries a relay's quarantine has, fresh `/tmp`, `/dev` and `/proc`,
+`documents.roots` bound read-only at their own paths, and nothing else of
+`$HOME`, with every namespace unshared, the network included, and the
+seccomp filter that refuses `AF_UNIX` sockets. The daemon's own image is
+bound from a descriptor of `/proc/self/exe` over the path it was started
+from, beside the directories its shared libraries load from. It runs in the
+same capped systemd scope and under the same `prlimit` and `choom` wrappers
+as a tool command, then `chrt --idle` and `ionice -c 3`, so extraction takes
+only CPU and disk time nothing else wants. There is no unwrapped mode:
+without a sandbox (tools disabled, bwrap missing) or without `chrt` and
+`ionice`, document indexing is `Unavailable` with the reason.
+
+The supervisor mirrors the voice worker's. The `Extractor` is `Starting`
+until the worker's first line says it is ready, and appears in `GetReadiness`
+as document indexing. A request has two minutes; a worker that misses that
+is killed, the file is skipped as timed out, and the worker restarts under
+`RestartPolicy` backoff, as it does when it dies. The daemon reads no line
+longer than the largest reply can be, so a compromised worker cannot grow
+the daemon's memory.
 
 ### Voice (`assistd-voice`)
 

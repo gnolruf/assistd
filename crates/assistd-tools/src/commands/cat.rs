@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
+use assistd_utils::binary::{SNIFF_LEN, sniff_binary};
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
-use crate::binary::{SNIFF_LEN, sniff_binary};
 use crate::chain::OUTPUT_MAX;
 use crate::chain::Word;
 use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
