@@ -31,7 +31,7 @@ impl TaskService {
     /// Fire `PathChanged` trigger `trigger` of task `task` once per burst of changes
     /// under its path, retrying with backoff whenever the watch fails or is lost, for
     /// as long as the future runs.
-    pub(crate) async fn watch_path(self: Arc<Self>, task: TaskId, trigger: TaskTrigger) {
+    pub(super) async fn watch_path(self: Arc<Self>, task: TaskId, trigger: TaskTrigger) {
         let Some((
             TaskEvent::PathChanged {
                 path,

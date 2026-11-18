@@ -12,11 +12,10 @@ use tracing::{debug, info};
 use assistd_ipc::{Event, EventBody, HostName, PermissionMode, TaskPrompt};
 use assistd_llm::{LlmBackend, SlotAssignment, SlotHolder};
 
-use super::TaskService;
 use super::runs::task_system_prompt;
+use super::{FailedStep, TaskError, TaskService};
 use crate::bus::EventSink;
 use crate::planner::{PlanAsk, PlanError, Refinement, WorkPermissions};
-use crate::state::{DispatchError, FailedStep};
 
 const EVENT_BUFFER: usize = 32;
 
@@ -38,7 +37,7 @@ pub(super) struct RefineAsk {
 
 /// The planning backend of the latest refine since the daemon started.
 #[derive(Debug, Default)]
-pub(crate) struct TaskPlans {
+pub(super) struct TaskPlans {
     latest: StdMutex<Option<PlanningSession>>,
 }
 
@@ -71,7 +70,7 @@ impl TaskService {
         id: String,
         ask: RefineAsk,
         tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), TaskError> {
         let cancel = self.deps.admission.turn_cancellation();
         let refining = self.refine_prompt(&id, ask, &tx, &cancel);
         let Refinement {
@@ -102,9 +101,9 @@ impl TaskService {
         ask: RefineAsk,
         tx: &EventSink,
         cancel: &CancellationToken,
-    ) -> Result<Refinement, DispatchError> {
+    ) -> Result<Refinement, TaskError> {
         if ask.mode == PermissionMode::Auto && !self.deps.config.tools.allow_auto_mode {
-            return Err(DispatchError::AutoModeOff);
+            return Err(TaskError::AutoModeOff);
         }
         let lane = tokio::select! {
             biased;
@@ -147,7 +146,7 @@ impl TaskService {
         &self,
         prompt: TaskPrompt,
         feedback: Option<String>,
-    ) -> Result<(PlanningSession, PlanAsk), DispatchError> {
+    ) -> Result<(PlanningSession, PlanAsk), TaskError> {
         if let Some(feedback) = feedback {
             let (session, shown) = self
                 .plans

@@ -1,4 +1,34 @@
-use super::*;
+use std::borrow::Cow;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use parking_lot::Mutex as StdMutex;
+use tokio::sync::{Notify, mpsc, watch};
+
+use assistd_config::Config;
+use assistd_ipc::{
+    Event, EventBody, EventKind, HostName, PermissionMode, PresenceTarget, Request, RequestBody,
+    SubscribeFilter, TaskQueueOp, TaskRequest, TaskRunState,
+};
+use assistd_llm::{EchoBackend, ScriptedBackend, Step, ToolCall, TurnBackend};
+use assistd_memory::{HistoryScope, SessionId};
+use assistd_tools::{
+    Approval, ConfirmationGate, ConfirmationRequest, IpcConfirmationGate, JudgeContext,
+    JudgedClass, Risk, ToolError, ToolOutput, ToolRegistry, TurnContext, Unattended,
+};
+use assistd_utils::readiness::Readiness;
+use assistd_voice::VoiceManager;
+
+use crate::presence::tests::stub_presence;
+use crate::state::tests::{
+    HangingTool, MockSpeechRecorder, await_task_queue, dispatch, done, listed_run_states,
+    main_backend, paused_prompt, queue_task_run, queued_runs, runs_end_unasked, scripted,
+    settle_task_runs, task_state, task_state_with,
+};
+use crate::state::{AppState, MemoryStack, Requester, Subsystems};
+use crate::transcript::SessionContext;
 
 #[tokio::test]
 async fn a_finished_task_run_leaves_the_main_backend_untouched() {
@@ -154,7 +184,7 @@ async fn queue_order_and_pause_follow_moves_and_cancels_across_a_reload() {
     ));
     reloaded.tasks.start_task_queue().await;
     assert_eq!(queued_runs(&reloaded), expected);
-    assert!(reloaded.turns.deps.admission.queue_snapshot().paused);
+    assert!(reloaded.tasks.deps.admission.queue_snapshot().paused);
     settle_task_runs(&reloaded).await;
 }
 
@@ -319,7 +349,7 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
     assert_eq!(queued_runs(&state), [(run, TaskRunState::NeedsInput)]);
     assert!(
         state
-            .turns
+            .tasks
             .deps
             .admission
             .agent_turn_lock
@@ -432,14 +462,11 @@ async fn a_lagged_subscriber_is_resent_the_queue_with_the_prompt_of_a_paused_run
     let (tx, mut rx) = mpsc::channel(1);
     let daemon = Arc::clone(&state);
     let subscriber = tokio::spawn(async move {
-        let unpublished = EventSink::unpublished(tx);
         let filter = SubscribeFilter {
             kinds: vec![EventKind::TaskQueue],
         };
-        daemon
-            .status
-            .handle_subscribe("sub".into(), filter, unpublished)
-            .await;
+        let subscribe = Request::new("sub", RequestBody::Subscribe { filter });
+        daemon.dispatch(subscribe, Requester::default(), tx).await
     });
     assert!(matches!(
         rx.recv().await,
@@ -452,7 +479,7 @@ async fn a_lagged_subscriber_is_resent_the_queue_with_the_prompt_of_a_paused_run
         state.bus.publish(&Event::new(
             "flood",
             EventBody::TaskQueue {
-                snapshot: state.turns.deps.admission.queue_snapshot(),
+                snapshot: state.tasks.deps.admission.queue_snapshot(),
             },
         ));
     }
@@ -469,7 +496,7 @@ async fn a_lagged_subscriber_is_resent_the_queue_with_the_prompt_of_a_paused_run
     assert_eq!(prompt, paused_on);
 
     drop(rx);
-    subscriber.await.unwrap();
+    subscriber.await.unwrap().unwrap();
     let (res, _) = dispatch(
         &state,
         Request::new(

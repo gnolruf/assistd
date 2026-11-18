@@ -10,7 +10,7 @@ use assistd_utils::readiness::ReadinessCell;
 use assistd_voice::VoiceManager;
 
 use super::subsystems::McpServerStatus;
-use super::turn_admission::TurnAdmission;
+use crate::admission::TurnAdmission;
 use crate::bus::EventBus;
 use crate::presence::PresenceManager;
 use crate::vision::VisionRevalidator;

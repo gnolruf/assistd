@@ -16,10 +16,9 @@ use assistd_ipc::{Event, EventBody, HostName, PausedPrompt, TaskId, TaskRunId};
 use assistd_memory::TaskRecord;
 use assistd_tools::{Approval, ConfirmationRequest, PromptParking, Unattended};
 
-use super::TaskService;
+use super::run_lane::RunLane;
+use super::{FailedStep, TaskError, TaskService};
 use crate::bus::EventSink;
-use crate::state::run_lane::RunLane;
-use crate::state::{DispatchError, FailedStep};
 
 /// Why a `TaskConfirm` was refused.
 #[derive(Debug, Error)]
@@ -33,7 +32,7 @@ pub enum TaskConfirmError {
 
 /// The confirmation each paused task run waits on.
 #[derive(Debug, Default)]
-pub(crate) struct TaskConfirms {
+pub(super) struct TaskConfirms {
     pending: StdMutex<HashMap<TaskRunId, PendingConfirm>>,
 }
 
@@ -117,8 +116,8 @@ impl Drop for RegisteredConfirm<'_> {
 /// Parks the task run prompts its mode and hosts leave open: the run shows as needing input
 /// and gives up its hold until `TaskConfirm` answers, then waits first in the queue for a lane.
 #[derive(Debug)]
-pub(crate) struct TaskRunParking {
-    pub(crate) lane: Arc<RunLane>,
+pub(super) struct TaskRunParking {
+    pub(super) lane: Arc<RunLane>,
 }
 
 #[async_trait]
@@ -217,7 +216,7 @@ impl TaskService {
         confirm_id: String,
         approval: Approval,
         tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), TaskError> {
         let Some(allowed) = self.confirms.answer(run, &confirm_id, approval)? else {
             let _ = tx.send(Event::new(id, EventBody::Done)).await;
             return Ok(());
@@ -230,7 +229,7 @@ impl TaskService {
     }
 
     /// Add `allowed.host` to its task's allowed hosts, unless already there.
-    async fn allow_task_host(&self, allowed: AllowedHost) -> Result<TaskRecord, DispatchError> {
+    async fn allow_task_host(&self, allowed: AllowedHost) -> Result<TaskRecord, TaskError> {
         let _pass = self.scheduler.hold().await;
         let mut record = self.deps.store.get(allowed.task).await?;
         if record.spec.allowed_hosts.contains(&allowed.host) {

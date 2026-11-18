@@ -17,46 +17,34 @@ use assistd_embed::EmbedError;
 use assistd_ipc::{Event, EventBody, Request, RequestBody, Role, TaskRequest, WakeWordOp};
 use assistd_llm::{LlmError, LlmHealthProbe};
 use assistd_memory::{MemoryError, PersistedRole};
-use assistd_tools::{JUDGE_TIMEOUT, SafetyJudge, TurnContext};
+use assistd_tools::{SafetyJudge, TurnContext};
 use assistd_voice::{CaptureUnavailable, ListenError, VoiceInputError};
 
-use self::persistence::TranscriptLog;
-use self::turn_admission::TurnAdmission;
 use self::turns::TurnDeps;
 use self::voice_handlers::HeardPrompt;
 use crate::PresenceError;
+use crate::admission::TurnAdmission;
 use crate::agent::AgentSpec;
 use crate::bus::{EventBus, EventSink};
-use crate::judge::BackendJudgeModel;
-use crate::planner::{PlanError, Planner};
+use crate::judge::{BackendJudgeModel, safety_judge};
+use crate::planner::Planner;
 use crate::presence::PresenceLlmHealthProbe;
-use crate::tasks::{
-    QueueOpError, TaskConfirmError, TaskDeps, TaskPlanError, TaskService, TriggerError,
-};
+use crate::tasks::{TaskDeps, TaskError, TaskService};
+use crate::transcript::{SessionContext, TranscriptLog};
 
 pub(crate) mod branches;
 pub(crate) mod capabilities;
 pub(crate) mod chat_focus;
 pub(crate) mod context;
 pub(crate) mod host_reads;
-pub(crate) mod interaction;
-pub(crate) mod lanes;
 pub(crate) mod mcp_handlers;
 pub(crate) mod memory_handlers;
 pub(crate) mod memory_stack;
-pub(crate) mod persistence;
 pub(crate) mod presence_handlers;
 pub(crate) mod readiness;
-pub(crate) mod relay_trace;
-pub(crate) mod run_lane;
-pub(crate) mod seq_ledger;
-pub(crate) mod session;
 pub(crate) mod status_service;
 pub(crate) mod subscribe;
 pub(crate) mod subsystems;
-pub(crate) mod transcript_writer;
-pub(crate) mod turn_admission;
-pub(crate) mod turn_driver;
 pub(crate) mod turns;
 pub(crate) mod voice_handlers;
 pub(crate) mod wakeword_handlers;
@@ -65,7 +53,6 @@ pub(crate) mod wire;
 pub use self::branches::{BranchService, branch_replay};
 pub use self::mcp_handlers::{McpAccountError, McpAccounts, McpHost, McpLogin, McpService};
 pub use self::memory_stack::MemoryStack;
-pub use self::session::SessionContext;
 pub use self::status_service::StatusService;
 pub use self::subsystems::{McpServerStatus, Subsystems};
 pub use self::turns::{Query, TurnOrigin, TurnService};
@@ -114,10 +101,7 @@ pub enum DispatchError {
     Mic(#[from] MicError),
 
     #[error(transparent)]
-    QueueOp(#[from] QueueOpError),
-
-    #[error(transparent)]
-    TaskConfirm(#[from] TaskConfirmError),
+    Task(#[from] TaskError),
 
     #[error(transparent)]
     Presence(#[from] PresenceError),
@@ -125,14 +109,8 @@ pub enum DispatchError {
     #[error("invalid attachment: {0}")]
     InvalidAttachment(#[from] AttachmentError),
 
-    #[error(transparent)]
-    InvalidTrigger(#[from] TriggerError),
-
     #[error("vision not available: model does not support images")]
     VisionUnsupported,
-
-    #[error("auto mode is off (tools.allow_auto_mode), so a task cannot run in it")]
-    AutoModeOff,
 
     #[error(transparent)]
     Llm(#[from] LlmError),
@@ -154,12 +132,6 @@ pub enum DispatchError {
 
     #[error(transparent)]
     Listen(#[from] ListenError),
-
-    #[error(transparent)]
-    TaskPlan(#[from] TaskPlanError),
-
-    #[error(transparent)]
-    Plan(#[from] PlanError),
 }
 
 impl DispatchError {
@@ -173,7 +145,7 @@ impl DispatchError {
 }
 
 /// Names the step of a request a failure happened in.
-pub(crate) trait FailedStep<T> {
+trait FailedStep<T> {
     fn context(self, context: &'static str) -> Result<T, DispatchError>;
 }
 
@@ -500,7 +472,11 @@ impl AppState {
             RequestBody::McpLogin { server } => self.mcp.handle_mcp_login(id, server, tx).await,
             RequestBody::McpLogout { server } => self.mcp.handle_mcp_logout(id, server, tx).await,
             RequestBody::McpStatus => replied(self.mcp.handle_mcp_status(id, tx)).await,
-            RequestBody::Task(task) => self.tasks.dispatch(id, task, tx).await,
+            RequestBody::Task(task) => self
+                .tasks
+                .dispatch(id, task, tx)
+                .await
+                .map_err(DispatchError::from),
             RequestBody::ConfirmResponse { confirm_id, .. } => {
                 Err(DispatchError::UnmatchedConfirmResponse(confirm_id))
             }
@@ -530,14 +506,6 @@ fn planner(config: &Config, subsystems: &Subsystems, agents: AgentSpec) -> Plann
         agents,
         config.tools.allow_auto_mode,
     )
-}
-
-/// A judge asking `model`, when `tools.allow_auto_mode` allows Auto mode.
-pub(crate) fn safety_judge(config: &Config, model: BackendJudgeModel) -> Option<SafetyJudge> {
-    config
-        .tools
-        .allow_auto_mode
-        .then(|| SafetyJudge::new(Arc::new(model), JUDGE_TIMEOUT))
 }
 
 async fn replied(reply: impl Future<Output = ()>) -> Result<(), DispatchError> {

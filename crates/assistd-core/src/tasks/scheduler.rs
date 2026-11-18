@@ -22,7 +22,7 @@ const MAX_SLEEP: Duration = Duration::from_secs(60);
 
 /// Wakes the scheduler when a task changes, and keeps its passes apart from task writes.
 #[derive(Debug, Default)]
-pub(crate) struct TaskScheduler {
+pub(super) struct TaskScheduler {
     changed: Notify,
     passes: Mutex<()>,
 }
@@ -30,12 +30,12 @@ pub(crate) struct TaskScheduler {
 impl TaskScheduler {
     /// Hold off scheduler passes until the guard drops, so none records a fire time
     /// computed from triggers that a write made meanwhile replaced.
-    pub(crate) async fn hold(&self) -> MutexGuard<'_, ()> {
+    pub(super) async fn hold(&self) -> MutexGuard<'_, ()> {
         self.passes.lock().await
     }
 
     /// Have the scheduler recompute fire times now.
-    pub(crate) fn reschedule(&self) {
+    pub(super) fn reschedule(&self) {
         self.changed.notify_one();
     }
 }

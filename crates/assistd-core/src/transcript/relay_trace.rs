@@ -16,7 +16,7 @@ use assistd_utils::time::saturating_millis;
 const STOPPED_MESSAGE: &str = "stopped before it reported";
 
 /// The steps the running relay planned and what each has done so far.
-pub(super) struct RelayTraceBuilder {
+pub(crate) struct RelayTraceBuilder {
     steps: Vec<StepBuilder>,
 }
 
@@ -42,14 +42,14 @@ enum StepProgress {
 }
 
 impl RelayTraceBuilder {
-    pub(super) fn planned(plan: &[RelayStepPlan]) -> Self {
+    pub(crate) fn planned(plan: &[RelayStepPlan]) -> Self {
         Self {
             steps: plan.iter().map(StepBuilder::pending).collect(),
         }
     }
 
     /// Record `event` against the step it belongs to; a new plan starts over.
-    pub(super) fn record(&mut self, event: &RelayEvent) {
+    pub(crate) fn record(&mut self, event: &RelayEvent) {
         match event {
             RelayEvent::Planned { steps } => *self = Self::planned(steps),
             RelayEvent::Started { step } => {
@@ -73,7 +73,7 @@ impl RelayTraceBuilder {
     }
 
     /// The steps as stored; one still running is stored as stopped.
-    pub(super) fn finish(self) -> Vec<PersistedRelayStep> {
+    pub(crate) fn finish(self) -> Vec<PersistedRelayStep> {
         self.steps.into_iter().map(StepBuilder::finish).collect()
     }
 }
@@ -211,7 +211,7 @@ impl StepBuilder {
 }
 
 /// `steps` as replayed to a client with their `relay` tool row.
-pub(super) fn wire_relay_steps(steps: Vec<PersistedRelayStep>) -> Vec<RelayStepRecord> {
+pub(crate) fn wire_relay_steps(steps: Vec<PersistedRelayStep>) -> Vec<RelayStepRecord> {
     steps
         .into_iter()
         .map(|step| RelayStepRecord {

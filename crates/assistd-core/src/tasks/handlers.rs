@@ -11,12 +11,11 @@ use assistd_ipc::{
 };
 use assistd_memory::TaskRecord;
 
-use super::TaskService;
 use super::event_triggers::{check_chain, resolve_watched_paths};
 use super::fire_times::{check_triggers, next_fire, upcoming_fires};
+use super::{FailedStep, TaskError, TaskService};
 use crate::bus::EventSink;
-use crate::state::branches::delete_answer_files;
-use crate::state::{DispatchError, FailedStep};
+use crate::relay::delete_answer_files;
 
 /// Fire times a `TaskCheckTrigger` reports.
 const CHECKED_FIRES: usize = 3;
@@ -28,7 +27,7 @@ impl TaskService {
         id: String,
         req: TaskRequest,
         tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), TaskError> {
         match req {
             TaskRequest::List => self.handle_task_list(id, tx).await,
             TaskRequest::Save { task, spec } => self.handle_task_save(id, task, spec, tx).await,
@@ -74,7 +73,7 @@ impl TaskService {
         &self,
         id: String,
         tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), TaskError> {
         let tasks = self.deps.store.list().await.context("task list failed")?;
         let undecodable = self
             .deps
@@ -103,7 +102,7 @@ impl TaskService {
         id: String,
         task: TaskId,
         tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), TaskError> {
         let records = self
             .deps
             .store
@@ -125,7 +124,7 @@ impl TaskService {
         task: Option<TaskId>,
         spec: TaskSpec,
         tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), TaskError> {
         let record = {
             let _pass = self.scheduler.hold().await;
             self.save_task(task, spec).await
@@ -142,7 +141,7 @@ impl TaskService {
         id: String,
         task: TaskId,
         tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), TaskError> {
         let deleted = {
             let _pass = self.scheduler.hold().await;
             self.deps.store.delete(task).await
@@ -162,7 +161,7 @@ impl TaskService {
         task: TaskId,
         enabled: bool,
         tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), TaskError> {
         let record = {
             let _pass = self.scheduler.hold().await;
             self.deps.store.set_enabled(task, enabled).await
@@ -180,7 +179,7 @@ impl TaskService {
         task: Option<TaskId>,
         trigger: TaskTrigger,
         tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), TaskError> {
         let fires = self.check_trigger(task, trigger).await?;
         let _ = tx
             .send(Event::new(id.clone(), EventBody::TriggerFires { fires }))
@@ -195,7 +194,7 @@ impl TaskService {
         &self,
         task: Option<TaskId>,
         trigger: TaskTrigger,
-    ) -> Result<Vec<DateTime<Utc>>, DispatchError> {
+    ) -> Result<Vec<DateTime<Utc>>, TaskError> {
         let stored = match task {
             Some(task) => self.deps.store.get(task).await?.spec.triggers,
             None => Vec::new(),
@@ -245,9 +244,9 @@ impl TaskService {
         &self,
         task: Option<TaskId>,
         mut spec: TaskSpec,
-    ) -> Result<TaskRecord, DispatchError> {
+    ) -> Result<TaskRecord, TaskError> {
         if spec.mode == PermissionMode::Auto && !self.deps.config.tools.allow_auto_mode {
-            return Err(DispatchError::AutoModeOff);
+            return Err(TaskError::AutoModeOff);
         }
         let stored = match task {
             Some(task) => self.deps.store.get(task).await?.spec.triggers,

@@ -13,15 +13,15 @@ use tokio::sync::{Notify, watch};
 use assistd_config::Config;
 use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
-    Component, ComponentReadiness, EventBody, EventKind, HostName, ImageAttachment, ImageMime,
-    ListenPhase, McpServerState, McpTransportKind, PausedPrompt, PermissionMode, PlanMode,
-    PlanVerdict, PresenceState, PresenceTarget, QueueItem, RequestBody, StartupComponent,
-    StatusKind, StatusSeverity, SubscribeFilter, TaskId, TaskQueueOp, TaskQueueSnapshot,
-    TaskRequest, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
+    Component, ComponentReadiness, EventBody, ImageAttachment, ImageMime, ListenPhase,
+    McpServerState, McpTransportKind, PausedPrompt, PermissionMode, PlanMode, PlanVerdict,
+    PresenceState, PresenceTarget, QueueItem, RequestBody, StartupComponent, StatusKind,
+    StatusSeverity, SubscribeFilter, TaskId, TaskQueueSnapshot, TaskRequest, TaskRunId,
+    TaskRunState, TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{
     EchoBackend, Gate, JournaledStep, LlmBackend, LlmError, ScriptedBackend, Step, StepJournal,
-    ToolCall, TurnBackend,
+    ToolCall,
 };
 use assistd_memory::{
     AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit,
@@ -31,10 +31,8 @@ use assistd_memory::{
     TaskStore, TranscriptStore, UnindexedRows,
 };
 use assistd_tools::{
-    Approval, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, ConfirmationGate,
-    ConfirmationRequest, IpcConfirmationGate, JudgeContext, JudgedClass, OutputCap, PresentSpec,
-    Risk, RunTool, ToolError, ToolOutput, ToolRegistry, ToolsDisabled, Unattended,
-    commands::EchoCommand,
+    Approval, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, OutputCap, PresentSpec, RunTool,
+    ToolError, ToolOutput, ToolRegistry, ToolsDisabled, commands::EchoCommand,
 };
 use assistd_utils::program::ProgramError;
 use assistd_utils::readiness::Readiness;
@@ -51,7 +49,6 @@ use crate::state::context::{format_memory_line, format_window_context_block};
 mod branches;
 mod interruption;
 mod recall;
-mod tasks;
 mod voice;
 
 /// An [`AppState`] and the temp dir holding its database, removed when this drops.
@@ -174,7 +171,10 @@ async fn fresh_memory(config: &Config) -> (MemoryStack, TempDir) {
 }
 
 /// Dispatch `req` and collect every event it emits.
-async fn dispatch(state: &Arc<AppState>, req: Request) -> (Result<(), DispatchError>, Vec<Event>) {
+pub(crate) async fn dispatch(
+    state: &Arc<AppState>,
+    req: Request,
+) -> (Result<(), DispatchError>, Vec<Event>) {
     let (tx, mut rx) = mpsc::channel::<Event>(16);
     let collect = async {
         let mut out = Vec::new();
@@ -200,7 +200,7 @@ fn query(id: &str, text: &str) -> Request {
     )
 }
 
-fn done(id: &str) -> Event {
+pub(crate) fn done(id: &str) -> Event {
     Event::new(id, EventBody::Done)
 }
 
@@ -668,7 +668,7 @@ impl VoiceInput for MockVoice {
 /// Records every `speak()` in arrival order, counts `wait_idle()`, and
 /// counts sentences spoken while the controller's speaking signal was low.
 #[derive(Debug)]
-struct MockSpeechRecorder {
+pub(crate) struct MockSpeechRecorder {
     calls: StdMutex<Vec<String>>,
     wait_idle_calls: AtomicUsize,
     speaking: OnceLock<watch::Receiver<bool>>,
@@ -676,7 +676,7 @@ struct MockSpeechRecorder {
 }
 
 impl MockSpeechRecorder {
-    fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             calls: StdMutex::new(Vec::new()),
             wait_idle_calls: AtomicUsize::new(0),
@@ -685,7 +685,7 @@ impl MockSpeechRecorder {
         })
     }
 
-    fn calls(&self) -> Vec<String> {
+    pub(crate) fn calls(&self) -> Vec<String> {
         self.calls.lock().clone()
     }
 
@@ -722,7 +722,7 @@ fn config_with_partial_flush(ms: u32) -> Config {
 }
 
 /// A backend that plays `steps`, then answers `reply`.
-fn scripted(steps: impl IntoIterator<Item = Step>, reply: &str) -> Arc<ScriptedBackend> {
+pub(crate) fn scripted(steps: impl IntoIterator<Item = Step>, reply: &str) -> Arc<ScriptedBackend> {
     Arc::new(ScriptedBackend::new(steps).then_replying(reply))
 }
 
@@ -908,9 +908,9 @@ async fn the_models_ask_to_plan_holds_off_acting_only_once_the_user_agrees() {
 /// Never returns. `dropped` flips when the invocation future is torn
 /// down, proving the agent task stopped rather than being detached.
 #[derive(Debug)]
-struct HangingTool {
-    entered: Arc<Notify>,
-    dropped: Arc<AtomicBool>,
+pub(crate) struct HangingTool {
+    pub(crate) entered: Arc<Notify>,
+    pub(crate) dropped: Arc<AtomicBool>,
 }
 
 struct DropFlag(Arc<AtomicBool>);
@@ -1374,7 +1374,7 @@ fn memory_hit(id: i64, key: &str, value: &str, similarity: f32) -> MemoryHit {
 
 /// The main backend, handing out `task_backend` as its one isolated backend; as the
 /// safety judge's model it allows every command.
-fn main_backend(task_backend: Arc<dyn LlmBackend>) -> Arc<ScriptedBackend> {
+pub(crate) fn main_backend(task_backend: Arc<dyn LlmBackend>) -> Arc<ScriptedBackend> {
     let allow = r#"{"decision":"allow","reason":"a step of the task"}"#;
     Arc::new(
         ScriptedBackend::default()
@@ -1385,7 +1385,7 @@ fn main_backend(task_backend: Arc<dyn LlmBackend>) -> Arc<ScriptedBackend> {
 
 /// An `AppState` on a fresh database with one saved task, positioned on a user
 /// session whose `main` branch holds one turn.
-async fn task_state(
+pub(crate) async fn task_state(
     backend: Arc<ScriptedBackend>,
     tools: Arc<ToolRegistry>,
 ) -> (TestState, Arc<dyn TranscriptStore>, BranchId, TaskId) {
@@ -1393,7 +1393,7 @@ async fn task_state(
 }
 
 /// [`task_state`] under `config`.
-async fn task_state_with(
+pub(crate) async fn task_state_with(
     config: Config,
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
@@ -1428,7 +1428,7 @@ async fn task_state_with(
 }
 
 /// Queue a run of `task`, returning its id.
-async fn queue_task_run(state: &Arc<AppState>, task: TaskId) -> TaskRunId {
+pub(crate) async fn queue_task_run(state: &Arc<AppState>, task: TaskId) -> TaskRunId {
     let (res, events) = dispatch(
         state,
         Request::new("t", RequestBody::Task(TaskRequest::Run { task })),
@@ -1451,7 +1451,7 @@ async fn queue_task_run(state: &Arc<AppState>, task: TaskId) -> TaskRunId {
 }
 
 /// Wait for every run to end, then for the writes it queued to land.
-async fn settle_task_runs(state: &Arc<AppState>) {
+pub(crate) async fn settle_task_runs(state: &Arc<AppState>) {
     tokio::time::timeout(Duration::from_secs(5), state.tasks.runner().stop())
         .await
         .expect("task run did not end");
@@ -1459,7 +1459,7 @@ async fn settle_task_runs(state: &Arc<AppState>) {
 }
 
 /// Wait for a snapshot of the task queue that `seen` finds something in.
-async fn await_task_queue<T>(
+pub(crate) async fn await_task_queue<T>(
     state: &AppState,
     mut seen: impl FnMut(TaskQueueSnapshot) -> Option<T>,
 ) -> T {
@@ -1479,7 +1479,7 @@ async fn await_task_queue<T>(
 }
 
 /// The prompt a paused run in `snapshot` waits on.
-fn paused_prompt(snapshot: TaskQueueSnapshot) -> Option<PausedPrompt> {
+pub(crate) fn paused_prompt(snapshot: TaskQueueSnapshot) -> Option<PausedPrompt> {
     snapshot.items.into_iter().find_map(|item| match item {
         QueueItem::Run { prompt, .. } => prompt,
         QueueItem::UserTurn { .. } => None,
@@ -1488,7 +1488,7 @@ fn paused_prompt(snapshot: TaskQueueSnapshot) -> Option<PausedPrompt> {
 
 /// Wait for every run to leave the queue, panicking if one pauses on a prompt other
 /// than `answered`.
-async fn runs_end_unasked(state: &AppState, answered: Option<&str>) {
+pub(crate) async fn runs_end_unasked(state: &AppState, answered: Option<&str>) {
     await_task_queue(state, |snapshot| {
         let ended = snapshot.items.is_empty();
         if let Some(prompt) = paused_prompt(snapshot)
@@ -1502,7 +1502,7 @@ async fn runs_end_unasked(state: &AppState, answered: Option<&str>) {
 }
 
 /// The state of every task run listed beside its session's branch.
-async fn listed_run_states(conv: &Arc<dyn TranscriptStore>) -> Vec<TaskRunState> {
+pub(crate) async fn listed_run_states(conv: &Arc<dyn TranscriptStore>) -> Vec<TaskRunState> {
     conv.list_branches()
         .await
         .unwrap()
@@ -1511,7 +1511,7 @@ async fn listed_run_states(conv: &Arc<dyn TranscriptStore>) -> Vec<TaskRunState>
         .collect()
 }
 
-fn queued_runs(state: &AppState) -> Vec<(TaskRunId, TaskRunState)> {
+pub(crate) fn queued_runs(state: &AppState) -> Vec<(TaskRunId, TaskRunState)> {
     state
         .turns
         .deps

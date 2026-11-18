@@ -1,4 +1,5 @@
-//! Queueing transcript writes for the transcript writer, and its drain.
+//! `TranscriptLog`: queues every turn's transcript writes for the single writer task,
+//! and drains them.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -14,12 +15,17 @@ use assistd_memory::{
 };
 use assistd_utils::time::saturating_millis;
 
-use super::seq_ledger::SharedLedger;
-use super::session::SessionContext;
-use super::transcript_writer::{
-    PersistTarget, TranscriptWriter, WRITE_QUEUE_CAPACITY, WriteCommand,
-};
+use self::seq_ledger::SharedLedger;
+use self::writer::{TranscriptWriter, WRITE_QUEUE_CAPACITY, WriteCommand};
 use crate::recovery::spawn_supervised;
+
+pub(crate) mod relay_trace;
+mod seq_ledger;
+mod session;
+mod writer;
+
+pub use self::session::SessionContext;
+pub(crate) use self::writer::PersistTarget;
 
 /// The transcript of every turn: queues writes for the single writer task and
 /// tracks the background work that follows a turn.
@@ -32,15 +38,15 @@ pub(crate) struct TranscriptLog {
     /// The transcript writer's queue, once its first write started the writer.
     writes: OnceLock<mpsc::Sender<WriteCommand>>,
     /// Seqs of the rows behind the main backend's history.
-    pub(super) user_ledger: SharedLedger,
+    user_ledger: SharedLedger,
     /// Background session-title tasks, drained at daemon shutdown.
-    pub(super) tracker: TaskTracker,
+    tracker: TaskTracker,
 }
 
 impl TranscriptLog {
     /// A log over `transcripts` for the session `session_ctx` points at, waking
     /// the embedding worker through `embed_wake` after each write.
-    pub(super) fn new(
+    pub(crate) fn new(
         transcripts: Arc<dyn TranscriptStore>,
         embed_wake: Option<Arc<Notify>>,
         session_ctx: Arc<SessionContext>,
@@ -62,7 +68,7 @@ impl TranscriptLog {
 
     /// The active session and branch, inserting the session and its `main`
     /// branch first when the session is still unsaved.
-    pub(super) async fn saved_session(&self) -> assistd_memory::Result<(SessionId, BranchId)> {
+    pub(crate) async fn saved_session(&self) -> assistd_memory::Result<(SessionId, BranchId)> {
         let (session, branch) = self.session_ctx.current().await;
         if let Some(branch) = branch {
             return Ok((session, branch));
@@ -74,7 +80,7 @@ impl TranscriptLog {
 
     /// Queue the write opening a user turn on `branch`
     /// with `prompt`, returning the target the turn's later messages go to.
-    pub(super) async fn open_user_turn(
+    pub(crate) async fn open_user_turn(
         &self,
         branch: BranchId,
         prompt: PersistedMessage,
@@ -106,7 +112,7 @@ impl TranscriptLog {
 
     /// Queue `msg` for `target`'s turn, with the sub-agent `relay_steps`
     /// behind it when it is a `relay` tool result.
-    pub(super) async fn persist_message(
+    pub(crate) async fn persist_message(
         &self,
         target: PersistTarget,
         msg: PersistedMessage,
@@ -121,14 +127,14 @@ impl TranscriptLog {
     }
 
     /// Queue `stats` for `target`'s turn, ordered after its messages.
-    pub(super) async fn persist_turn_stats(&self, target: PersistTarget, stats: TurnStats) {
+    pub(crate) async fn persist_turn_stats(&self, target: PersistTarget, stats: TurnStats) {
         self.queue_write(WriteCommand::TurnStats { target, stats })
             .await;
     }
 
     /// Queue `summary` as the compaction summary of `target`'s branch, standing
     /// in for what `cut` leaves out of every message queued before it.
-    pub(super) async fn persist_summary(
+    pub(crate) async fn persist_summary(
         &self,
         target: PersistTarget,
         summary: String,
@@ -146,7 +152,7 @@ impl TranscriptLog {
 
     /// Wait for every queued transcript write to land. Hold the user-turn lock
     /// across the call so no new user-turn writes queue during the wait.
-    pub(super) async fn drain_inflight(&self) {
+    pub(crate) async fn drain_inflight(&self) {
         let Some(writes) = self.writes.get() else {
             return;
         };
@@ -158,10 +164,25 @@ impl TranscriptLog {
 
     /// Wait for every queued transcript write and every background
     /// persistence task; none may be started afterwards.
-    pub(super) async fn finish(&self) {
+    pub(crate) async fn finish(&self) {
         self.tracker.close();
         self.drain_inflight().await;
         self.tracker.wait().await;
+    }
+
+    /// Run `work` in the background; [`Self::finish`] waits for it.
+    pub(crate) fn spawn_tracked(&self, work: impl Future<Output = ()> + Send + 'static) {
+        self.tracker.spawn(work);
+    }
+
+    /// Follow an undo of the user's newest turn.
+    pub(crate) fn forget_last_user_turn(&self) {
+        self.user_ledger.forget_last_turn();
+    }
+
+    /// Follow the main backend's history being replaced from the store.
+    pub(crate) fn forget_user_history(&self) {
+        self.user_ledger.invalidate();
     }
 
     /// Hand `command` to the transcript writer, waiting while its queue is full.
@@ -208,7 +229,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::state::session::SessionContext;
 
     /// Records what reaches it, makes each write finish faster than the one
     /// before it, and fails any message whose content is `lost`.

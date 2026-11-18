@@ -32,10 +32,10 @@ struct RunCancel {
 
 /// A run's place in a [`TaskRunner`], given up when dropped.
 #[derive(Debug)]
-pub(crate) struct RegisteredRun {
+pub(super) struct RegisteredRun {
     run: TaskRunId,
     /// Fired by [`TaskRunner::cancel`] and [`TaskRunner::stop`].
-    pub(crate) cancel: CancellationToken,
+    pub(super) cancel: CancellationToken,
     requested: Arc<AtomicBool>,
     running: RunningMap,
 }
@@ -43,7 +43,7 @@ pub(crate) struct RegisteredRun {
 impl TaskRunner {
     /// Run the future `start` builds for `run` in the background, handing it the run's
     /// registration, which [`Self::cancel`] and [`Self::stop`] cancel.
-    pub(crate) fn spawn<F>(&self, run: TaskRunId, start: impl FnOnce(RegisteredRun) -> F)
+    pub(super) fn spawn<F>(&self, run: TaskRunId, start: impl FnOnce(RegisteredRun) -> F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -63,7 +63,7 @@ impl TaskRunner {
 
     /// Run the future `start` builds in the background beside the runs, handing it a
     /// token fired once the daemon stops; [`Self::stop`] waits for it too.
-    pub(crate) fn spawn_service<F>(&self, start: impl FnOnce(CancellationToken) -> F)
+    pub(super) fn spawn_service<F>(&self, start: impl FnOnce(CancellationToken) -> F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -71,7 +71,7 @@ impl TaskRunner {
     }
 
     /// Cancel run `run`; `false` when it is not in flight.
-    pub(crate) fn cancel(&self, run: TaskRunId) -> bool {
+    pub(super) fn cancel(&self, run: TaskRunId) -> bool {
         let running = self.running.lock();
         let Some(cancel) = running.get(&run) else {
             return false;
@@ -91,7 +91,7 @@ impl TaskRunner {
 
 impl RegisteredRun {
     /// Whether [`TaskRunner::cancel`] cancelled the run.
-    pub(crate) fn cancel_requested(&self) -> bool {
+    pub(super) fn cancel_requested(&self) -> bool {
         self.requested.load(Ordering::Acquire)
     }
 }

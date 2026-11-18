@@ -6,8 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 
+use assistd_config::Config;
 use assistd_llm::{LlmBackend, OneShotReply};
-use assistd_tools::JudgeModel;
+use assistd_tools::{JUDGE_TIMEOUT, JudgeModel, SafetyJudge};
 
 /// A [`JudgeModel`] answered by a backend's server, judging against either that backend's
 /// history or one fixed prompt.
@@ -61,4 +62,12 @@ impl JudgeModel for BackendJudgeModel {
             .complete_oneshot(prompt, OneShotReply::Json(schema))
             .await?)
     }
+}
+
+/// A judge asking `model`, when `tools.allow_auto_mode` allows Auto mode.
+pub(crate) fn safety_judge(config: &Config, model: BackendJudgeModel) -> Option<SafetyJudge> {
+    config
+        .tools
+        .allow_auto_mode
+        .then(|| SafetyJudge::new(Arc::new(model), JUDGE_TIMEOUT))
 }

@@ -2,9 +2,12 @@
 
 use std::sync::Arc;
 
+use thiserror::Error;
+use tokio::task::JoinError;
+
 use assistd_config::Config;
-use assistd_llm::{LlmBackend, SlotStash};
-use assistd_memory::TaskStore;
+use assistd_llm::{LlmBackend, LlmError, SlotStash};
+use assistd_memory::{MemoryError, TaskStore};
 use assistd_tools::ToolCatalog;
 use assistd_voice::VoiceManager;
 
@@ -12,35 +15,89 @@ use self::confirms::TaskConfirms;
 use self::events::TaskEvents;
 use self::plans::TaskPlans;
 use self::scheduler::TaskScheduler;
+use crate::admission::TurnAdmission;
 use crate::agent::AgentSpec;
 use crate::bus::EventBus;
-use crate::planner::Planner;
-use crate::presence::PresenceManager;
-use crate::state::persistence::TranscriptLog;
-use crate::state::session::SessionContext;
-use crate::state::turn_admission::TurnAdmission;
+use crate::planner::{PlanError, Planner};
+use crate::presence::{PresenceError, PresenceManager};
+use crate::transcript::{SessionContext, TranscriptLog};
 use crate::vision::VisionRevalidator;
 
-pub(crate) mod announce;
-pub(crate) mod confirms;
-pub(crate) mod dispatch;
-pub(crate) mod event_triggers;
-pub(crate) mod events;
-pub(crate) mod fire_times;
-pub(crate) mod handlers;
-pub(crate) mod path_watch;
-pub(crate) mod plans;
-pub(crate) mod queue;
-pub(crate) mod runner;
-pub(crate) mod runs;
-pub(crate) mod scheduler;
-pub(crate) mod session_unlock;
+mod announce;
+mod confirms;
+mod dispatch;
+mod event_triggers;
+mod events;
+mod fire_times;
+mod handlers;
+mod path_watch;
+mod plans;
+mod run_lane;
+mod runner;
+mod runs;
+mod scheduler;
+mod session_unlock;
 
 pub use self::confirms::TaskConfirmError;
 pub use self::fire_times::TriggerError;
 pub use self::plans::TaskPlanError;
-pub use self::queue::QueueOpError;
 pub use self::runner::TaskRunner;
+pub use crate::admission::queue::QueueOpError;
+
+/// Why a `Task` request or a task run failed.
+#[derive(Debug, Error)]
+pub enum TaskError {
+    /// Another failure, prefixed with the step of the request it happened in.
+    #[error("{context}: {source}")]
+    Context {
+        context: &'static str,
+        source: Box<TaskError>,
+    },
+
+    #[error(transparent)]
+    QueueOp(#[from] QueueOpError),
+
+    #[error(transparent)]
+    Confirm(#[from] TaskConfirmError),
+
+    #[error(transparent)]
+    InvalidTrigger(#[from] TriggerError),
+
+    #[error("auto mode is off (tools.allow_auto_mode), so a task cannot run in it")]
+    AutoModeOff,
+
+    #[error(transparent)]
+    Refine(#[from] TaskPlanError),
+
+    #[error(transparent)]
+    Plan(#[from] PlanError),
+
+    #[error(transparent)]
+    Presence(#[from] PresenceError),
+
+    #[error(transparent)]
+    Llm(#[from] LlmError),
+
+    #[error("llm backend panicked: {0}")]
+    AgentPanicked(#[source] JoinError),
+
+    #[error(transparent)]
+    Memory(#[from] MemoryError),
+}
+
+/// Names the step of a task request a failure happened in.
+trait FailedStep<T> {
+    fn context(self, context: &'static str) -> Result<T, TaskError>;
+}
+
+impl<T, E: Into<TaskError>> FailedStep<T> for Result<T, E> {
+    fn context(self, context: &'static str) -> Result<T, TaskError> {
+        self.map_err(|e| TaskError::Context {
+            context,
+            source: Box::new(e.into()),
+        })
+    }
+}
 
 /// What the task service borrows from the rest of the daemon.
 #[derive(Debug)]
@@ -65,12 +122,12 @@ pub(crate) struct TaskDeps {
 /// their paused prompts, the schedule, the event watches and the planning sessions.
 #[derive(Debug)]
 pub struct TaskService {
-    pub(crate) deps: TaskDeps,
-    pub(crate) confirms: TaskConfirms,
-    pub(crate) scheduler: TaskScheduler,
-    pub(crate) events: TaskEvents,
-    pub(crate) plans: TaskPlans,
-    pub(crate) runner: Arc<TaskRunner>,
+    deps: TaskDeps,
+    confirms: TaskConfirms,
+    scheduler: TaskScheduler,
+    events: TaskEvents,
+    plans: TaskPlans,
+    runner: Arc<TaskRunner>,
 }
 
 impl TaskService {
@@ -90,3 +147,6 @@ impl TaskService {
         &self.runner
     }
 }
+
+#[cfg(test)]
+mod tests;

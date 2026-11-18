@@ -7,8 +7,8 @@ use assistd_ipc::{Event, EventBody, TaskName, TaskRunId};
 use assistd_voice::SentenceBuffer;
 
 use super::TaskService;
-use crate::state::interaction::InteractionState;
-use crate::state::turns::run_speech_worker;
+use crate::admission::interaction::InteractionState;
+use crate::turn_driver::run_speech_worker;
 
 /// A finished run's reply to announce, and the request id its events carry.
 pub(super) struct TaskReply {

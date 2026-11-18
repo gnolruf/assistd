@@ -28,10 +28,7 @@ pub(crate) struct ModelLanes {
 impl ModelLanes {
     /// Lanes over the server's slot count `slots`, sharing the main lane `main` with
     /// user turns. A closed `slots` channel leaves the count where it is.
-    pub(in crate::state) fn new(
-        main: Arc<Mutex<()>>,
-        slots: watch::Receiver<NonZeroU32>,
-    ) -> Arc<Self> {
+    pub(super) fn new(main: Arc<Mutex<()>>, slots: watch::Receiver<NonZeroU32>) -> Arc<Self> {
         Arc::new(Self {
             main,
             slots,
@@ -70,17 +67,17 @@ impl ModelLanes {
     }
 
     /// Whether user turns and task runs share the model's only lane.
-    pub(in crate::state) fn is_single(&self) -> bool {
+    pub(super) fn is_single(&self) -> bool {
         self.slots.borrow().get() == 1
     }
 
     /// Whether a task run holds the main lane.
-    pub(in crate::state) fn main_held_by_run(&self) -> bool {
+    pub(super) fn main_held_by_run(&self) -> bool {
         self.held.borrow().contains_key(&MAIN_LANE)
     }
 
     /// What holds each lane now.
-    pub(in crate::state) fn holders(&self) -> Vec<LaneHolder> {
+    pub(super) fn holders(&self) -> Vec<LaneHolder> {
         let total = self.slots.borrow().get();
         let held = self.held.borrow();
         (0..total)

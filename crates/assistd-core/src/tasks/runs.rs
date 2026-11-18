@@ -16,21 +16,20 @@ use assistd_memory::{
 };
 use assistd_tools::{ConfirmRouter, TurnContext};
 
-use super::TaskService;
 use super::announce::TaskReply;
 use super::confirms::TaskRunParking;
 use super::event_triggers::Occurrence;
-use super::queue::QueuedRun;
+use super::run_lane::{LaneHold, RunLane, YieldingBackend};
 use super::runner::RegisteredRun;
+use super::{FailedStep, TaskError, TaskService};
+use crate::admission::lanes::LaneLease;
+use crate::admission::queue::QueuedRun;
 use crate::bus::EventSink;
-use crate::judge::BackendJudgeModel;
+use crate::judge::{BackendJudgeModel, safety_judge};
 use crate::presence::RequestGuard;
-use crate::state::branches::delete_answer_files;
-use crate::state::lanes::LaneLease;
-use crate::state::run_lane::{LaneHold, RunLane, YieldingBackend};
-use crate::state::transcript_writer::PersistTarget;
-use crate::state::turn_driver::TurnDriver;
-use crate::state::{DispatchError, FailedStep, safety_judge};
+use crate::relay::delete_answer_files;
+use crate::transcript::PersistTarget;
+use crate::turn_driver::TurnDriver;
 
 const EVENT_BUFFER: usize = 32;
 
@@ -56,7 +55,7 @@ impl TaskService {
         id: String,
         task: TaskId,
         tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), TaskError> {
         let (record, run) = self.queue_task_run(task).await.context("task run failed")?;
         self.deps.admission.task_queue.push(run, record, id.clone());
         let _ = tx
@@ -74,7 +73,7 @@ impl TaskService {
         id: String,
         run: TaskRunId,
         tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), TaskError> {
         self.cancel_task_run(run).await?;
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
@@ -193,7 +192,7 @@ impl TaskService {
         turn: &TaskRunTurn,
         lease: LaneLease,
         cancel: &CancellationToken,
-    ) -> Result<Option<String>, DispatchError> {
+    ) -> Result<Option<String>, TaskError> {
         let Some(awake) = self.wake_for_task_run(None, cancel).await? else {
             return Ok(None);
         };
@@ -233,11 +232,11 @@ impl TaskService {
     /// Wake the model as a query does and re-probe it if it reloaded, reporting a slow
     /// load to `progress`, a request id and its sink, when given; `None` when `cancel`
     /// fired first.
-    pub(crate) async fn wake_for_task_run(
+    pub(super) async fn wake_for_task_run(
         &self,
         progress: Option<(&str, &EventSink)>,
         cancel: &CancellationToken,
-    ) -> Result<Option<RequestGuard>, DispatchError> {
+    ) -> Result<Option<RequestGuard>, TaskError> {
         let awake = async {
             let presence = &self.deps.presence;
             let request_guard = match progress {
@@ -306,7 +305,7 @@ impl TaskService {
         lane: Arc<RunLane>,
         persist: Option<PersistTarget>,
         cancel: &CancellationToken,
-    ) -> Result<Option<String>, DispatchError> {
+    ) -> Result<Option<String>, TaskError> {
         let (llm_tx, llm_rx) = mpsc::channel(EVENT_BUFFER);
         let agent_task = self.spawn_task_agent(turn, backend, lane, llm_tx, cancel.clone());
         let transcript = Arc::clone(&self.deps.transcript);
@@ -317,7 +316,7 @@ impl TaskService {
         match agent_task.await {
             Ok(Ok(())) => Ok(reply),
             Ok(Err(e)) => Err(e.into()),
-            Err(join_err) => Err(DispatchError::AgentPanicked(join_err)),
+            Err(join_err) => Err(TaskError::AgentPanicked(join_err)),
         }
     }
 
@@ -376,10 +375,7 @@ pub(super) fn task_system_prompt(main: &str) -> String {
 
 /// How a run whose turn ended with `outcome` finished. A run cut short by shutdown
 /// without being cancelled on request failed.
-fn run_end(
-    outcome: Result<Option<String>, DispatchError>,
-    registered: &RegisteredRun,
-) -> TaskRunEnd {
+fn run_end(outcome: Result<Option<String>, TaskError>, registered: &RegisteredRun) -> TaskRunEnd {
     match outcome {
         Ok(Some(reply)) => TaskRunEnd::Succeeded { reply },
         _ if registered.cancel_requested() => TaskRunEnd::Cancelled,
