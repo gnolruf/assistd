@@ -359,7 +359,12 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
             .unwrap()
     );
     let edited = store
-        .index_document(second, plan.clone(), touched, format!("{section}!"))
+        .index_document(
+            second,
+            plan.clone(),
+            touched,
+            section.replace("detail", "change"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -381,6 +386,56 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
     assert_eq!(store.remove_index_root(root).await.unwrap(), 1);
     assert_eq!(store.count_missing().await.unwrap().chunks, 0);
     assert!(store.begin_index_pass(root).await.unwrap() != second);
+}
+
+#[tokio::test]
+async fn a_document_chunk_keeps_its_vector_wherever_its_text_moves() {
+    let (_handle, store, _temp) = fresh().await;
+    let path = PathBuf::from("/notes/plan.md");
+    let [one, two, six] = ["# One\n\nalpha", "# Two\n\nbravo", "# Six\n\ndelta"];
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let stored = store
+        .index_document(pass, path.clone(), STAMP, [one, two, six].join("\n\n"))
+        .await
+        .unwrap();
+    let [one_chunk, two_chunk, six_chunk] = stored[..] else {
+        panic!("expected a chunk per section, got {stored:?}");
+    };
+    for (chunk, angle) in [(one_chunk, 0.0), (two_chunk, 0.1), (six_chunk, 0.2)] {
+        embed_chunk(&store, chunk, &unit_vec(angle)).await;
+    }
+
+    let opening = "A new opening paragraph.";
+    let prepended = [opening, one, two, six].join("\n\n");
+    let added = store
+        .index_document(pass, path.clone(), STAMP, prepended)
+        .await
+        .unwrap();
+    assert_eq!(added.len(), 1, "only the new paragraph is a new chunk");
+
+    let swapped = [opening, two, one, six].join("\n\n");
+    let added = store
+        .index_document(pass, path, STAMP, swapped)
+        .await
+        .unwrap();
+    assert!(added.is_empty(), "sections trading places are not new text");
+    assert_eq!(
+        store.count_missing().await.unwrap().chunks,
+        1,
+        "every section keeps its vector"
+    );
+
+    let hits = store
+        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Documents)
+        .await
+        .unwrap();
+    let [hit] = &hits[..] else {
+        panic!("the document must hit once, got {hits:?}");
+    };
+    assert_eq!((hit.chunk_id, hit.text.as_str()), (one_chunk, one));
+    let adjacent = store.adjacent_chunks(&hit.locator).await.unwrap();
+    assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(two_chunk));
+    assert_eq!(adjacent.after.map(|chunk| chunk.chunk_id), Some(six_chunk));
 }
 
 #[tokio::test]

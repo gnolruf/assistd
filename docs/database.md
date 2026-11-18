@@ -129,6 +129,7 @@ erDiagram
         blob content_hash "SHA-256 of content"
         int mtime_ns "the file's stamp when read"
         int size
+        int chunker "0 windows, 1 paragraphs"
         int chunk_chars "the chunking it was cut with"
         int overlap_chars
         int seen_pass "the root's pass that last saw it"
@@ -273,7 +274,11 @@ resumed, saying which.
   `documents.content`, so the text itself is never stored twice. User
   and assistant messages are cut into overlapping windows of 512
   characters (64 shared) in the same transaction that saves the
-  message; tool results are not chunked.
+  message; tool results are not chunked. A document is cut where its
+  text divides instead: at blank lines and Markdown headings, with
+  whole paragraphs packed into a chunk of up to 512 characters and a
+  heading always starting a new one. Only a paragraph longer than that
+  is cut into the same overlapping windows.
 - **`index_roots`**: the folders indexed for document search. Each
   walk over a root is a pass and bumps `pass`; deleting a root deletes
   its documents.
@@ -281,8 +286,11 @@ resumed, saying which.
   holding the text as it was indexed. A file whose `mtime_ns`, `size`
   and chunking match its row is not read again. One that is read and
   hashes to the stored `content_hash` only has its stamp refreshed.
-  Otherwise the chunks whose position and bytes are unchanged keep
-  their vectors and the rest are replaced. Each row records the pass
+  Otherwise each chunk whose text is unchanged keeps its vector and
+  takes the byte range that text now has, so an insertion re-embeds only
+  the paragraphs it touched, and the rest are replaced. `chunker` names
+  the strategy that cut the row, so a new strategy cuts every stored
+  document again on the next pass. Each row records the pass
   that last saw it, and finishing a pass deletes the root's documents
   it did not see. The rows are a rebuildable cache of files on disk,
   so a reset of `memory.db` costs only a re-index.
