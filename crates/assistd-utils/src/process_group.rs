@@ -3,10 +3,13 @@
 
 use std::io;
 use std::process::ExitStatus;
+use std::time::Duration;
 
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::process::{Child, Command};
+use tokio::time::timeout;
+use tracing::warn;
 
 /// The process group a child spawned with `process_group(0)` leads. The id
 /// is fixed at spawn. Dropping it SIGKILLs every process still in the group,
@@ -50,6 +53,21 @@ impl ProcessGroup {
     pub fn signal(&self, signal: Signal) {
         if !self.leader_reaped {
             let _ = kill_process_group(self.id, signal);
+        }
+    }
+
+    /// Give `child`, the group's leader, `grace` to exit by itself, then
+    /// SIGTERM the group and, `grace` later, SIGKILL it. Returns once the
+    /// leader is reaped; `name` is what the log calls the child.
+    pub async fn stop_gracefully(mut self, mut child: Child, grace: Duration, name: &str) {
+        if timeout(grace, self.reap_leader(&mut child)).await.is_ok() {
+            return;
+        }
+        warn!(target: "assistd::process_group", "{name} still running; sending SIGTERM");
+        self.signal(Signal::TERM);
+        if timeout(grace, self.reap_leader(&mut child)).await.is_err() {
+            self.signal(Signal::KILL);
+            let _ = self.reap_leader(&mut child).await;
         }
     }
 }

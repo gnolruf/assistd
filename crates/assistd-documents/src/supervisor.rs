@@ -27,14 +27,12 @@ const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// blocking pool before every start, so it may open files.
 pub type WorkerCommand = Arc<dyn Fn() -> io::Result<Command> + Send + Sync>;
 
-/// How a worker's session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionEnd {
     Died,
     Shutdown,
 }
 
-/// A spawned worker and its pipes.
 struct RunningWorker {
     child: Child,
     group: ProcessGroup,
@@ -94,7 +92,11 @@ impl RunningWorker {
         };
         extractor.disconnect();
         match ended {
-            SessionEnd::Shutdown => stop_gracefully(child, group).await,
+            SessionEnd::Shutdown => {
+                group
+                    .stop_gracefully(child, EXIT_GRACE, "extraction worker")
+                    .await;
+            }
             SessionEnd::Died => {
                 group.signal(Signal::KILL);
                 let _ = group.reap_leader(&mut child).await;
@@ -224,24 +226,4 @@ async fn read_line(stdout: &mut BufReader<ChildStdout>) -> io::Result<Option<Vec
         ));
     }
     Ok(Some(line))
-}
-
-/// Give a worker whose stdin has closed time to exit, then SIGTERM and
-/// finally SIGKILL its process group.
-async fn stop_gracefully(mut child: Child, mut group: ProcessGroup) {
-    if tokio::time::timeout(EXIT_GRACE, group.reap_leader(&mut child))
-        .await
-        .is_ok()
-    {
-        return;
-    }
-    warn!(target: "assistd::documents::worker", "extraction worker still running; sending SIGTERM");
-    group.signal(Signal::TERM);
-    if tokio::time::timeout(EXIT_GRACE, group.reap_leader(&mut child))
-        .await
-        .is_err()
-    {
-        group.signal(Signal::KILL);
-        let _ = group.reap_leader(&mut child).await;
-    }
 }

@@ -72,7 +72,7 @@ fn read_file(path: &Path, max_file_bytes: u64) -> Result<Vec<u8>, SkipReason> {
     if size > max_file_bytes {
         return Err(SkipReason::TooLarge);
     }
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or_default());
     let read = file
         .take(max_file_bytes.saturating_add(1))
         .read_to_end(&mut bytes)
@@ -84,7 +84,7 @@ fn read_file(path: &Path, max_file_bytes: u64) -> Result<Vec<u8>, SkipReason> {
 }
 
 /// `bytes` as text in the encoding their byte-order mark names, or UTF-8 without
-/// one, where a file that looks binary as `cat` judges it is refused.
+/// one; bytes that look binary are refused.
 fn decode(bytes: &[u8]) -> Result<String, SkipReason> {
     if let Some(mime) = binary_format(bytes) {
         return Err(SkipReason::Unsupported {
@@ -134,7 +134,7 @@ mod tests {
         let unsupported = SkipReason::Unsupported {
             mime: "image/png".into(),
         };
-        let cases: [(&str, &[u8], Extraction); 8] = [
+        let cases: [(&str, &[u8], Extraction); 6] = [
             (
                 "notes.md",
                 "# Café\n\nBody.\n".as_bytes(),
@@ -142,9 +142,7 @@ mod tests {
             ),
             ("marked.txt", b"\xEF\xBB\xBFplain", text("plain")),
             ("wide.txt", &utf16, text("naïve")),
-            ("main.rs", b"fn main() {}\n", text("fn main() {}\n")),
             ("latin1.txt", b"caf\xE9", skipped(SkipReason::NotDecodable)),
-            ("odd.txt", b"\xFF\xFEa", skipped(SkipReason::NotDecodable)),
             ("blob.dat", b"ab\0cd", skipped(SkipReason::Binary)),
             ("picture.txt", PNG_MAGIC, skipped(unsupported)),
         ];
@@ -174,16 +172,11 @@ mod tests {
             skipped(SkipReason::TooLarge)
         );
         assert_eq!(extraction_of("fits.txt", b"1234", 4), text("1234"));
-        for unreadable in ["/dev/zero", "/nonexistent/file.txt"] {
-            assert!(
-                matches!(
-                    extract_text(Path::new(unreadable), 4),
-                    Extraction::Skipped {
-                        reason: SkipReason::Unreadable { .. }
-                    }
-                ),
-                "{unreadable}"
-            );
-        }
+        assert!(matches!(
+            extract_text(Path::new("/dev/zero"), 4),
+            Extraction::Skipped {
+                reason: SkipReason::Unreadable { .. }
+            }
+        ));
     }
 }

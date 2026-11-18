@@ -14,7 +14,7 @@ pub(crate) const MAX_REPLY_LINE_BYTES: usize = 6 * MAX_TEXT_BYTES + 1024;
 /// A line from the other side that is not a message this build knows.
 #[derive(Debug, Error)]
 #[error("malformed extraction-worker message: {0}")]
-pub struct ProtocolError(#[from] serde_json::Error);
+pub(crate) struct ProtocolError(#[from] serde_json::Error);
 
 /// Daemon → worker: extract the text of one file, answered with a
 /// [`FromWorker::Reply`] of the same id.

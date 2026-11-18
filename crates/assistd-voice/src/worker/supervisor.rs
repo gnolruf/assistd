@@ -124,7 +124,11 @@ impl Session<'_> {
             _ = shutdown.wait_for(|stop| *stop) => SessionEnd::Shutdown,
         };
         match ended {
-            SessionEnd::Shutdown => stop_gracefully(child, group).await,
+            SessionEnd::Shutdown => {
+                group
+                    .stop_gracefully(child, EXIT_GRACE, "voice worker")
+                    .await;
+            }
             SessionEnd::Died => {
                 group.signal(Signal::KILL);
                 let _ = group.reap_leader(&mut child).await;
@@ -297,25 +301,5 @@ async fn write_messages(mut stdin: ChildStdin, mut messages: mpsc::UnboundedRece
             warn!(target: "assistd::voice::worker", "voice worker stdin: {e}");
             return;
         }
-    }
-}
-
-/// Give a worker whose stdin has closed time to exit, then SIGTERM and
-/// finally SIGKILL its process group.
-async fn stop_gracefully(mut child: Child, mut group: ProcessGroup) {
-    if tokio::time::timeout(EXIT_GRACE, group.reap_leader(&mut child))
-        .await
-        .is_ok()
-    {
-        return;
-    }
-    warn!(target: "assistd::voice::worker", "voice worker still running; sending SIGTERM");
-    group.signal(Signal::TERM);
-    if tokio::time::timeout(EXIT_GRACE, group.reap_leader(&mut child))
-        .await
-        .is_err()
-    {
-        group.signal(Signal::KILL);
-        let _ = group.reap_leader(&mut child).await;
     }
 }

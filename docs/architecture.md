@@ -61,7 +61,7 @@ flowchart TB
 | `assistd-chat`   | The `assistd chat` terminal window and the `assistd settings` panel, a client that only reads and writes the socket. | `config`, `ipc`, `utils`                                                         |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
 | `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
-| `assistd-documents` | Document text extraction in a sandboxed `extract-worker` child: its protocol, the worker side with its format table, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
+| `assistd-documents` | Document text extraction in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `utils`                                                         |
@@ -106,7 +106,8 @@ the model has loaded (queries wait for it; requests that need no model
 are served at once). Voice and the embedding server start after the
 model, so neither loads onto the GPU while it does, and the SearXNG
 instance, the MCP servers and the document extraction worker start straight
-away; none of them holds up the socket. `RequestBody::GetReadiness` reports how far each has got as one
+away; none of them holds up the socket. `RequestBody::GetReadiness` reports
+how far each has got as one
 `EventBody::Readiness` per subsystem, and the daemon broadcasts the same event as each one settles. The chat names
 whatever is still starting, and the tray tooltip lists every subsystem's
 state. The server takes
@@ -723,9 +724,7 @@ file at a time over line-delimited JSON on its stdin and stdout. A request
 names a file and the largest size to read; the reply is the file's text, cut
 at 4 MiB with a flag saying so, or a `SkipReason`: an unsupported type (a
 recognised binary format, with its MIME type), binary, too large, not
-decodable, unreadable, extractor failed, or timed out. Which extractor reads
-a file is the worker's business, so a format can be added without touching
-whatever asks.
+decodable, unreadable, extractor failed, or timed out.
 
 Plain text, Markdown and source code are decoded with `encoding_rs`, as UTF-8
 or as the encoding their byte-order mark names, and kept as they are; text

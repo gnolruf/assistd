@@ -161,8 +161,8 @@ and data-flow walkthrough.
 **Dependency direction.** Dependencies point one way through these
 layers, each crate taking only crates from layers before its own:
 `utils`; then `config` and `ipc`; then `chat`, `llm`, `memory`,
-`search`, `voice` and `wm`; then `documents` and `embed`; then `tools`; then `mcp`;
-then `core`; then the binary. If you find yourself wanting
+`search`, `voice` and `wm`; then `documents` and `embed`; then `tools`;
+then `mcp`; then `core`; then the binary. If you find yourself wanting
 `assistd-memory` to call into `assistd-core`, you're holding it wrong
 — invert the dependency or move the type. `assistd-utils` has no
 internal deps and is the only one `assistd-config` and `assistd-ipc`
@@ -188,10 +188,10 @@ stays where it is used.
   the feature wiring.
 - **External processes are supervised, not assumed.** `llama-server`,
   the embedding `llama-server`, SearXNG, MCP servers, the voice worker and
-  the extraction worker are all child processes with supervisors that handle restart and
-  reconnect. New external integrations should follow the same
-  pattern (health probe, exponential backoff, surface failures as
-  typed errors), not assume the process is up.
+  the extraction worker are all child processes with supervisors that
+  handle restart and reconnect. New external integrations should
+  follow the same pattern (health probe, exponential backoff, surface
+  failures as typed errors), not assume the process is up.
 - **The TUI is a daemon client.** `assistd chat` is a long-lived
   client onto the daemon's Unix socket. The TUI should never spawn
   its own LLM/voice/MCP services; it talks IPC and renders events.
