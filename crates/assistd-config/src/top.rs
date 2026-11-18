@@ -6,12 +6,13 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use assistd_utils::path::lexical_clean;
+use assistd_utils::path::{canonical_existing, lexical_clean};
 use serde::{Deserialize, Serialize};
 
 use crate::chat::ChatConfig;
 use crate::compositor::CompositorConfig;
 use crate::defaults::CONFIRMATION_PROMPT_SECS;
+use crate::documents::DocumentsConfig;
 use crate::embedding::EmbeddingConfig;
 use crate::errors::{ConfigError, ConfigIssue};
 use crate::mcp::McpConfig;
@@ -43,6 +44,7 @@ pub struct Config {
     pub tools: ToolsConfig,
     pub memory: MemoryConfig,
     pub embedding: EmbeddingConfig,
+    pub documents: DocumentsConfig,
     pub search: SearchConfig,
     pub mcp: McpConfig,
     #[serde(skip)]
@@ -61,6 +63,7 @@ impl DescribeSettings for Config {
         tools => nested,
         memory => nested,
         embedding => nested,
+        documents => nested,
         search => nested,
         mcp => nested,
         timeouts => skip,
@@ -87,6 +90,7 @@ impl Config {
         validate_tool_timeouts(&mut issues, self);
         validate_ports(&mut issues, self);
         validate_mcp(&mut issues, &self.mcp);
+        validate_documents(&mut issues, &self.documents, &self.embedding);
         issues
     }
 
@@ -382,6 +386,76 @@ fn validate_mcp(issues: &mut Vec<ConfigIssue>, mcp: &McpConfig) {
             });
         }
     }
+}
+
+fn validate_documents(
+    issues: &mut Vec<ConfigIssue>,
+    documents: &DocumentsConfig,
+    embedding: &EmbeddingConfig,
+) {
+    if documents.enabled && !embedding.enabled {
+        issues.push(ConfigIssue::DocumentsWithoutEmbedding);
+    }
+    let (filesystem_roots, roots): (Vec<PathBuf>, Vec<PathBuf>) = documents
+        .roots
+        .iter()
+        .map(|root| symlinks_resolved(root.as_path()))
+        .partition(|root| root.parent().is_none());
+    if !filesystem_roots.is_empty() {
+        issues.push(ConfigIssue::DocumentRootIsFilesystemRoot);
+    }
+    let own_dirs = own_dirs();
+    for (index, root) in roots.iter().enumerate() {
+        if let Some(outer) = enclosing_root(&roots, index) {
+            issues.push(ConfigIssue::NestedDocumentRoots {
+                inner: root.clone(),
+                outer: outer.clone(),
+            });
+        }
+        if let Some(own_dir) = own_dirs.iter().find(|dir| overlap(root, dir)) {
+            issues.push(ConfigIssue::DocumentRootOverlapsOwnDir {
+                root: root.clone(),
+                own_dir: own_dir.clone(),
+            });
+        }
+    }
+}
+
+/// The root that `roots[index]` sits under, or the earlier root it repeats.
+fn enclosing_root(roots: &[PathBuf], index: usize) -> Option<&PathBuf> {
+    let inner = &roots[index];
+    roots.iter().enumerate().find_map(|(other, outer)| {
+        let encloses = if outer == inner {
+            other < index
+        } else {
+            inner.starts_with(outer)
+        };
+        encloses.then_some(outer)
+    })
+}
+
+/// Whether one of the two directories is, or sits under, the other.
+fn overlap(first: &Path, second: &Path) -> bool {
+    first.starts_with(second) || second.starts_with(first)
+}
+
+/// `path` as the kernel would reach it, as far as it exists; cleaned lexically otherwise.
+fn symlinks_resolved(path: &Path) -> PathBuf {
+    canonical_existing(path).unwrap_or_else(|| lexical_clean(path))
+}
+
+/// assistd's config, data, state and cache directories, symlinks resolved.
+fn own_dirs() -> Vec<PathBuf> {
+    [
+        dirs::config_dir(),
+        dirs::data_dir(),
+        dirs::state_dir(),
+        dirs::cache_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|dir| symlinks_resolved(&dir.join("assistd")))
+    .collect()
 }
 
 /// Whether `dir` is `/`, or holds one of `owned`: the daemon restricts a tool

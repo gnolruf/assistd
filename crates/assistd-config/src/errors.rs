@@ -151,6 +151,28 @@ pub enum ConfigIssue {
 
     #[error("mcp.servers[{index}].name '{name}' is duplicated; names must be unique")]
     DuplicateMcpServer { index: usize, name: String },
+
+    #[error("documents.enabled needs embedding.enabled: documents are found by their embeddings")]
+    DocumentsWithoutEmbedding,
+
+    #[error("documents.roots must not list `/`: name the directories that hold your documents")]
+    DocumentRootIsFilesystemRoot,
+
+    #[error(
+        "documents.roots lists {}, which is or sits under its entry {}; a document belongs to \
+         one root, so keep only one of them",
+        inner.display(),
+        outer.display()
+    )]
+    NestedDocumentRoots { inner: PathBuf, outer: PathBuf },
+
+    #[error(
+        "documents.roots lists {}, which holds or sits under {}, one of assistd's own \
+         directories (its config, databases, tokens and relay files)",
+        root.display(),
+        own_dir.display()
+    )]
+    DocumentRootOverlapsOwnDir { root: PathBuf, own_dir: PathBuf },
 }
 
 /// A tool directory left unset on a machine with nowhere to default it to.

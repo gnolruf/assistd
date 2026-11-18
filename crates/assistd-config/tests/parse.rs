@@ -1,6 +1,10 @@
 //! Every section is optional, and a key the schema doesn't know is
 //! skipped and reported rather than rejected.
 
+use std::fs;
+use std::os::unix::fs::symlink;
+use std::path::Path;
+
 use assistd_config::Config;
 
 #[test]
@@ -172,6 +176,65 @@ fn home_relative_and_absolute_writable_paths_validate() {
 }
 
 #[test]
+fn document_roots_must_be_separate_directories_clear_of_assistds_own() {
+    validate_document_roots(&["/srv/notes", "/srv/notes-archive", "~/papers"])
+        .expect("separate directories are valid, sharing a name prefix or not");
+    validate_document_roots(&["/srv/unmounted-drive"])
+        .expect("a missing root is left to the index pass");
+
+    let filesystem_root = validate_document_roots(&["/"]).expect_err("`/` must not validate");
+    assert!(
+        filesystem_root.contains("must not list `/`"),
+        "{filesystem_root}"
+    );
+    for nested in [
+        ["/srv/notes", "/srv/notes/2026"],
+        ["/srv/notes/2026", "/srv/notes"],
+        ["/srv/notes", "/srv/notes/"],
+        ["/srv/notes", "/srv/other/../notes/2026"],
+    ] {
+        let err =
+            validate_document_roots(&nested).expect_err(&format!("{nested:?} must not validate"));
+        assert!(err.contains("is or sits under"), "{nested:?}: {err}");
+    }
+    let xdg_dirs = [
+        dirs::config_dir(),
+        dirs::data_dir(),
+        dirs::state_dir(),
+        dirs::cache_dir(),
+    ];
+    for xdg_dir in xdg_dirs.map(|dir| dir.expect("an XDG directory")) {
+        let own_dir = xdg_dir.join("assistd");
+        for root in [&xdg_dir, &own_dir, &own_dir.join("relays")] {
+            let root = root.to_str().expect("a UTF-8 path");
+            let err =
+                validate_document_roots(&[root]).expect_err(&format!("{root} must not validate"));
+            assert!(err.contains("own directories"), "{root}: {err}");
+        }
+    }
+}
+
+#[test]
+fn document_roots_are_compared_with_symlinks_followed() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let notes = dir.path().join("notes");
+    let notes_alias = dir.path().join("notes-alias");
+    let home_alias = dir.path().join("home-alias");
+    fs::create_dir(&notes).expect("a notes directory");
+    symlink(&notes, &notes_alias).expect("a link to the notes directory");
+    symlink(dirs::home_dir().expect("a home directory"), &home_alias)
+        .expect("a link to the home directory");
+    let utf8 = |path: &Path| path.to_str().expect("a UTF-8 path").to_owned();
+
+    let nested = validate_document_roots(&[&utf8(&notes), &utf8(&notes_alias.join("2026"))])
+        .expect_err("a root under a link to another root must not validate");
+    assert!(nested.contains("is or sits under"), "{nested}");
+    let own = validate_document_roots(&[&utf8(&home_alias)])
+        .expect_err("a link to a directory holding assistd's own must not validate");
+    assert!(own.contains("own directories"), "{own}");
+}
+
+#[test]
 fn history_and_response_must_fit_the_context_together() {
     let parse = |response: u32| -> Config {
         toml::from_str(&format!(
@@ -202,6 +265,13 @@ fn mcp_server_names_that_could_share_a_tool_name_are_rejected() {
         assert!(err.to_string().contains("MCP server name"), "{name}: {err}");
     }
     parse("google_calendar-v2").expect("single inner underscores are unambiguous");
+}
+
+fn validate_document_roots(roots: &[&str]) -> Result<(), String> {
+    let roots = toml::Value::from(roots.to_vec());
+    let cfg: Config =
+        toml::from_str(&format!("[documents]\nroots = {roots}\n")).expect("config must parse");
+    cfg.validate().map_err(|err| err.to_string())
 }
 
 fn parse_reporting_unknown_keys(toml_src: &str) -> (Config, Vec<String>) {
