@@ -120,7 +120,9 @@ fn decide(state: PresenceState, idle: Duration, cfg: &SleepConfig) -> Action {
                 Action::None
             }
         }
-        PresenceState::Sleeping | PresenceState::Waking => Action::None,
+        PresenceState::Sleeping | PresenceState::Waking | PresenceState::Downloading(_) => {
+            Action::None
+        }
     }
 }
 

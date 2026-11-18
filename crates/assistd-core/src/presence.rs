@@ -17,7 +17,8 @@ use crate::bus::EventSink;
 
 use assistd_config::{ModelConfig, TimeoutsConfig};
 use assistd_ipc::{
-    Component, Event, EventBody, PresenceState, PresenceTarget, StatusKind, StatusSeverity,
+    Component, DownloadProgress, Event, EventBody, PresenceState, PresenceTarget, StatusKind,
+    StatusSeverity,
 };
 use assistd_llm::{
     HealthSnapshot, HealthWaitError, LlamaServerControl, LlamaServerError, LlamaServerSpec,
@@ -31,6 +32,7 @@ use crate::recovery::spawn_supervised;
 const GUARD_ACQUIRE_RETRIES: usize = 3;
 const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const LOAD_PROGRESS_INTERVAL: Duration = Duration::from_secs(3);
+const DOWNLOAD_PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
 const TASK_DRAIN_GRACE: Duration = Duration::from_secs(5);
 
 type InnerShutdownSlot = Arc<StdMutex<Option<watch::Sender<bool>>>>;
@@ -50,6 +52,9 @@ pub enum PresenceError {
     #[error("llama-server cold-start failed during wake: {0}")]
     ColdStart(#[source] ChildServerError),
 
+    #[error("the model could not be downloaded: {0}")]
+    Download(#[source] LlamaServerError),
+
     #[error("llama-server /models/load failed for {model}: {source}")]
     Load {
         model: String,
@@ -65,8 +70,8 @@ pub enum PresenceError {
         source: LlamaServerError,
     },
 
-    /// The supervisor restarted or gave up on the child mid-load.
-    #[error("llama-server left the ready state while loading {model}")]
+    /// The supervisor restarted or gave up on the child mid-download or mid-load.
+    #[error("llama-server left the ready state while bringing up {model}")]
     LeftReady { model: String },
 
     #[error("llama-server /models/unload failed for {model}: {source}")]
@@ -226,7 +231,8 @@ impl PresenceManager {
         self.gpu_hold.subscribe()
     }
 
-    /// The current presence state, `Waking` while a wake runs.
+    /// The current presence state; `Waking`, or `Downloading` with how far
+    /// the model's files have got, while a wake runs.
     pub fn state(&self) -> PresenceState {
         *self.state_tx.borrow()
     }
@@ -656,6 +662,7 @@ impl PresenceManager {
         &self,
         ready_rx: watch::Receiver<ReadyState>,
     ) -> Result<(), PresenceError> {
+        self.ensure_model_cached(ready_rx.clone()).await?;
         self.control
             .load_model(self.model.name.as_str())
             .await
@@ -665,6 +672,49 @@ impl PresenceManager {
             })?;
 
         self.await_model_loaded(ready_rx).await
+    }
+
+    /// Download the model if llama-server lacks it, reporting `Downloading`
+    /// meanwhile. `ready_timeout_secs` bounds the time without new bytes, not
+    /// the download.
+    async fn ensure_model_cached(
+        &self,
+        mut ready_rx: watch::Receiver<ReadyState>,
+    ) -> Result<(), PresenceError> {
+        let model = self.model.name.as_str();
+        let stall = Duration::from_secs(self.model.ready_timeout_secs.get());
+        let mut published_at = None;
+        let publish = |progress| {
+            if published_at.is_none_or(|at: Instant| at.elapsed() >= DOWNLOAD_PUBLISH_INTERVAL) {
+                published_at = Some(Instant::now());
+                self.publish_download(progress);
+            }
+        };
+        let downloaded = tokio::select! {
+            res = self.control.ensure_cached(model, stall, publish) => {
+                res.map_err(PresenceError::Download)
+            }
+            () = wait_until_not_ready(&mut ready_rx) => Err(PresenceError::LeftReady {
+                model: model.to_string(),
+            }),
+        };
+        self.publish_download_over();
+        downloaded
+    }
+
+    fn publish_download(&self, progress: DownloadProgress) {
+        self.state_tx
+            .send_replace(PresenceState::Downloading(progress));
+    }
+
+    fn publish_download_over(&self) {
+        self.state_tx.send_if_modified(|state| {
+            let was_downloading = matches!(state, PresenceState::Downloading(_));
+            if was_downloading {
+                *state = PresenceState::Waking;
+            }
+            was_downloading
+        });
     }
 
     async fn await_model_loaded(
@@ -831,7 +881,8 @@ async fn wait_until_not_ready(rx: &mut watch::Receiver<ReadyState>) {
 }
 
 /// Emit a `ModelLoading` status every [`LOAD_PROGRESS_INTERVAL`] while a
-/// wake runs. The first immediate tick is skipped so short wakes stay quiet.
+/// wake runs, saying how far a download has got or how long the load has
+/// taken. The first immediate tick is skipped so short wakes stay quiet.
 fn spawn_load_progress_emitter(
     presence: Arc<PresenceManager>,
     request_id: String,
@@ -845,7 +896,10 @@ fn spawn_load_progress_emitter(
             let Some(started) = presence.wake_in_progress() else {
                 return;
             };
-            let elapsed_secs = started.elapsed().as_secs();
+            let message = match presence.state() {
+                PresenceState::Downloading(progress) => format!("downloading model: {progress}"),
+                _ => format!("loading model ({}s elapsed)", started.elapsed().as_secs()),
+            };
             if tx
                 .send(Event::new(
                     request_id.clone(),
@@ -853,7 +907,7 @@ fn spawn_load_progress_emitter(
                         severity: StatusSeverity::Info,
                         component: Component::Llm,
                         event: StatusKind::ModelLoading,
-                        message: format!("loading model ({elapsed_secs}s elapsed)"),
+                        message,
                     },
                 ))
                 .await

@@ -3,12 +3,12 @@
 # Units, ranges and validation rules are documented on the assistd-config schema types.
 
 [model]
-# name = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"  # owner/repo:quant
+# name = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"  # owner/repo:quant; downloaded on first use
 # context_length = 8192
 # server_binary = "llama-server"  # also runs the embedding server
 # port = 8385  # on 127.0.0.1
 # gpu_layers = 9999  # 9999 offloads every layer
-# ready_timeout_secs = 300  # raise for slow first-time downloads
+# ready_timeout_secs = 300  # to start and to load; a download may stall this long
 # Extra server flags, shell-quoted; no shell runs. Flags assistd manages or that expose the server are refused.
 # custom_args = "--flash-attn on --cache-type-k q8_0 --n-cpu-moe 30 -ot '\\.ffn_(up|down|gate)_exps\\.=CPU'"
 

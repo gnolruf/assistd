@@ -765,8 +765,12 @@ fn status_segments(app: &App) -> Vec<String> {
     if app.wake_word_heard {
         segments.push(format!("{} Listening…", app.spinner_char()));
     }
-    if let Some(state) = app.presence_state.filter(|s| *s != PresenceState::Active) {
-        segments.push(format!("model is {}", state.as_str()));
+    match app.presence_state {
+        None | Some(PresenceState::Active) => {}
+        Some(PresenceState::Downloading(progress)) => {
+            segments.push(format!("downloading model: {progress}"));
+        }
+        Some(state) => segments.push(format!("model is {}", state.as_str())),
     }
     match app.pending_attachments.len() {
         0 => {}

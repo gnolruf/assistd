@@ -1,22 +1,26 @@
-//! HTTP control plane for llama.cpp's router-mode server: load and unload
-//! model weights without restarting the process, and query what is loaded.
+//! HTTP control plane for llama.cpp's router-mode server: download, load and
+//! unload a model without restarting the process, and query what is loaded.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use assistd_ipc::DownloadProgress;
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::http::{local_client_builder, read_capped};
+use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, info};
 
+use super::download::DownloadEvents;
 use super::error::LlamaServerError;
 use crate::LlmHealthProbe;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 const PROPS_TIMEOUT: Duration = Duration::from_secs(2);
+const MODEL_EVENTS_PATH: &str = "/models/sse";
 /// Largest accepted `/models` or `/props` body; both are a few KiB in practice.
 const BODY_MAX: usize = 4 * 1024 * 1024;
 
@@ -25,6 +29,8 @@ const BODY_MAX: usize = 4 * 1024 * 1024;
 #[derive(Debug)]
 pub struct LlamaServerControl {
     client: reqwest::Client,
+    /// Has no total timeout: an event stream stays open for a whole download.
+    events_client: reqwest::Client,
     base_url: String,
     health: Option<Arc<dyn LlmHealthProbe>>,
 }
@@ -38,16 +44,17 @@ impl LlamaServerControl {
         api_key: Option<&ApiKey>,
         health: Option<Arc<dyn LlmHealthProbe>>,
     ) -> Result<Self, LlamaServerError> {
+        let headers = api_key
+            .map(ApiKey::authorization_headers)
+            .unwrap_or_default();
         let client = local_client_builder()
-            .default_headers(
-                api_key
-                    .map(ApiKey::authorization_headers)
-                    .unwrap_or_default(),
-            )
+            .default_headers(headers.clone())
             .timeout(DEFAULT_TIMEOUT)
             .build()?;
+        let events_client = local_client_builder().default_headers(headers).build()?;
         Ok(Self {
             client,
+            events_client,
             base_url: format!("http://{addr}"),
             health,
         })
@@ -63,6 +70,40 @@ impl LlamaServerControl {
     pub async fn model_props(&self, model: &str) -> Result<Value, LlamaServerError> {
         self.fetch_props(&[("model", model), ("autoload", "false")])
             .await
+    }
+
+    /// Have the server download `model` unless its cache already holds it,
+    /// passing the bytes fetched to `on_progress`. Fails with
+    /// [`LlamaServerError::DownloadStalled`] once `stall` passes without new bytes.
+    pub async fn ensure_cached(
+        &self,
+        model: &str,
+        stall: Duration,
+        mut on_progress: impl FnMut(DownloadProgress),
+    ) -> Result<(), LlamaServerError> {
+        if self.cache_state(model).await? == CacheState::Cached {
+            return Ok(());
+        }
+        let events = self.subscribe_downloads(model).await?;
+        match self.cache_state(model).await? {
+            CacheState::Cached => return Ok(()),
+            CacheState::Downloading => {}
+            CacheState::Missing => self.request_download(model).await?,
+        }
+        info!(target: "assistd::llama_server", model, "downloading the model through llama-server");
+        on_progress(DownloadProgress::default());
+        events.wait_until_finished(stall, on_progress).await?;
+        match self.cache_state(model).await? {
+            CacheState::Cached => {
+                info!(target: "assistd::llama_server", model, "model downloaded");
+                Ok(())
+            }
+            CacheState::Downloading | CacheState::Missing => {
+                Err(LlamaServerError::DownloadNotListed {
+                    model: model.to_string(),
+                })
+            }
+        }
     }
 
     /// Ask the server to load `model`. Returns once the request is
@@ -113,6 +154,43 @@ impl LlamaServerControl {
         }
     }
 
+    async fn cache_state(&self, model: &str) -> Result<CacheState, LlamaServerError> {
+        Ok(self.fetch_models().await?.cache_state(model))
+    }
+
+    /// Open the event stream before a download is asked for, so that the
+    /// one event that ends it cannot be missed.
+    async fn subscribe_downloads(&self, model: &str) -> Result<DownloadEvents, LlamaServerError> {
+        self.require_serving().await?;
+        let url = format!("{}{MODEL_EVENTS_PATH}", self.base_url);
+        let resp = self.events_client.get(&url).send().await?;
+        match resp.status() {
+            status if status.is_success() => Ok(DownloadEvents::new(resp, model)),
+            StatusCode::NOT_FOUND => Err(LlamaServerError::DownloadUnsupported {
+                model: model.to_string(),
+            }),
+            status => Err(control_http_error("GET", MODEL_EVENTS_PATH, status)),
+        }
+    }
+
+    async fn request_download(&self, model: &str) -> Result<(), LlamaServerError> {
+        self.require_serving().await?;
+        let url = format!("{}/models", self.base_url);
+        debug!(target: "assistd::llama_server", "POST {url} model={model}");
+        let body = ModelActionRequest { model };
+        let resp = self.client.post(&url).json(&body).send().await?;
+        match resp.status() {
+            status if status.is_success() => Ok(()),
+            StatusCode::NOT_FOUND => Err(LlamaServerError::DownloadUnsupported {
+                model: model.to_string(),
+            }),
+            status => Err(LlamaServerError::DownloadRefused {
+                model: model.to_string(),
+                reason: refusal_reason(resp, status).await,
+            }),
+        }
+    }
+
     async fn fetch_models(&self) -> Result<ModelsResponse, LlamaServerError> {
         self.require_serving().await?;
         let url = format!("{}/models", self.base_url);
@@ -158,9 +236,13 @@ impl LlamaServerControl {
     }
 }
 
-async fn read_json<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, LlamaServerError> {
-    let body = read_capped(resp, BODY_MAX).await?;
-    Ok(serde_json::from_slice(&body)?)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheState {
+    /// Every file is there, loaded or not.
+    Cached,
+    Downloading,
+    /// Never downloaded, or a download stopped part-way.
+    Missing,
 }
 
 #[derive(Serialize)]
@@ -177,6 +259,13 @@ struct ModelsResponse {
 impl ModelsResponse {
     fn contains_loaded(&self, model: &str) -> bool {
         self.data.iter().any(|e| e.matches(model) && e.is_loaded())
+    }
+
+    fn cache_state(&self, model: &str) -> CacheState {
+        self.data
+            .iter()
+            .find(|entry| entry.matches(model))
+            .map_or(CacheState::Missing, ModelEntry::cache_state)
     }
 }
 
@@ -196,6 +285,14 @@ impl ModelEntry {
     fn is_loaded(&self) -> bool {
         self.status.as_ref().is_some_and(ModelStatus::is_loaded)
     }
+
+    fn cache_state(&self) -> CacheState {
+        match self.status.as_ref().map(|status| status.value.as_str()) {
+            Some("downloading") => CacheState::Downloading,
+            Some("incomplete") => CacheState::Missing,
+            _ => CacheState::Cached,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -209,10 +306,31 @@ impl ModelStatus {
     }
 }
 
+#[derive(Deserialize)]
+struct ErrorResponse {
+    error: ErrorDetail,
+}
+
+#[derive(Deserialize)]
+struct ErrorDetail {
+    message: String,
+}
+
+async fn read_json<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, LlamaServerError> {
+    let body = read_capped(resp, BODY_MAX).await?;
+    Ok(serde_json::from_slice(&body)?)
+}
+
+async fn refusal_reason(resp: reqwest::Response, status: StatusCode) -> String {
+    read_json::<ErrorResponse>(resp)
+        .await
+        .map_or_else(|_| format!("HTTP {status}"), |body| body.error.message)
+}
+
 fn control_http_error(
     method: &'static str,
     path: &'static str,
-    status: reqwest::StatusCode,
+    status: StatusCode,
 ) -> LlamaServerError {
     LlamaServerError::ControlHttp {
         method,
