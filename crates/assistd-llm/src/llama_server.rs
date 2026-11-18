@@ -3,6 +3,7 @@
 
 pub mod capabilities;
 pub mod control;
+mod download;
 pub mod error;
 pub mod slots;
 pub mod spec;

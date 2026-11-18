@@ -159,13 +159,14 @@ fn toggle_label_for(presence: PresenceState) -> &'static str {
     }
 }
 
-/// A wake in progress toggles to `Sleeping`, which waits for the load.
+/// A wake in progress toggles to `Sleeping`, which waits for the download and the load.
 fn toggle_target(presence: PresenceState) -> PresenceTarget {
     match presence {
         PresenceState::Sleeping => PresenceTarget::Active,
-        PresenceState::Active | PresenceState::Drowsy | PresenceState::Waking => {
-            PresenceTarget::Sleeping
-        }
+        PresenceState::Active
+        | PresenceState::Drowsy
+        | PresenceState::Waking
+        | PresenceState::Downloading(_) => PresenceTarget::Sleeping,
     }
 }
 

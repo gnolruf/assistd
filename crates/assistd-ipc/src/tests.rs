@@ -387,6 +387,15 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str)> {
             r#"{"id":"r","type":"presence","state":"sleeping"}"#,
         ),
         (
+            event(EventBody::Presence {
+                state: PresenceState::Downloading(DownloadProgress {
+                    done_bytes: 5,
+                    total_bytes: 20,
+                }),
+            }),
+            r#"{"id":"r","type":"presence","state":{"downloading":{"done_bytes":5,"total_bytes":20}}}"#,
+        ),
+        (
             event(EventBody::VoiceState {
                 state: VoiceCaptureState::Recording,
             }),

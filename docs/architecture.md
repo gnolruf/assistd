@@ -145,7 +145,11 @@ verified start.
 Presence decides whether the model is loaded: `Active` has it loaded,
 `Drowsy` keeps `llama-server` running with the weights unloaded, and
 `Sleeping` stops the server. The daemon starts `Sleeping` and reports
-`Waking` while it loads the model. The idle timers and GPU monitor
+`Waking` while it loads the model. A wake first asks the router whether
+its cache holds `model.name`; if not, it has the router download it
+(`POST /models`), follows the bytes on `GET /models/sse` and reports
+`Downloading` with them. `model.ready_timeout_secs` bounds how long the
+download may go without new bytes, not the download. The idle timers and GPU monitor
 under `[sleep]` move it down, and a query wakes it.
 
 If the child crashes mid-stream (CUDA OOM, OOM-killer, segfault), the

@@ -21,8 +21,8 @@ pub(super) enum TrayState {
     Listening,
     /// Daemon is awake and idle.
     Active,
-    /// Daemon is drowsing, sleeping, or loading the model (rendered the
-    /// same at-a-glance).
+    /// Daemon is drowsing, sleeping, or downloading or loading the model
+    /// (rendered the same at-a-glance).
     Sleeping,
 }
 
@@ -79,9 +79,10 @@ impl TrayTracker {
         }
         match self.presence {
             PresenceState::Active => TrayState::Active,
-            PresenceState::Drowsy | PresenceState::Sleeping | PresenceState::Waking => {
-                TrayState::Sleeping
-            }
+            PresenceState::Drowsy
+            | PresenceState::Sleeping
+            | PresenceState::Waking
+            | PresenceState::Downloading(_) => TrayState::Sleeping,
         }
     }
 
@@ -185,8 +186,8 @@ pub(super) struct Tooltip {
     pub description: String,
 }
 
-/// The state's one-line title over the config error, else the task queue's lines and how far
-/// each subsystem has started.
+/// The state's one-line title, or a model download's progress in its place, over the config
+/// error, else the task queue's lines and how far each subsystem has started.
 pub(super) fn tooltip_for(tracker: &TrayTracker, now: DateTime<Utc>) -> Tooltip {
     let description = match tracker.config_error() {
         Some(error) => error.to_string(),
@@ -199,10 +200,13 @@ pub(super) fn tooltip_for(tracker: &TrayTracker, now: DateTime<Utc>) -> Tooltip 
             .collect::<Vec<_>>()
             .join("\n"),
     };
-    Tooltip {
-        title: state_title(tracker.current()).to_string(),
-        description,
-    }
+    let title = match (tracker.current(), tracker.presence()) {
+        (TrayState::Sleeping, PresenceState::Downloading(progress)) => {
+            format!("assistd: downloading model: {progress}")
+        }
+        (state, _) => state_title(state).to_string(),
+    };
+    Tooltip { title, description }
 }
 
 fn state_title(state: TrayState) -> &'static str {

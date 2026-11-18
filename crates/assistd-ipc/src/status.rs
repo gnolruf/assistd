@@ -88,7 +88,7 @@ pub enum StatusKind {
     /// The model's response hit the output-token limit and was discarded;
     /// the step is being retried.
     OutputTruncated,
-    /// The model is still loading after a wake.
+    /// The model is still downloading or loading after a wake.
     ModelLoading,
     /// A subsystem failed to start and is unavailable this run.
     StartupFailed,

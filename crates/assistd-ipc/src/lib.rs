@@ -26,7 +26,7 @@ pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use event::{Event, EventBody, EventKind, ReindexKind, Role, TurnStats};
 pub use mcp::{McpServerState, McpTransportKind, TokenRevocation};
 pub use permission::{ConfirmSource, PermissionMode, PlanMode, PlanVerdict};
-pub use presence::{PresenceState, PresenceTarget};
+pub use presence::{DownloadProgress, PresenceState, PresenceTarget};
 pub use readiness::{ComponentReadiness, StartupComponent, StartupReadiness};
 pub use relay::{
     RelayEvent, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayToolOutcome,

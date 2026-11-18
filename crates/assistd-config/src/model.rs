@@ -28,7 +28,8 @@ pub struct ModelConfig {
     /// offload every layer.
     pub gpu_layers: u32,
     /// Last-ditch cap, in seconds, on becoming healthy and loading the model;
-    /// neither wait trips while progressing.
+    /// neither wait trips while progressing. A model download is cut off only
+    /// after this long without new bytes.
     pub ready_timeout_secs: NonZeroU64,
     /// Extra server arguments. Flags assistd sets itself, the slot save
     /// directory included, or that expose files, tools or state through the

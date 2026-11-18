@@ -52,8 +52,9 @@ window-manager bindings), and integrates with the running compositor for context
   rustup installs it automatically on first build).
 - `cmake`, `clang`, `pkg-config` and the ALSA headers (`alsa-lib` /
   `libasound2-dev`) to build.
-- `llama-server` from `llama.cpp` on your `$PATH`. The daemon spawns it
-  as a child process.
+- `llama-server` from `llama.cpp` on your `$PATH`, build b9688 or newer
+  for it to download the model itself. The daemon spawns it as a child
+  process.
 - `bubblewrap`, `prlimit` and `choom` from `util-linux`, and a systemd
   user session for `systemd-run --user --scope`. Without them the model
   gets no tools.
@@ -130,8 +131,9 @@ are runnable as-is. Uncomment a key to set it, for example to:
 assistd daemon
 ```
 
-The socket opens at once; the model downloads (first launch only) and
-loads in the background, and queries wait for it. Logs go to stdout at
+The socket opens at once; the model downloads (when `llama-server` has
+not cached it) and loads in the background, and queries wait for it. The
+chat window and the tray show how far a download has got. Logs go to stdout at
 `info`; set `RUST_LOG` to change that.
 
 ### 4. Open the chat TUI
