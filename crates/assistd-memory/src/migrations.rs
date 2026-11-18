@@ -154,7 +154,8 @@ CREATE TABLE index_roots (
 ) STRICT;
 
 -- An indexed file: its text as indexed, the file's stamp and content hash, the
--- chunking it was cut with, and the root's pass that last saw it.
+-- chunking it was cut with, and the root's pass that last saw it. `chunker` is
+-- 0 character windows, 1 packed paragraphs.
 CREATE TABLE documents (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     root_id       INTEGER NOT NULL REFERENCES index_roots(id) ON DELETE CASCADE,
@@ -163,6 +164,7 @@ CREATE TABLE documents (
     content_hash  BLOB NOT NULL CHECK (length(content_hash) = 32),
     mtime_ns      INTEGER NOT NULL,
     size          INTEGER NOT NULL CHECK (size >= 0),
+    chunker       INTEGER NOT NULL,
     chunk_chars   INTEGER NOT NULL CHECK (chunk_chars > 0),
     overlap_chars INTEGER NOT NULL CHECK (overlap_chars >= 0 AND overlap_chars < chunk_chars),
     seen_pass     INTEGER NOT NULL,

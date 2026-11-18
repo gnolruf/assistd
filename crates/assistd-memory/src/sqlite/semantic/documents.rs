@@ -1,6 +1,6 @@
 //! Writes to the document index: passes over index roots, and each document's text and chunks.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -40,7 +40,7 @@ pub(super) fn mark_seen_if_unchanged(
         .prepare_cached(
             "UPDATE documents SET root_id = ?1, seen_pass = ?2
              WHERE path = ?3 AND mtime_ns = ?4 AND size = ?5
-               AND chunk_chars = ?6 AND overlap_chars = ?7",
+               AND chunker = ?6 AND chunk_chars = ?7 AND overlap_chars = ?8",
         )?
         .execute(rusqlite::params![
             pass.root,
@@ -48,6 +48,7 @@ pub(super) fn mark_seen_if_unchanged(
             path.as_os_str().as_bytes(),
             stamp.mtime_ns,
             stamp.size,
+            chunking.chunker(),
             chunking.chunk_chars(),
             chunking.overlap_chars(),
         ])?;
@@ -74,17 +75,19 @@ pub(super) fn store_document(
     if document.refresh_stamp_if_same_text(tx)? {
         return Ok(Vec::new());
     }
-    let ranges: Vec<Range<usize>> = chunk_ranges(content, document.chunking).collect();
-    let kept_starts = drop_changed_chunks(tx, document.path, content, &ranges)?;
+    let ranges = chunk_ranges(content, document.chunking);
+    let stored = StoredChunks::load(tx, document.path)?;
+    let recut = stored.recut(content, &ranges);
+    recut.apply(tx, document.path, stored.content.len().max(content.len()))?;
     let id = document.upsert(tx)?;
     let mut insert = tx.prepare_cached(
         "INSERT INTO chunks (document_id, byte_start, byte_end)
          VALUES (?1, ?2, ?3)
          RETURNING id",
     )?;
-    ranges
+    recut
+        .added
         .iter()
-        .filter(|bytes| !kept_starts.contains(&bytes.start))
         .map(|bytes| insert.query_row(rusqlite::params![id, bytes.start, bytes.end], |r| r.get(0)))
         .collect()
 }
@@ -137,7 +140,7 @@ impl DocumentRow<'_> {
             .prepare_cached(
                 "UPDATE documents SET root_id = ?1, seen_pass = ?2, mtime_ns = ?3, size = ?4
                  WHERE path = ?5 AND content_hash = ?6
-                   AND chunk_chars = ?7 AND overlap_chars = ?8",
+                   AND chunker = ?7 AND chunk_chars = ?8 AND overlap_chars = ?9",
             )?
             .execute(rusqlite::params![
                 self.pass.root,
@@ -146,6 +149,7 @@ impl DocumentRow<'_> {
                 self.stamp.size,
                 self.path,
                 self.hash,
+                self.chunking.chunker(),
                 self.chunking.chunk_chars(),
                 self.chunking.overlap_chars(),
             ])?;
@@ -156,14 +160,14 @@ impl DocumentRow<'_> {
     fn upsert(&self, tx: &Transaction<'_>) -> rusqlite::Result<DocumentId> {
         tx.prepare_cached(
             "INSERT INTO documents (root_id, seen_pass, mtime_ns, size, path, content_hash,
-                                    chunk_chars, overlap_chars, content, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                                    chunker, chunk_chars, overlap_chars, content, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(path) DO UPDATE
              SET root_id = excluded.root_id, seen_pass = excluded.seen_pass,
                  mtime_ns = excluded.mtime_ns, size = excluded.size,
-                 content_hash = excluded.content_hash, chunk_chars = excluded.chunk_chars,
-                 overlap_chars = excluded.overlap_chars, content = excluded.content,
-                 indexed_at = excluded.indexed_at
+                 content_hash = excluded.content_hash, chunker = excluded.chunker,
+                 chunk_chars = excluded.chunk_chars, overlap_chars = excluded.overlap_chars,
+                 content = excluded.content, indexed_at = excluded.indexed_at
              RETURNING id",
         )?
         .query_row(
@@ -174,6 +178,7 @@ impl DocumentRow<'_> {
                 self.stamp.size,
                 self.path,
                 self.hash,
+                self.chunking.chunker(),
                 self.chunking.chunk_chars(),
                 self.chunking.overlap_chars(),
                 self.content,
@@ -184,39 +189,91 @@ impl DocumentRow<'_> {
     }
 }
 
-/// Delete the chunks stored for the document at `path` that are not one of `ranges`
-/// over the same bytes in `content`, returning the byte starts of those left.
-fn drop_changed_chunks(
-    tx: &Transaction<'_>,
-    path: &[u8],
-    content: &str,
-    ranges: &[Range<usize>],
-) -> rusqlite::Result<HashSet<usize>> {
-    let stored: Option<(DocumentId, String)> = tx
-        .prepare_cached("SELECT id, content FROM documents WHERE path = ?1")?
-        .query_row(rusqlite::params![path], |r| Ok((r.get(0)?, r.get(1)?)))
-        .optional()?;
-    let Some((document, stored_content)) = stored else {
-        return Ok(HashSet::new());
-    };
-    let wanted: HashSet<&Range<usize>> = ranges.iter().collect();
-    let stored_chunks: Vec<(ChunkId, Range<usize>)> = tx
-        .prepare_cached("SELECT id, byte_start, byte_end FROM chunks WHERE document_id = ?1")?
-        .query_map(rusqlite::params![document], |r| {
-            Ok((r.get(0)?, r.get(1)?..r.get(2)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut delete = tx.prepare_cached("DELETE FROM chunks WHERE id = ?1")?;
-    let mut kept_starts = HashSet::new();
-    for (chunk, bytes) in stored_chunks {
-        let unchanged = wanted.contains(&bytes)
-            && stored_content.as_bytes().get(bytes.clone())
-                == content.as_bytes().get(bytes.clone());
-        if unchanged {
-            kept_starts.insert(bytes.start);
-        } else {
+/// The text and chunks stored for a document before it is indexed again; empty for
+/// a document not stored yet.
+#[derive(Default)]
+struct StoredChunks {
+    content: String,
+    chunks: Vec<(ChunkId, Range<usize>)>,
+}
+
+impl StoredChunks {
+    fn load(tx: &Transaction<'_>, path: &[u8]) -> rusqlite::Result<Self> {
+        let stored: Option<(DocumentId, String)> = tx
+            .prepare_cached("SELECT id, content FROM documents WHERE path = ?1")?
+            .query_row(rusqlite::params![path], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let Some((document, content)) = stored else {
+            return Ok(Self::default());
+        };
+        let chunks = tx
+            .prepare_cached(
+                "SELECT id, byte_start, byte_end FROM chunks
+                 WHERE document_id = ?1
+                 ORDER BY byte_start",
+            )?
+            .query_map(rusqlite::params![document], |r| {
+                Ok((r.get(0)?, r.get(1)?..r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Self { content, chunks })
+    }
+
+    /// Match the stored chunks to `ranges` over the new `content` by the text each
+    /// covers. Chunks with the same text are matched in order of position.
+    fn recut<'r>(&self, content: &str, ranges: &'r [Range<usize>]) -> Recut<'r> {
+        let mut recut = Recut::default();
+        let mut stored_by_text: HashMap<&str, Vec<ChunkId>> = HashMap::new();
+        for (chunk, bytes) in self.chunks.iter().rev() {
+            match self.content.get(bytes.clone()) {
+                Some(text) => stored_by_text.entry(text).or_default().push(*chunk),
+                None => recut.dropped.push(*chunk),
+            }
+        }
+        for bytes in ranges {
+            let same_text = stored_by_text
+                .get_mut(&content[bytes.clone()])
+                .and_then(Vec::pop);
+            match same_text {
+                Some(chunk) => recut.kept.push((chunk, bytes)),
+                None => recut.added.push(bytes),
+            }
+        }
+        recut.dropped.extend(stored_by_text.into_values().flatten());
+        recut
+    }
+}
+
+/// What becomes of a stored document's chunks when its new text is cut.
+#[derive(Default)]
+struct Recut<'r> {
+    /// Stored chunks whose text is unchanged, each with the range that text now has.
+    kept: Vec<(ChunkId, &'r Range<usize>)>,
+    /// Stored chunks whose text is gone.
+    dropped: Vec<ChunkId>,
+    /// Ranges whose text no stored chunk covered.
+    added: Vec<&'r Range<usize>>,
+}
+
+impl Recut<'_> {
+    /// Delete the dropped chunks of the document at `path` and give the kept ones
+    /// their ranges. Every kept chunk is first shifted up by `clearance`, at least the
+    /// length of the old and new texts, so none lands on a start another has yet to leave.
+    fn apply(&self, tx: &Transaction<'_>, path: &[u8], clearance: usize) -> rusqlite::Result<()> {
+        let mut delete = tx.prepare_cached("DELETE FROM chunks WHERE id = ?1")?;
+        for chunk in &self.dropped {
             delete.execute(rusqlite::params![chunk])?;
         }
+        tx.prepare_cached(
+            "UPDATE chunks SET byte_start = byte_start + ?2, byte_end = byte_end + ?2
+             WHERE document_id = (SELECT id FROM documents WHERE path = ?1)",
+        )?
+        .execute(rusqlite::params![path, clearance])?;
+        let mut place =
+            tx.prepare_cached("UPDATE chunks SET byte_start = ?2, byte_end = ?3 WHERE id = ?1")?;
+        for (chunk, bytes) in &self.kept {
+            place.execute(rusqlite::params![chunk, bytes.start, bytes.end])?;
+        }
+        Ok(())
     }
-    Ok(kept_starts)
 }

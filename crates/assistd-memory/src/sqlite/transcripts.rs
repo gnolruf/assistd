@@ -506,7 +506,7 @@ impl MessageRow {
         let role = msg.role();
         let chunk_bytes = match role {
             PersistedRole::User | PersistedRole::Assistant if chunk_messages => {
-                chunk_ranges(&msg.content, ChunkingConfig::MESSAGES).collect()
+                chunk_ranges(&msg.content, ChunkingConfig::MESSAGES)
             }
             PersistedRole::User | PersistedRole::Assistant | PersistedRole::Tool => Vec::new(),
         };
@@ -712,8 +712,7 @@ fn cut_missing_chunks(tx: &Transaction<'_>) -> rusqlite::Result<u64> {
         .collect::<rusqlite::Result<_>>()?;
     let mut added = 0;
     for (message, content) in unchunked {
-        let chunk_bytes: Vec<Range<usize>> =
-            chunk_ranges(&content, ChunkingConfig::MESSAGES).collect();
+        let chunk_bytes = chunk_ranges(&content, ChunkingConfig::MESSAGES);
         added += insert_chunks(tx, message, &chunk_bytes)?.len() as u64;
     }
     Ok(added)

@@ -315,9 +315,9 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         stamp: FileStamp,
     ) -> Result<bool>;
 
-    /// Store `content` as the text of the document at `path`, seen by `pass`. Chunks
-    /// whose bytes and position are unchanged keep their vectors; the rest are replaced.
-    /// Returns the new chunks, which are missing embeddings.
+    /// Store `content` as the text of the document at `path`, seen by `pass`. A chunk
+    /// whose text is unchanged keeps its vector wherever it now sits; the rest are
+    /// replaced. Returns the new chunks, which are missing embeddings.
     async fn index_document(
         &self,
         pass: IndexPass,

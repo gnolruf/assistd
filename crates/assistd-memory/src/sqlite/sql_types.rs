@@ -1,9 +1,10 @@
-//! SQLite conversions for the typed columns: row ids, seqs, and role codes as
-//! `INTEGER`, session ids as hyphenated UUID `TEXT`.
+//! SQLite conversions for the typed columns: row ids, seqs, and role and chunker
+//! codes as `INTEGER`, session ids as hyphenated UUID `TEXT`.
 
 use rusqlite::ToSql;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 
+use crate::chunking::Chunker;
 use crate::{
     BranchId, ChunkId, DocumentId, MemoryId, MessageId, PersistedRole, Seq, SessionId, TurnId,
 };
@@ -62,5 +63,15 @@ impl FromSql for PersistedRole {
             2 => Ok(PersistedRole::Tool),
             code => Err(FromSqlError::OutOfRange(code)),
         }
+    }
+}
+
+impl ToSql for Chunker {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        let code: i64 = match self {
+            Chunker::Windows => 0,
+            Chunker::Paragraphs => 1,
+        };
+        Ok(ToSqlOutput::from(code))
     }
 }
