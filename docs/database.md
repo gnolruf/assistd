@@ -158,6 +158,7 @@ erDiagram
         text model
         int dim
         text server_args
+        text document_prefix
     }
     tasks {
         int id PK
@@ -301,11 +302,13 @@ resumed, saying which.
   retry it; `assistd memory reindex` clears those marks and tries again.
 - **`embedding_meta`**: the one row naming what produced every stored
   vector: `embedding.model`, the vector dimension the server reported,
-  and `embedding.custom_args`. When the embedder comes up and any of the
-  three differs from the row, the three vector tables are dropped and
-  recreated empty before anything can search or write, so vectors from
-  two embedding spaces are never compared, and the worker embeds
-  everything again.
+  `embedding.custom_args` and `embedding.document_prefix`. When the
+  embedder comes up and any of the four differs from the row, the three
+  vector tables are dropped and recreated empty before anything can
+  search or write, so vectors from two embedding spaces are never
+  compared, and the worker embeds everything again.
+  `embedding.query_prefix` is not recorded: it shapes only the query
+  vector, which is never stored.
 
 Search (`recall`, `reminisce`) scans every vector of one source kind,
 messages or documents, on that kind's own read-only connection and keeps

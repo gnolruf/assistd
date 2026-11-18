@@ -779,13 +779,14 @@ fn dot<T>(query: &[f32], stored: &[T], component: impl Fn(&T) -> f32) -> f32 {
 /// The embedding space the stored vectors are in; `None` before one is adopted.
 fn recorded_space(tx: &Transaction<'_>) -> rusqlite::Result<Option<EmbeddingSpace>> {
     tx.query_row(
-        "SELECT model, dim, server_args FROM embedding_meta",
+        "SELECT model, dim, server_args, document_prefix FROM embedding_meta",
         [],
         |row| {
             Ok(EmbeddingSpace {
                 model: row.get(0)?,
                 dim: row.get(1)?,
                 server_args: row.get(2)?,
+                document_prefix: row.get(3)?,
             })
         },
     )
@@ -794,10 +795,17 @@ fn recorded_space(tx: &Transaction<'_>) -> rusqlite::Result<Option<EmbeddingSpac
 
 fn record_space(tx: &Transaction<'_>, space: &EmbeddingSpace) -> rusqlite::Result<usize> {
     tx.execute(
-        "INSERT INTO embedding_meta (id, model, dim, server_args) VALUES (0, ?1, ?2, ?3)
+        "INSERT INTO embedding_meta (id, model, dim, server_args, document_prefix)
+         VALUES (0, ?1, ?2, ?3, ?4)
          ON CONFLICT(id) DO UPDATE
-         SET model = excluded.model, dim = excluded.dim, server_args = excluded.server_args",
-        rusqlite::params![space.model, space.dim, space.server_args],
+         SET model = excluded.model, dim = excluded.dim, server_args = excluded.server_args,
+             document_prefix = excluded.document_prefix",
+        rusqlite::params![
+            space.model,
+            space.dim,
+            space.server_args,
+            space.document_prefix
+        ],
     )
 }
 

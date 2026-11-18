@@ -30,7 +30,7 @@ impl MemoryStack {
         } else {
             limit as usize
         };
-        let embedding = embedder.embed(query).await.context("embed failed")?;
+        let embedding = embedder.embed_query(&query).await.context("embed failed")?;
         let hits = self
             .semantic
             .nearest_chunks(embedding, limit, ChunkScope::Messages(SessionScope::All))

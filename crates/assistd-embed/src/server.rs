@@ -7,8 +7,9 @@ use assistd_config::{EmbeddingConfig, NonBlankString};
 use assistd_utils::child_server::{ApiKey, ChildServerSpec, remove_llama_env};
 use tokio::process::Command;
 
-/// Launch parameters for the supervised embedding llama-server. With
-/// `gpu_layers == 0` the child sees no CUDA devices.
+/// Launch parameters for the supervised embedding llama-server, which embeds text
+/// only and loads no image projector. With `gpu_layers == 0` the child sees no
+/// CUDA devices.
 #[derive(Debug)]
 pub struct EmbedServerSpec {
     cfg: EmbeddingConfig,
@@ -56,10 +57,9 @@ impl ChildServerSpec for EmbedServerSpec {
 fn push_managed_args(cmd: &mut Command, cfg: &EmbeddingConfig, api_key: &ApiKey) {
     cmd.arg("--embedding")
         .arg("--no-slots")
+        .arg("--no-mmproj")
         .arg("--api-key-file")
         .arg(api_key.file_path())
-        .arg("--pooling")
-        .arg("mean")
         .arg("--hf-repo")
         .arg(cfg.model.to_string())
         .arg("-ngl")

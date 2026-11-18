@@ -201,6 +201,8 @@ pub struct EmbeddingSpace {
     pub dim: usize,
     /// The extra arguments the embedding server was launched with.
     pub server_args: String,
+    /// The text sent before each stored text; a query's own prefix marks no stored vector.
+    pub document_prefix: String,
 }
 
 /// Rows neither embedded nor marked unembeddable, by table.

@@ -85,7 +85,15 @@ impl ServerKind for ModelServer {
 pub struct EmbeddingServer;
 
 impl ServerKind for EmbeddingServer {
-    const MANAGED_FLAGS: &'static [&'static str] = &["--pooling"];
+    const MANAGED_FLAGS: &'static [&'static str] = &[
+        "-mm",
+        "--mmproj",
+        "-mmu",
+        "--mmproj-url",
+        "--mmproj-auto",
+        "--no-mmproj",
+        "--no-mmproj-auto",
+    ];
 }
 
 /// Server arguments written as one string, e.g. `--flash-attn on -ot 'exps=CPU'`.
@@ -232,11 +240,12 @@ mod tests {
             Err(CustomArgsError::Managed(_))
         ));
         assert!(matches!(
-            parse_for::<EmbeddingServer>("--pooling cls"),
+            parse_for::<EmbeddingServer>("--mmproj-auto"),
             Err(CustomArgsError::Managed(_))
         ));
-        parse_for::<EmbeddingServer>("-c 8192 --ubatch-size 2048").expect("tuning is allowed");
-        parse("--pooling cls").expect("pooling is not the chat server's concern");
+        parse_for::<EmbeddingServer>("--pooling cls -c 8192 --ubatch-size 2048")
+            .expect("pooling and tuning are allowed");
+        parse("--no-mmproj").expect("the projector is the chat server's to choose");
         assert!(matches!(
             parse_for::<EmbeddingServer>("--slot-save-path /tmp/slots"),
             Err(CustomArgsError::Exposing(_))

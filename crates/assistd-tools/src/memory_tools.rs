@@ -118,7 +118,7 @@ impl RememberTool {
         embedder: &dyn Embedder,
         query: String,
     ) -> Result<Vec<MemoryHit>, ToolError> {
-        match embedder.embed(query).await {
+        match embedder.embed_query(&query).await {
             Ok(query_vec) => Ok(self
                 .semantic
                 .nearest_memories(query_vec, SEARCH_LIMIT)
@@ -288,7 +288,7 @@ impl ReminisceTool {
             Ok(embedder) => embedder,
             Err(e) => return Ok(format!("(past conversations cannot be searched: {e})")),
         };
-        let query_vec = match embedder.embed(request.query).await {
+        let query_vec = match embedder.embed_query(&request.query).await {
             Ok(query_vec) => query_vec,
             Err(e) => {
                 tracing::debug!(
@@ -571,8 +571,11 @@ mod tests {
 
     #[async_trait]
     impl Embedder for FixedEmbedder {
-        async fn embed(&self, _text: String) -> Result<Vec<f32>, EmbedError> {
+        async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, EmbedError> {
             Ok(vec![1.0])
+        }
+        async fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            Ok(vec![vec![1.0]; texts.len()])
         }
         fn model(&self) -> &'static str {
             "m"

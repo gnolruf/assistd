@@ -572,6 +572,7 @@ async fn adopting_a_different_embedding_space_drops_every_vector() {
         model: "owner/repo:Q8_0".to_string(),
         dim: 2,
         server_args: String::new(),
+        document_prefix: "search_document: ".to_string(),
     };
     assert_eq!(store.adopt_embedding_space(&space).await.unwrap(), None);
     let chunk = transcript
@@ -617,6 +618,41 @@ async fn adopting_a_different_embedding_space_drops_every_vector() {
     assert_eq!(
         store.adopt_embedding_space(&rearranged).await.unwrap(),
         None
+    );
+}
+
+#[tokio::test]
+async fn adopting_a_space_that_differs_only_in_its_document_prefix_drops_every_vector() {
+    let (handle, store, _temp) = fresh().await;
+    let transcript = Transcript::new(&handle).await;
+    let unprefixed = EmbeddingSpace {
+        model: "owner/repo:Q8_0".to_string(),
+        dim: 2,
+        server_args: String::new(),
+        document_prefix: String::new(),
+    };
+    assert_eq!(
+        store.adopt_embedding_space(&unprefixed).await.unwrap(),
+        None
+    );
+    transcript
+        .embedded_chunk(&store, "text", &unit_vec(0.0))
+        .await;
+
+    let prefixed = EmbeddingSpace {
+        document_prefix: "search_document: ".to_string(),
+        ..unprefixed.clone()
+    };
+    assert_eq!(
+        store.adopt_embedding_space(&prefixed).await.unwrap(),
+        Some(unprefixed)
+    );
+    assert_eq!(
+        store.count_missing().await.unwrap(),
+        UnindexedRows {
+            chunks: 1,
+            memories: 0
+        }
     );
 }
 

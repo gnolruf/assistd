@@ -23,8 +23,16 @@ pub struct EmbeddingConfig {
     /// When `false`, semantic recall is unavailable.
     pub enabled: bool,
     /// `--hf-repo` value, `<owner>/<repo>:<quant>`. The suffix must be a
-    /// quant tag; a `.gguf` filename fails with "no GGUF files found".
+    /// quant tag; a `.gguf` filename fails with "no GGUF files found". The two
+    /// prefixes below belong to the model and change with it.
     pub model: EmbeddingModel,
+    /// Text sent before each stored text, exactly as the model's card gives it,
+    /// trailing space included; empty for a model trained without one. Any
+    /// change drops the stored vectors, which are then embedded again.
+    pub document_prefix: String,
+    /// Text sent before each search query, exactly as the model's card gives
+    /// it; empty for a model trained without one.
+    pub query_prefix: String,
     /// Port the server binds on `127.0.0.1`. Must differ from `model.port`
     /// when enabled.
     pub port: NonZeroU16,
@@ -45,9 +53,9 @@ pub struct EmbeddingConfig {
     /// new session's first query of three or more characters; resumed sessions get
     /// none. When `false`, recall is tools-only. Off while `memory.enabled` is `false`.
     pub auto_inject: bool,
-    /// Cosine similarity, `0.0..=1.0`, an auto-injected memory or past-chat
-    /// match must reach; a query with no match above it gets no recalled
-    /// context. `0` injects every match that is not opposed to the query.
+    /// Cosine similarity, `0.0..=1.0`, an auto-injected match must reach; `0`
+    /// injects every match not opposed to the query. Each model and prefix
+    /// pair scores on a scale of its own, so the floor changes with them.
     pub min_similarity: UnitInterval,
 }
 
@@ -55,6 +63,16 @@ impl DescribeSettings for EmbeddingConfig {
     describe_fields! {
         enabled => ("enabled", "Enables semantic recall of past chats"),
         model => ("embedding model", "Embedding model, as owner/repo:quant"),
+        document_prefix => (
+            "stored-text prefix",
+            "Text the model expects before each stored text; empty for none",
+            advanced
+        ),
+        query_prefix => (
+            "query prefix",
+            "Text the model expects before each search query; empty for none",
+            advanced
+        ),
         port => (
             "server port",
             "Loopback port the embedding server binds; must differ from model.port",
@@ -92,16 +110,18 @@ impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            model: "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M"
+            model: "ggml-org/embeddinggemma-2-GGUF:Q8_0"
                 .parse()
                 .expect("the default embedding model parses"),
+            document_prefix: "title: none | text: ".to_owned(),
+            query_prefix: "task: search result | query: ".to_owned(),
             port: nz16(8386),
             gpu_layers: 0,
             ready_timeout_secs: nz64(300),
             custom_args: CustomArgs::default(),
             top_k: bounded(5),
             auto_inject: true,
-            min_similarity: unit(0.55),
+            min_similarity: unit(0.70),
         }
     }
 }

@@ -46,7 +46,7 @@ impl TurnService {
         let Ok(embedder) = self.deps.embedder.get() else {
             return Ok(None);
         };
-        let embedding = embedder.embed(query.to_string()).await?;
+        let embedding = embedder.embed_query(query).await?;
         if !session_ctx.take_pending_recall().await {
             return Ok(None);
         }

@@ -15,7 +15,7 @@ mod error;
 mod handle;
 pub mod server;
 
-pub use client::LlamaEmbedder;
+pub use client::{LlamaEmbedder, TaskPrefixes};
 pub use embedder_task::spawn_embedder_task;
 pub use error::EmbedError;
 pub use handle::EmbedderHandle;
@@ -27,21 +27,17 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Most inputs sent to the embedding server in one request.
 pub const BATCH_SIZE: usize = 32;
 
-/// Generates embedding vectors for text.
+/// Generates embedding vectors, telling text that is stored apart from the query that
+/// searches it so each gets the task prefix its model was trained with.
 #[async_trait]
 pub trait Embedder: fmt::Debug + Send + Sync + 'static {
-    /// An L2-normalised embedding of `text`, so cosine similarity is a plain dot product.
-    async fn embed(&self, text: String) -> Result<Vec<f32>, EmbedError>;
+    /// An L2-normalised embedding of a search `query`, comparable by dot product with
+    /// the vectors [`Embedder::embed_documents`] returns.
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>, EmbedError>;
 
-    /// L2-normalised embeddings of `texts`, in input order; fails as a whole if any
-    /// input fails. The default embeds each text in turn.
-    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
-        let mut vectors = Vec::with_capacity(texts.len());
-        for &text in texts {
-            vectors.push(self.embed(text.to_owned()).await?);
-        }
-        Ok(vectors)
-    }
+    /// L2-normalised embeddings of `texts` that are stored to be searched, in input
+    /// order; fails as a whole if any input fails.
+    async fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError>;
 
     /// Model id, as `<owner>/<repo>:<quant>`.
     fn model(&self) -> &str;
@@ -49,11 +45,11 @@ pub trait Embedder: fmt::Debug + Send + Sync + 'static {
     fn dim(&self) -> usize;
 }
 
-/// Embed `texts` in one [`Embedder::embed_batch`] call, returning one result per input.
+/// Embed `texts` in one [`Embedder::embed_documents`] call, returning one result per input.
 /// If an input broke the batch ([`EmbedError::is_input_caused`]), each text is retried
 /// alone; any other failure fails every input without a retry.
 async fn embed_each(embedder: &dyn Embedder, texts: &[&str]) -> Vec<Result<Vec<f32>, EmbedError>> {
-    match embedder.embed_batch(texts).await {
+    match embedder.embed_documents(texts).await {
         Ok(vectors) => vectors.into_iter().map(Ok).collect(),
         Err(EmbedError::NotReady) => texts.iter().map(|_| Err(EmbedError::NotReady)).collect(),
         Err(err) if !err.is_input_caused() => {
@@ -72,12 +68,23 @@ async fn embed_each(embedder: &dyn Embedder, texts: &[&str]) -> Vec<Result<Vec<f
             );
             let mut results = Vec::with_capacity(texts.len());
             for &text in texts {
-                results.push(embedder.embed(text.to_owned()).await);
+                results.push(embed_document(embedder, text).await);
             }
             results
         }
         Err(err) => vec![Err(err)],
     }
+}
+
+async fn embed_document(embedder: &dyn Embedder, text: &str) -> Result<Vec<f32>, EmbedError> {
+    embedder
+        .embed_documents(&[text])
+        .await?
+        .pop()
+        .ok_or(EmbedError::CountMismatch {
+            got: 0,
+            expected: 1,
+        })
 }
 
 /// What [`embed_rows`] made of one batch of rows.
