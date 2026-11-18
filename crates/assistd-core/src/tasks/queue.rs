@@ -35,7 +35,7 @@ pub enum QueueOpError {
 
 /// Unfinished task runs: those running, then those waiting in the order they start.
 #[derive(Debug, Default)]
-pub(in crate::state) struct TaskQueue {
+pub(crate) struct TaskQueue {
     state: watch::Sender<QueueState>,
     /// Held across a change to the waiting order and the write that persists it.
     order_writes: Mutex<()>,
@@ -45,12 +45,12 @@ pub(in crate::state) struct TaskQueue {
 
 impl TaskQueue {
     /// Watch the queue, which changes with every run added, started, moved or ended.
-    pub(in crate::state) fn subscribe(&self) -> watch::Receiver<QueueState> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<QueueState> {
         self.state.subscribe()
     }
 
     /// Add `run` of `task`, which request `request_id` queued, last.
-    pub(in crate::state) fn push(&self, run: TaskRunId, task: TaskRecord, request_id: String) {
+    pub(crate) fn push(&self, run: TaskRunId, task: TaskRecord, request_id: String) {
         self.state.send_modify(|state| {
             state.waiting.push(Waiting::Run(QueuedRun {
                 run,
@@ -65,7 +65,7 @@ impl TaskQueue {
 
     /// Queue the user turn of query `id`, which `start` is handed once it may run: behind
     /// the user turns already waiting, else last. Returns how many items are ahead of it.
-    pub(in crate::state) fn push_turn(
+    pub(crate) fn push_turn(
         &self,
         id: String,
         preview: String,
@@ -86,7 +86,7 @@ impl TaskQueue {
         behind
     }
 
-    pub(in crate::state) fn has_waiting_turns(&self) -> bool {
+    pub(crate) fn has_waiting_turns(&self) -> bool {
         self.state
             .borrow()
             .waiting
@@ -96,7 +96,7 @@ impl TaskQueue {
 
     /// The waiting item that starts next: the first user turn or the first run that may
     /// start, whichever comes first, a held run never holding up a turn behind it.
-    pub(in crate::state) fn next_to_start(&self) -> Option<NextStart> {
+    pub(crate) fn next_to_start(&self) -> Option<NextStart> {
         let state = self.state.borrow();
         state.waiting.iter().find_map(|waiting| match waiting {
             Waiting::Turn(turn) => Some(NextStart::Turn(turn.id.clone())),
@@ -109,7 +109,7 @@ impl TaskQueue {
 
     /// Take waiting user turn `id` out of the queue and hand it `start`, or give `start`
     /// back when the turn is no longer waiting or its query has gone.
-    pub(in crate::state) fn start_turn(&self, id: &str, start: TurnStart) -> Result<(), TurnStart> {
+    pub(crate) fn start_turn(&self, id: &str, start: TurnStart) -> Result<(), TurnStart> {
         let mut taken = None;
         self.state.send_if_modified(|state| {
             let index = state.waiting.iter().position(|waiting| waiting.is_turn(id));
@@ -123,7 +123,7 @@ impl TaskQueue {
     }
 
     /// Drop waiting user turn `id`, whose query then ends without running.
-    pub(in crate::state) fn cancel_turn(&self, id: &str) -> Result<(), QueueOpError> {
+    pub(crate) fn cancel_turn(&self, id: &str) -> Result<(), QueueOpError> {
         let removed = self.state.send_if_modified(|state| {
             let before = state.waiting.len();
             state.waiting.retain(|waiting| !waiting.is_turn(id));
@@ -139,7 +139,7 @@ impl TaskQueue {
     /// Move waiting run `run` to the running runs with `lease`, before any [`Self::cancel`]
     /// can see it: a resuming run is handed the lease, and any other is handed to `spawn`
     /// with it. `false` when it is no longer waiting to start.
-    pub(in crate::state) fn start(
+    pub(crate) fn start(
         &self,
         run: TaskRunId,
         lease: LaneLease,
@@ -175,7 +175,7 @@ impl TaskQueue {
     }
 
     /// Take ended run `run` out of the queue.
-    pub(in crate::state) fn finish(&self, run: TaskRunId) {
+    pub(crate) fn finish(&self, run: TaskRunId) {
         self.handoffs.lock().remove(&run);
         self.state.send_modify(|state| {
             state.running.retain(|queued| queued.run != run);
@@ -184,7 +184,7 @@ impl TaskQueue {
     }
 
     /// Show running run `run` as paused on `prompt`, which nobody has answered yet.
-    pub(in crate::state) fn mark_needs_input(&self, run: TaskRunId, prompt: PausedPrompt) {
+    pub(crate) fn mark_needs_input(&self, run: TaskRunId, prompt: PausedPrompt) {
         self.state.send_if_modified(|state| {
             let Some(queued) = state.running.iter_mut().find(|queued| queued.run == run) else {
                 return false;
@@ -197,10 +197,7 @@ impl TaskQueue {
     /// Put running run `run`, which gave up its lane to wait on a confirmation or the user's
     /// interaction, first among the waiting items; the receiver gets its lane once it starts
     /// again. `None` when it is not running.
-    pub(in crate::state) fn resume_first(
-        &self,
-        run: TaskRunId,
-    ) -> Option<oneshot::Receiver<LaneLease>> {
+    pub(crate) fn resume_first(&self, run: TaskRunId) -> Option<oneshot::Receiver<LaneLease>> {
         let (handoff, lane) = oneshot::channel();
         let moved = self.state.send_if_modified(|state| {
             let Some(index) = state.running.iter().position(|queued| queued.run == run) else {
@@ -217,11 +214,7 @@ impl TaskQueue {
 
     /// Drop waiting run `run`, or stop running or resuming run `run` with `stop`, which
     /// says whether it reached the run.
-    pub(in crate::state) fn cancel(
-        &self,
-        run: TaskRunId,
-        stop: impl FnOnce() -> bool,
-    ) -> Cancelled {
+    pub(crate) fn cancel(&self, run: TaskRunId, stop: impl FnOnce() -> bool) -> Cancelled {
         let mut outcome = Cancelled::NotFound;
         self.state.send_if_modified(|state| {
             if let Some(index) = state.waiting.iter().position(|waiting| waiting.is_run(run)) {
@@ -250,7 +243,7 @@ impl TaskQueue {
 
     /// Drop every run of deleted task `task` that is waiting to start, whose rows went
     /// with it.
-    pub(in crate::state) fn forget_task(&self, task: TaskId) {
+    pub(crate) fn forget_task(&self, task: TaskId) {
         self.state.send_if_modified(|state| {
             let before = state.waiting.len();
             state.waiting.retain(|waiting| {
@@ -264,17 +257,13 @@ impl TaskQueue {
 
     /// Hold the waiting order until the returned guard drops, so a change to it and
     /// the write persisting it are not interleaved with another's.
-    pub(in crate::state) async fn lock_order(&self) -> MutexGuard<'_, ()> {
+    pub(crate) async fn lock_order(&self) -> MutexGuard<'_, ()> {
         self.order_writes.lock().await
     }
 
     /// Place waiting run `run` at index `to` of the waiting items, clamped to the
     /// last, and return the new order of the waiting runs.
-    pub(in crate::state) fn move_to(
-        &self,
-        run: TaskRunId,
-        to: u32,
-    ) -> Result<Vec<TaskRunId>, QueueOpError> {
+    pub(crate) fn move_to(&self, run: TaskRunId, to: u32) -> Result<Vec<TaskRunId>, QueueOpError> {
         let mut moved = Err(QueueOpError::NotQueued(run));
         self.state.send_if_modified(|state| {
             let Some(from) = state.waiting.iter().position(|waiting| waiting.is_run(run)) else {
@@ -298,7 +287,7 @@ impl TaskQueue {
         moved
     }
 
-    pub(in crate::state) fn set_paused(&self, paused: bool) {
+    pub(crate) fn set_paused(&self, paused: bool) {
         self.state.send_if_modified(|state| {
             let changed = state.paused != paused;
             state.paused = paused;
@@ -308,10 +297,7 @@ impl TaskQueue {
 
     /// Suspend every waiting run for `reason`, or let every suspended one start again
     /// when `None`, returning the runs not yet started whose state changed.
-    pub(in crate::state) fn suspend_waiting(
-        &self,
-        reason: Option<SuspendReason>,
-    ) -> Vec<TaskRunId> {
+    pub(crate) fn suspend_waiting(&self, reason: Option<SuspendReason>) -> Vec<TaskRunId> {
         let mut changed = Vec::new();
         self.state.send_if_modified(|state| {
             let mut modified = false;
@@ -331,7 +317,7 @@ impl TaskQueue {
 
     /// The queue as the wire shows it, beside the lanes' `holders` and the interaction's
     /// `held`.
-    pub(in crate::state) fn snapshot(
+    pub(crate) fn snapshot(
         &self,
         holders: Vec<LaneHolder>,
         held: Option<InteractionHold>,
@@ -368,14 +354,14 @@ impl TaskQueue {
 /// What a queued user turn is handed when it may run: the main lane, and its place in
 /// the user's interaction, which holds the queue from then on.
 #[derive(Debug)]
-pub(in crate::state) struct TurnStart {
-    pub(in crate::state) lane: OwnedMutexGuard<()>,
-    pub(in crate::state) turn: InteractionTurn,
+pub(crate) struct TurnStart {
+    pub(crate) lane: OwnedMutexGuard<()>,
+    pub(crate) turn: InteractionTurn,
 }
 
 /// The waiting item [`TaskQueue::next_to_start`] picks.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::state) enum NextStart {
+pub(crate) enum NextStart {
     Run(TaskRunId),
     /// The user turn of the query with this request id.
     Turn(String),
@@ -422,10 +408,10 @@ struct QueuedTurn {
 
 /// One unfinished run, with the id of the request that queued it.
 #[derive(Debug, Clone)]
-pub(in crate::state) struct QueuedRun {
-    pub(in crate::state) run: TaskRunId,
-    pub(in crate::state) task: TaskRecord,
-    pub(in crate::state) request_id: String,
+pub(crate) struct QueuedRun {
+    pub(crate) run: TaskRunId,
+    pub(crate) task: TaskRecord,
+    pub(crate) request_id: String,
     /// Why a waiting run may not start yet; `None` once it may.
     suspended: Option<SuspendReason>,
     stage: RunStage,
@@ -459,7 +445,7 @@ impl QueuedRun {
 
 /// How [`TaskQueue::cancel`] dealt with a run.
 #[derive(Debug)]
-pub(in crate::state) enum Cancelled {
+pub(crate) enum Cancelled {
     /// It was waiting and is now out of the queue.
     Waiting,
     /// It was running and has been asked to stop.
@@ -469,7 +455,7 @@ pub(in crate::state) enum Cancelled {
 
 /// The runs and user turns a [`TaskQueue`] holds and whether it is paused.
 #[derive(Debug, Default)]
-pub(in crate::state) struct QueueState {
+pub(crate) struct QueueState {
     running: Vec<QueuedRun>,
     waiting: Vec<Waiting>,
     paused: bool,

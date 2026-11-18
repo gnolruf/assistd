@@ -13,7 +13,7 @@ use super::fire_times::TriggerError;
 
 /// Something that happened which every task's event triggers are checked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::state) enum Occurrence {
+pub(crate) enum Occurrence {
     DaemonStarted,
     SessionUnlocked,
     /// A run of `task` finished, not by being cancelled.
@@ -24,7 +24,7 @@ pub(in crate::state) enum Occurrence {
 }
 
 /// `trigger`'s event and cool-down when it is an event trigger.
-pub(in crate::state) fn event_trigger(trigger: &TaskTrigger) -> Option<(&TaskEvent, Duration)> {
+pub(crate) fn event_trigger(trigger: &TaskTrigger) -> Option<(&TaskEvent, Duration)> {
     match trigger {
         TaskTrigger::Event {
             event,
@@ -35,7 +35,7 @@ pub(in crate::state) fn event_trigger(trigger: &TaskTrigger) -> Option<(&TaskEve
 }
 
 /// Whether `event` fires on `occurrence`.
-pub(in crate::state) fn fires_on(event: &TaskEvent, occurrence: Occurrence) -> bool {
+pub(crate) fn fires_on(event: &TaskEvent, occurrence: Occurrence) -> bool {
     match (event, occurrence) {
         (TaskEvent::DaemonStarted, Occurrence::DaemonStarted)
         | (TaskEvent::SessionUnlocked, Occurrence::SessionUnlocked) => true,
@@ -59,7 +59,7 @@ pub(in crate::state) fn fires_on(event: &TaskEvent, occurrence: Occurrence) -> b
 
 /// Tilde-expand every watched path in `triggers`, refusing one that is relative or
 /// cannot be read.
-pub(in crate::state) async fn resolve_watched_paths(
+pub(crate) async fn resolve_watched_paths(
     triggers: &mut [TaskTrigger],
 ) -> Result<(), TriggerError> {
     for trigger in triggers {
@@ -87,7 +87,7 @@ pub(in crate::state) async fn resolve_watched_paths(
 /// Refuse a `TaskFinished` trigger in `triggers`, the new triggers of task `saving`
 /// (`None` for a task not saved yet), that waits on a task missing from `tasks` or on
 /// a chain leading back to `saving`.
-pub(in crate::state) fn check_chain(
+pub(crate) fn check_chain(
     saving: Option<TaskId>,
     triggers: &[TaskTrigger],
     tasks: &[TaskRecord],

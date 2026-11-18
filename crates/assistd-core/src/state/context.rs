@@ -7,7 +7,7 @@ use assistd_memory::{ChunkScope, MemoryHit, SessionScope, SourcePointer};
 use assistd_wm::FocusedWindowContext;
 
 use super::DispatchError;
-use super::query::{TurnOrigin, TurnService};
+use super::turns::{TurnOrigin, TurnService};
 
 const MIN_RECALL_QUERY_CHARS: usize = 3;
 const MAX_MEMORY_VALUE_CHARS: usize = 200;

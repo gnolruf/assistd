@@ -33,7 +33,7 @@ pub enum TaskConfirmError {
 
 /// The confirmation each paused task run waits on.
 #[derive(Debug, Default)]
-pub(in crate::state) struct TaskConfirms {
+pub(crate) struct TaskConfirms {
     pending: StdMutex<HashMap<TaskRunId, PendingConfirm>>,
 }
 
@@ -117,8 +117,8 @@ impl Drop for RegisteredConfirm<'_> {
 /// Parks the task run prompts its mode and hosts leave open: the run shows as needing input
 /// and gives up its hold until `TaskConfirm` answers, then waits first in the queue for a lane.
 #[derive(Debug)]
-pub(in crate::state) struct TaskRunParking {
-    pub(in crate::state) lane: Arc<RunLane>,
+pub(crate) struct TaskRunParking {
+    pub(crate) lane: Arc<RunLane>,
 }
 
 #[async_trait]

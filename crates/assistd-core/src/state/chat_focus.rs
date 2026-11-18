@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 
 use assistd_ipc::{Event, EventBody};
 
-use super::query::TurnService;
+use super::turns::TurnService;
 use crate::bus::EventSink;
 
 /// The single chat's last focus report, plus the value last broadcast.

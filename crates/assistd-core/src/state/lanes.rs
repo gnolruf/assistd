@@ -17,7 +17,7 @@ const MAIN_LANE: u32 = 0;
 /// The model's lanes. With one slot a task run takes the main lane only between user
 /// turns; with more, task runs take the others, one each.
 #[derive(Debug)]
-pub(in crate::state) struct ModelLanes {
+pub(crate) struct ModelLanes {
     /// Held by every user turn, and by a task run on the main lane.
     main: Arc<Mutex<()>>,
     slots: watch::Receiver<NonZeroU32>,
@@ -40,7 +40,7 @@ impl ModelLanes {
     }
 
     /// Wait for a lane for `run`. Cancel-safe.
-    pub(in crate::state) async fn admit(self: &Arc<Self>, run: TaskRunId) -> LaneLease {
+    pub(crate) async fn admit(self: &Arc<Self>, run: TaskRunId) -> LaneLease {
         let mut slots = self.slots.clone();
         loop {
             let total = slots.borrow_and_update().get();
@@ -65,7 +65,7 @@ impl ModelLanes {
     }
 
     /// Wait for the main lane for a queued user turn. Cancel-safe.
-    pub(in crate::state) async fn admit_user_turn(&self) -> OwnedMutexGuard<()> {
+    pub(crate) async fn admit_user_turn(&self) -> OwnedMutexGuard<()> {
         Arc::clone(&self.main).lock_owned().await
     }
 
@@ -93,7 +93,7 @@ impl ModelLanes {
     }
 
     /// Watch the lanes' holders and the slot count, yielding when either changes.
-    pub(in crate::state) fn watch(&self) -> LanesWatch {
+    pub(crate) fn watch(&self) -> LanesWatch {
         LanesWatch {
             held: self.held.subscribe(),
             slots: self.slots.clone(),
@@ -133,7 +133,7 @@ impl ModelLanes {
 
 /// A task run's hold on one lane, given up when dropped.
 #[derive(Debug)]
-pub(in crate::state) struct LaneLease {
+pub(crate) struct LaneLease {
     lane: u32,
     lanes: Arc<ModelLanes>,
     _main: Option<OwnedMutexGuard<()>>,
@@ -141,7 +141,7 @@ pub(in crate::state) struct LaneLease {
 
 impl LaneLease {
     /// The slot assignment for `holder` on this lane.
-    pub(in crate::state) fn slot(&self, holder: SlotHolder) -> SlotAssignment {
+    pub(crate) fn slot(&self, holder: SlotHolder) -> SlotAssignment {
         if self.on_main_lane() {
             SlotAssignment::Shared(holder)
         } else {
@@ -150,7 +150,7 @@ impl LaneLease {
     }
 
     /// Whether the run shares the main backend's lane and slot.
-    pub(in crate::state) fn on_main_lane(&self) -> bool {
+    pub(crate) fn on_main_lane(&self) -> bool {
         self.lane == MAIN_LANE
     }
 }
@@ -165,14 +165,14 @@ impl Drop for LaneLease {
 
 /// Receivers on a [`ModelLanes`]' holders and slot count.
 #[derive(Debug)]
-pub(in crate::state) struct LanesWatch {
+pub(crate) struct LanesWatch {
     held: watch::Receiver<BTreeMap<u32, TaskRunId>>,
     slots: watch::Receiver<NonZeroU32>,
 }
 
 impl LanesWatch {
     /// Wait for the holders or the slot count to change. Cancel-safe.
-    pub(in crate::state) async fn changed(&mut self) {
+    pub(crate) async fn changed(&mut self) {
         tokio::select! {
             _ = self.held.changed() => {}
             () = changed_or_pending(&mut self.slots) => {}
@@ -183,7 +183,7 @@ impl LanesWatch {
 }
 
 /// Wait for `rx` to change; never returns once its sender is gone.
-pub(in crate::state) async fn changed_or_pending<T>(rx: &mut watch::Receiver<T>) {
+pub(crate) async fn changed_or_pending<T>(rx: &mut watch::Receiver<T>) {
     if rx.changed().await.is_err() {
         pending::<()>().await;
     }

@@ -233,7 +233,7 @@ impl TaskService {
     /// Wake the model as a query does and re-probe it if it reloaded, reporting a slow
     /// load to `progress`, a request id and its sink, when given; `None` when `cancel`
     /// fired first.
-    pub(in crate::state) async fn wake_for_task_run(
+    pub(crate) async fn wake_for_task_run(
         &self,
         progress: Option<(&str, &EventSink)>,
         cancel: &CancellationToken,

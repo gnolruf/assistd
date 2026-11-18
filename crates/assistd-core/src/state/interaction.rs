@@ -11,7 +11,7 @@ use tokio::time::Instant;
 
 /// Where the user's interaction stands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(in crate::state) enum InteractionState {
+pub(crate) enum InteractionState {
     #[default]
     Idle,
     /// `turns` user turns are waiting for the lane or running.
@@ -30,12 +30,12 @@ pub(in crate::state) enum InteractionState {
 /// The user's interaction, which holds the task queue while it is not
 /// [`InteractionState::Idle`].
 #[derive(Debug, Default)]
-pub(in crate::state) struct UserInteraction {
+pub(crate) struct UserInteraction {
     state: watch::Sender<InteractionState>,
 }
 
 impl UserInteraction {
-    pub(in crate::state) fn subscribe(&self) -> watch::Receiver<InteractionState> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<InteractionState> {
         self.state.subscribe()
     }
 
@@ -49,7 +49,7 @@ impl UserInteraction {
 
     /// Open or continue the interaction with a turn; once its last turn ends the
     /// interaction stays open for `quiet`.
-    pub(in crate::state) fn begin_turn(self: &Arc<Self>, quiet: Duration) -> InteractionTurn {
+    pub(crate) fn begin_turn(self: &Arc<Self>, quiet: Duration) -> InteractionTurn {
         self.state.send_modify(|state| {
             *state = match *state {
                 InteractionState::Talking {
@@ -74,7 +74,7 @@ impl UserInteraction {
     }
 
     /// End the interaction now, or with its last turn if one is in flight.
-    pub(in crate::state) fn end(&self) {
+    pub(crate) fn end(&self) {
         self.state.send_if_modified(|state| match state {
             InteractionState::Idle => false,
             InteractionState::Quiet { .. } => {
@@ -89,7 +89,7 @@ impl UserInteraction {
     }
 
     /// End a quiet interaction whose quiet time ran out by `now`.
-    pub(in crate::state) fn end_if_quiet_by(&self, now: Instant) {
+    pub(crate) fn end_if_quiet_by(&self, now: Instant) {
         self.state.send_if_modified(|state| match *state {
             InteractionState::Quiet { until, .. } if until <= now => {
                 *state = InteractionState::Idle;
@@ -125,14 +125,14 @@ impl UserInteraction {
 
 /// One user turn of the interaction, ended when dropped.
 #[derive(Debug)]
-pub(in crate::state) struct InteractionTurn {
+pub(crate) struct InteractionTurn {
     interaction: Arc<UserInteraction>,
     quiet: Duration,
 }
 
 impl InteractionTurn {
     /// End a turn that never ran, leaving no quiet time behind it.
-    pub(in crate::state) fn abandon(mut self) {
+    pub(crate) fn abandon(mut self) {
         self.quiet = Duration::ZERO;
     }
 }
