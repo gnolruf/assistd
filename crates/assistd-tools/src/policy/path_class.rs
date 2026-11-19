@@ -242,7 +242,7 @@ impl PathGuards {
     /// Why a read of the absolute `path`, following symlinks, asks: it lands on credentials or
     /// an owner-only file in `$HOME`, or nowhere that can be resolved. `None` when it is
     /// ordinary. Blocks on the filesystem.
-    pub(crate) fn sensitive_read(&self, path: &Path) -> Option<String> {
+    pub fn sensitive_read(&self, path: &Path) -> Option<String> {
         let Some(real) = canonical_existing(path) else {
             return Some(format!(
                 "reads `{}`, and where that lies cannot be resolved",

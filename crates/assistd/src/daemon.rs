@@ -167,7 +167,7 @@ async fn start(
         },
     )?;
 
-    let (documents, documents_startup) = documents_init::prepare(&config, tools.sandbox.as_deref());
+    let (documents, documents_startup) = documents_init::prepare(&config, tools.sandbox.as_ref());
 
     replay_history(llm.as_ref(), std::mem::take(&mut memory.resumed_history)).await;
 

@@ -306,14 +306,14 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     /// when it is new.
     async fn begin_index_pass(&self, root: &Path) -> Result<IndexPass>;
 
-    /// Whether the document at `path` is stored with `stamp` and the current chunking,
-    /// in which case `pass` has seen it; otherwise it must be read and indexed.
-    async fn document_unchanged(
+    /// The files among `files`, in their order, that must be read and indexed: those not
+    /// stored at their path with their stamp and the current chunking. `pass` has seen
+    /// the rest. One transaction covers them all.
+    async fn changed_documents(
         &self,
         pass: IndexPass,
-        path: &Path,
-        stamp: FileStamp,
-    ) -> Result<bool>;
+        files: Vec<(PathBuf, FileStamp)>,
+    ) -> Result<Vec<(PathBuf, FileStamp)>>;
 
     /// Store `content` as the text of the document at `path`, seen by `pass`. A chunk
     /// whose text is unchanged keeps its vector wherever it now sits; the rest are
@@ -334,9 +334,15 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     /// none was indexed.
     async fn remove_document(&self, path: &Path) -> Result<bool>;
 
+    /// Every registered index root.
+    async fn index_roots(&self) -> Result<Vec<PathBuf>>;
+
     /// Forget index root `root`, removing every document found under it and
     /// returning how many.
     async fn remove_index_root(&self, root: &Path) -> Result<u64>;
+
+    /// How many chunks the stored documents are cut into.
+    async fn count_document_chunks(&self) -> Result<u64>;
 }
 
 /// No-op store: writes are discarded and searches find nothing.
@@ -395,13 +401,12 @@ impl SemanticStore for NoSemanticStore {
     async fn begin_index_pass(&self, _root: &Path) -> Result<IndexPass> {
         Ok(IndexPass { root: 0, pass: 0 })
     }
-    async fn document_unchanged(
+    async fn changed_documents(
         &self,
         _pass: IndexPass,
-        _path: &Path,
-        _stamp: FileStamp,
-    ) -> Result<bool> {
-        Ok(false)
+        files: Vec<(PathBuf, FileStamp)>,
+    ) -> Result<Vec<(PathBuf, FileStamp)>> {
+        Ok(files)
     }
     async fn index_document(
         &self,
@@ -418,7 +423,13 @@ impl SemanticStore for NoSemanticStore {
     async fn remove_document(&self, _path: &Path) -> Result<bool> {
         Ok(false)
     }
+    async fn index_roots(&self) -> Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
     async fn remove_index_root(&self, _root: &Path) -> Result<u64> {
+        Ok(0)
+    }
+    async fn count_document_chunks(&self) -> Result<u64> {
         Ok(0)
     }
 }

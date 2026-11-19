@@ -225,7 +225,7 @@ impl SandboxInfo {
     /// host shells look programs up in (the host `PATH`, `~/bin`, every
     /// visible `~/<entry>/bin`) and the user unit path sensitive. Resolves
     /// symlinks, so it blocks on the filesystem.
-    pub(crate) fn path_guards(&self) -> PathGuards {
+    pub fn path_guards(&self) -> PathGuards {
         let host_home = std::env::var("HOME").ok();
         let home_dirs = SandboxHome::read(host_home.clone())
             .map_or_default(|home| home.existing_command_dirs(&[]));

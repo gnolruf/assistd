@@ -28,6 +28,7 @@ croner = { workspace = true }
 notify = { workspace = true }
 nvml-wrapper = { workspace = true }
 futures-util = { workspace = true }
+ignore = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

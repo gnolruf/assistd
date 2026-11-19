@@ -128,7 +128,7 @@
 # Folders whose files the model can search; needs embedding.enabled.
 # enabled = false
 # roots = ["~/Documents/notes", "/srv/papers"]  # absolute or ~/...; none may hold another
-# exclude = ["drafts/**", "*.log"]  # globs on a file's path below its root
+# exclude = ["drafts/**", "*.log"]  # .gitignore-style patterns below each root
 # max_file_mb = 20  # larger files are skipped
 
 [search]

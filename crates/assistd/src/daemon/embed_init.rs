@@ -254,6 +254,7 @@ fn serve_embedder(
         worker_shutdown,
     );
     state.memory.embedder.set(Readiness::Ready(embedder));
+    state.subsystems.document_index.request_pass();
     worker
 }
 

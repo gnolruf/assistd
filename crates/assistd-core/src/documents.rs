@@ -1,5 +1,5 @@
-//! Launching the document extraction worker: the daemon's own program in a reader
-//! sandbox over the index roots.
+//! Document indexing: the extraction worker's launch in a reader sandbox over the
+//! index roots, and the passes that walk those roots into the index.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -8,6 +8,13 @@ use std::sync::Arc;
 use assistd_config::DocumentsConfig;
 use assistd_documents::WorkerCommand;
 use assistd_tools::{ReaderProgram, ReaderSandbox, ReaderSandboxError, SandboxInfo, ToolsDisabled};
+
+mod indexer;
+mod pass;
+mod walk;
+
+pub use indexer::{DocumentIndex, IndexPasses, remove_dropped_roots};
+pub use pass::{IndexDeps, MAX_DOCUMENT_CHUNKS, PassCounts, PassEnd, RootPass, SkipCause};
 
 /// Where the daemon's program looks for its own shared libraries, under the
 /// directory that holds the one it is in.
@@ -30,17 +37,19 @@ pub enum DocumentsUnavailable {
         #[source]
         source: io::Error,
     },
+    #[error("documents.exclude has a pattern that is not a valid glob: {0}")]
+    Exclude(#[source] ignore::Error),
 }
 
-/// The command that starts `executable` with `subcommand` as an extraction worker:
-/// in a reader sandbox showing `documents.roots` and the program's own directories.
-/// Errors with why document indexing is unavailable. Blocks on the filesystem.
-pub fn extract_worker_command(
+/// What indexing `documents.roots` runs: the command that starts `executable` with
+/// `subcommand` as an extraction worker in a reader sandbox showing the roots and the
+/// program's own directories, and the passes that feed it. Blocks on the filesystem.
+pub fn document_indexing(
     documents: &DocumentsConfig,
-    sandbox: Result<&SandboxInfo, &ToolsDisabled>,
+    sandbox: Result<&Arc<SandboxInfo>, &ToolsDisabled>,
     executable: &Path,
     subcommand: &'static str,
-) -> Result<WorkerCommand, DocumentsUnavailable> {
+) -> Result<(WorkerCommand, IndexPasses), DocumentsUnavailable> {
     if !documents.enabled {
         return Err(DocumentsUnavailable::Disabled);
     }
@@ -48,6 +57,19 @@ pub fn extract_worker_command(
         return Err(DocumentsUnavailable::NoRoots);
     }
     let sandbox = sandbox.map_err(|disabled| DocumentsUnavailable::NoSandbox(disabled.clone()))?;
+    let passes = IndexPasses::new(documents, Arc::clone(sandbox))?;
+    let worker = extract_worker_command(documents, sandbox, executable, subcommand)?;
+    Ok((worker, passes))
+}
+
+/// The command that starts `executable` with `subcommand` as an extraction worker
+/// in a reader sandbox over `documents.roots`. Blocks on the filesystem.
+fn extract_worker_command(
+    documents: &DocumentsConfig,
+    sandbox: &SandboxInfo,
+    executable: &Path,
+    subcommand: &'static str,
+) -> Result<WorkerCommand, DocumentsUnavailable> {
     let path =
         std::fs::canonicalize(executable).map_err(|source| DocumentsUnavailable::Program {
             executable: executable.to_path_buf(),

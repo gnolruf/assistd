@@ -15,6 +15,7 @@ use assistd_voice::VoiceManager;
 use assistd_wm::{NoWindowManager, WindowManager};
 
 use super::mcp_handlers::McpAccounts;
+use crate::documents::DocumentIndex;
 use crate::planner::PlanningTools;
 use crate::{PresenceManager, VisionRevalidator};
 
@@ -80,6 +81,8 @@ pub struct Subsystems {
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
     /// Extracts the text of files under the index roots.
     pub documents: Arc<Extractor>,
+    /// Where an index pass is asked for, and what the last ones did.
+    pub document_index: Arc<DocumentIndex>,
     pub tools_disabled: Option<ToolsDisabled>,
     /// Keeps each holder's slot state while another uses the slot.
     pub slot_stash: Option<Arc<SlotStash>>,
@@ -108,6 +111,7 @@ impl Subsystems {
                 "not configured".into(),
             ))),
             documents: Arc::new(Extractor::unavailable("not configured")),
+            document_index: Arc::default(),
             tools_disabled: None,
             slot_stash: None,
         }

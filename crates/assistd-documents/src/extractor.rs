@@ -216,8 +216,9 @@ impl Extractor {
         unresponsive_rx
     }
 
-    /// The worker is gone: fail its pending request.
+    /// The worker is gone: no worker is ready, and its pending request fails.
     pub(crate) fn disconnect(&self) {
+        self.set_readiness(Err(NotReady::Starting));
         self.connection.lock().take();
     }
 
