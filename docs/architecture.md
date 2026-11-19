@@ -463,8 +463,9 @@ anything runs. The `Planner` drives the
 agent loop over a given backend with the planning registry, which
 `build_tools()` assembles beside the main one: `run` over the
 readers, `web`, `docs` with `documents.enabled`, and a `bash` whose policy
-holds no "always allow" approvals, plus `reminisce` when memory is on. No `write`, `wm`, `see`, `screenshot`,
-`relay`, `remember` or MCP tools. The turn runs under
+holds no "always allow" approvals, plus `reminisce` when memory is on. No
+`write`, `wm`, `see`, `screenshot`, `relay`, `remember` or MCP tools. The
+turn runs under
 `ConfirmRouter::for_planning`, which refuses every ask without prompting
 anyone in any mode, so the planning turn runs only what needs no
 confirmation; each refusal is counted and the tool result gains a note

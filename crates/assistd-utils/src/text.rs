@@ -74,6 +74,19 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// `text` with each run of whitespace, line breaks included, as one space and
+/// none at either end.
+pub fn collapse_whitespace(text: &str) -> String {
+    let mut collapsed = String::with_capacity(text.len());
+    for word in text.split_whitespace() {
+        if !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(word);
+    }
+    collapsed
+}
+
 /// The message a panic carried, or a placeholder when its payload is not a string.
 pub fn panic_message(payload: &(dyn Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {

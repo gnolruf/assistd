@@ -803,11 +803,10 @@ fn whole_characters(bytes: &[u8]) -> (usize, &str) {
         .iter()
         .take_while(|&&byte| byte & 0xC0 == 0x80)
         .count();
-    let rest = &bytes[skipped..];
-    let whole = match std::str::from_utf8(rest) {
-        Ok(text) => text,
-        Err(cut) => std::str::from_utf8(&rest[..cut.valid_up_to()]).unwrap_or_default(),
-    };
+    let whole = bytes[skipped..]
+        .utf8_chunks()
+        .next()
+        .map_or("", |chunk| chunk.valid());
     (skipped, whole)
 }
 
