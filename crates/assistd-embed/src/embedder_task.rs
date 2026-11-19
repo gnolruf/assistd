@@ -218,8 +218,8 @@ mod tests {
 
     use assistd_memory::{
         AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, DocumentText, Embedding, EmbeddingHit,
-        EmbeddingSpace, FileStamp, IndexPass, MemoryHit, MemoryId, NoSemanticStore,
-        Result as MemoryResult, UnindexedRows,
+        EmbeddingSpace, FileStamp, IndexPass, IndexRootCounts, MemoryHit, MemoryId,
+        NoSemanticStore, Result as MemoryResult, UnindexedRows,
     };
 
     /// The id of the first document chunk a [`Harness`] adds, above every message chunk's.
@@ -395,6 +395,9 @@ mod tests {
         }
         async fn index_roots(&self) -> MemoryResult<Vec<PathBuf>> {
             NoSemanticStore.index_roots().await
+        }
+        async fn index_root_counts(&self) -> MemoryResult<Vec<IndexRootCounts>> {
+            NoSemanticStore.index_root_counts().await
         }
         async fn remove_index_root(&self, root: &Path) -> MemoryResult<u64> {
             NoSemanticStore.remove_index_root(root).await

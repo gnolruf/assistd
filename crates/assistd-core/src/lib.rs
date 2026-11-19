@@ -31,8 +31,9 @@ pub use build_tools::{
 };
 pub use bus::{BusSubscription, ClientGone, EventBus, EventSink};
 pub use documents::{
-    DocumentIndex, DocumentsUnavailable, IndexDeps, IndexPasses, MAX_DOCUMENT_CHUNKS, PassCounts,
-    PassEnd, RootPass, SkipCause, document_indexing, remove_dropped_roots, system_prompt,
+    DocumentIndex, DocumentsUnavailable, IndexDeps, IndexPasses, IndexProgress,
+    MAX_DOCUMENT_CHUNKS, PassCounts, PassEnd, PassProgress, RootPass, SkipCause, document_indexing,
+    remove_dropped_roots, system_prompt,
 };
 pub use recovery::{
     Component, StatusSeverity, drain_join_set, install_panic_hook, spawn_supervised,
@@ -41,9 +42,9 @@ pub use relay::{RelayDeps, sweep_relay_answers};
 
 pub use presence::{PresenceError, PresenceManager, RequestGuard, VramShortfall, WakeRoom};
 pub use state::{
-    AppState, BranchService, DispatchError, McpAccountError, McpAccounts, McpHost, McpLogin,
-    McpServerStatus, McpService, MemoryStack, Query, Requester, StatusService, Subsystems,
-    TurnOrigin, TurnService, VoiceService, branch_replay,
+    AppState, BranchService, DispatchError, DocumentsService, McpAccountError, McpAccounts,
+    McpHost, McpLogin, McpServerStatus, McpService, MemoryStack, Query, Requester, StatusService,
+    Subsystems, TurnOrigin, TurnService, VoiceService, branch_replay,
 };
 pub use subagent::{RelayReport, SubAgentError, SubAgentRunner};
 pub use tasks::{TaskError, TaskRunner, TaskService};

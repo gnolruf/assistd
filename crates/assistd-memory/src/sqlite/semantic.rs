@@ -17,7 +17,8 @@ use rusqlite::{OptionalExtension, Params, Row, Transaction};
 use crate::{
     AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, ChunkSource, ContextChunk, DocumentId,
     DocumentText, Embedding, EmbeddingHit, EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass,
-    MemoryHit, MemoryId, MessageId, Result, SemanticStore, SessionId, SessionScope, UnindexedRows,
+    IndexRootCounts, MemoryHit, MemoryId, MessageId, Result, SemanticStore, SessionId,
+    SessionScope, UnindexedRows,
 };
 
 use super::connection::SqliteHandle;
@@ -84,6 +85,16 @@ const DOCUMENT_CHUNKS_MISSING_EMBEDDING: &str = "
     FROM chunks cc
     JOIN document_pages src ON src.document_id = cc.document_id AND src.page = cc.page
     WHERE NOT EXISTS (SELECT 1 FROM document_chunk_embeddings e WHERE e.chunk_id = cc.id)";
+
+/// Every index root `r` with how many documents it holds, the chunks they are cut into,
+/// and those chunks neither embedded nor marked unembeddable.
+const INDEX_ROOT_COUNTS: &str = "
+    SELECT r.path, count(DISTINCT d.id), count(cc.id), count(cc.id) - count(e.chunk_id)
+    FROM index_roots r
+    LEFT JOIN documents d ON d.root_id = r.id
+    LEFT JOIN chunks cc ON cc.document_id = d.id
+    LEFT JOIN document_chunk_embeddings e ON e.chunk_id = cc.id
+    GROUP BY r.id ORDER BY r.id";
 
 /// A message chunk row's columns, read by [`message_context_chunk`]: chunk id, message
 /// id, session uuid, message time, role, session title, the session's opening user text,
@@ -388,6 +399,23 @@ impl SemanticStore for SqliteSemanticStore {
             .read("index_roots", |c| {
                 c.prepare_cached("SELECT path FROM index_roots ORDER BY id")?
                     .query_map([], |r| Ok(PathBuf::from(OsString::from_vec(r.get(0)?))))?
+                    .collect()
+            })
+            .await
+    }
+
+    async fn index_root_counts(&self) -> Result<Vec<IndexRootCounts>> {
+        self.handle
+            .read("index_root_counts", |c| {
+                c.prepare_cached(INDEX_ROOT_COUNTS)?
+                    .query_map([], |r| {
+                        Ok(IndexRootCounts {
+                            root: PathBuf::from(OsString::from_vec(r.get(0)?)),
+                            documents: r.get(1)?,
+                            chunks: r.get(2)?,
+                            unembedded_chunks: r.get(3)?,
+                        })
+                    })?
                     .collect()
             })
             .await

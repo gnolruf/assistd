@@ -66,8 +66,8 @@ impl StatusService {
         }
     }
 
-    /// Send the task queue, presence, listen phase and capture state as they stand, each
-    /// when `filter` wants its kind.
+    /// Send the task queue, presence, listen phase, capture state and document activity
+    /// as they stand, each when `filter` wants its kind.
     async fn send_current_state(
         &self,
         id: &str,
@@ -101,6 +101,12 @@ impl StatusService {
                     state: voice
                         .capture()
                         .map_or(VoiceCaptureState::Idle, |capture| capture.input.state()),
+                },
+            ),
+            Event::new(
+                id(),
+                EventBody::DocumentActivity {
+                    activity: self.document_activity.borrow().clone(),
                 },
             ),
         ];

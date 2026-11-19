@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Component, ComponentReadiness, ConfirmSource, ListenPhase, McpServerState, McpTransportKind,
+    Component, ComponentReadiness, ConfirmSource, DocumentActivity, DocumentPass,
+    DocumentPassCounts, DocumentRootStatus, ListenPhase, McpServerState, McpTransportKind,
     ModeRecommendation, Plan, PresenceState, RelayEvent, RelayStepRecord, StartupComponent,
     StatusKind, StatusSeverity, TaskId, TaskName, TaskPrompt, TaskQueueSnapshot, TaskRunId,
     TaskRunRecord, TaskRunState, TaskRunSummary, TaskSpec, TokenRevocation, ToolReport,
@@ -39,6 +40,7 @@ pub enum EventKind {
     Relay,
     TaskQueue,
     TaskReply,
+    DocumentActivity,
 }
 
 /// Author of a persisted transcript message.
@@ -148,6 +150,7 @@ impl Event {
             EventBody::Relay { .. } => EventKind::Relay,
             EventBody::TaskQueue { .. } => EventKind::TaskQueue,
             EventBody::TaskReply { .. } => EventKind::TaskReply,
+            EventBody::DocumentActivity { .. } => EventKind::DocumentActivity,
             EventBody::VoiceOutputState { .. }
             | EventBody::WakeWordStatus { .. }
             | EventBody::WakeWordTest { .. }
@@ -157,6 +160,11 @@ impl Event {
             | EventBody::MemoryRow { .. }
             | EventBody::MemoryForgetResult { .. }
             | EventBody::ReindexProgress { .. }
+            | EventBody::DocumentIndex { .. }
+            | EventBody::DocumentRoot { .. }
+            | EventBody::DocumentPassProgress { .. }
+            | EventBody::DocumentPassEnded { .. }
+            | EventBody::DocumentHit { .. }
             | EventBody::ConfirmRequest { .. }
             | EventBody::PlanReview { .. }
             | EventBody::PlanModeEntered
@@ -254,6 +262,45 @@ pub enum EventBody {
         done: u32,
         total: u32,
     },
+    /// The document index as a whole, sent first in answer to `DocumentsStatus`.
+    DocumentIndex {
+        /// Whether the extraction worker that reads the roots' files runs.
+        indexing: ComponentReadiness,
+        /// Whether the embedder that makes stored chunks searchable runs.
+        embedding: ComponentReadiness,
+        /// Chunks the stored documents are cut into.
+        chunks: u64,
+        /// Most chunks the index holds; a pass that reaches it stores nothing more.
+        chunk_limit: u64,
+        /// The root a pass is walking now.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        running_pass: Option<String>,
+    },
+    /// One index root, in `documents.roots` order.
+    DocumentRoot { status: DocumentRootStatus },
+    /// How far the pass a `DocumentsReindex` follows has got through `root`.
+    DocumentPassProgress {
+        root: String,
+        counts: DocumentPassCounts,
+    },
+    /// The pass a `DocumentsReindex` follows over `root` ended.
+    DocumentPassEnded { root: String, pass: DocumentPass },
+    /// One `DocumentsSearch` hit: a document and its best-matching passage. `page` counts
+    /// from one, the byte range is within that page's text, and `similarity` is in
+    /// `[0.0, 1.0]`.
+    DocumentHit {
+        path: String,
+        page: u64,
+        page_count: u64,
+        byte_start: u64,
+        byte_end: u64,
+        indexed_at: DateTime<Utc>,
+        content: String,
+        similarity: f32,
+    },
+    /// What the document index is doing; broadcast when it changes and sent first to every
+    /// subscriber whose filter takes it.
+    DocumentActivity { activity: DocumentActivity },
     /// Asks to authorize a tool action; the turn waits for a matching `ConfirmResponse`. Never
     /// sent to a write-closed client; disconnect or timeout denies.
     ConfirmRequest {

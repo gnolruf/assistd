@@ -18,6 +18,7 @@ use assistd_ipc::{Event, EventBody, Request, RequestBody, Role, TaskRequest, Wak
 use assistd_llm::{LlmError, LlmHealthProbe};
 use assistd_memory::{MemoryError, PersistedRole};
 use assistd_tools::{SafetyJudge, TurnContext};
+use assistd_utils::readiness::NotReady;
 use assistd_voice::{CaptureUnavailable, ListenError, VoiceInputError};
 
 use self::turns::TurnDeps;
@@ -36,6 +37,7 @@ pub(crate) mod branches;
 pub(crate) mod capabilities;
 pub(crate) mod chat_focus;
 pub(crate) mod context;
+pub(crate) mod documents_handlers;
 pub(crate) mod host_reads;
 pub(crate) mod mcp_handlers;
 pub(crate) mod memory_handlers;
@@ -51,6 +53,7 @@ pub(crate) mod wakeword_handlers;
 pub(crate) mod wire;
 
 pub use self::branches::{BranchService, branch_replay};
+pub use self::documents_handlers::DocumentsService;
 pub use self::mcp_handlers::{McpAccountError, McpAccounts, McpHost, McpLogin, McpService};
 pub use self::memory_stack::MemoryStack;
 pub use self::status_service::StatusService;
@@ -96,6 +99,9 @@ pub enum DispatchError {
 
     #[error(transparent)]
     McpAccount(#[from] McpAccountError),
+
+    #[error("document indexing is {0}")]
+    DocumentsUnavailable(NotReady),
 
     #[error(transparent)]
     Mic(#[from] MicError),
@@ -180,6 +186,7 @@ pub struct AppState {
     pub branches: Arc<BranchService>,
     pub turns: TurnService,
     pub mcp: McpService,
+    pub documents: DocumentsService,
     pub status: StatusService,
     transcript: Arc<TranscriptLog>,
 }
@@ -259,14 +266,8 @@ impl AppState {
             branches: Arc::clone(&branches),
             bus: bus.clone(),
         });
-        let mcp = McpService {
-            host: McpHost::new(
-                Arc::clone(&subsystems.tools),
-                Arc::clone(&subsystems.mcp_servers),
-                bus.clone(),
-            ),
-            accounts: subsystems.mcp_accounts.clone(),
-        };
+        let documents =
+            DocumentsService::new(Arc::clone(&config), &subsystems, &memory, bus.clone());
         let status = StatusService {
             config: Arc::clone(&config),
             presence: Arc::clone(&subsystems.presence),
@@ -276,10 +277,12 @@ impl AppState {
             tools_disabled: subsystems.tools_disabled.clone(),
             web_search: Arc::clone(&subsystems.web_search),
             documents: Arc::clone(&subsystems.documents),
+            document_activity: documents.subscribe_activity(),
             embedder: Arc::clone(&memory.embedder),
             admission: Arc::clone(&admission),
             bus: bus.clone(),
         };
+        let mcp = mcp_service(&subsystems, bus.clone());
         Self {
             config,
             subsystems,
@@ -291,6 +294,7 @@ impl AppState {
             branches,
             turns,
             mcp,
+            documents,
             status,
             transcript,
         }
@@ -366,9 +370,9 @@ impl AppState {
             })
     }
 
-    /// Requests the envelope timeout leaves alone: a subscription lives as
-    /// long as its client, an agent or planning turn is bounded per step instead,
-    /// a wake-word session by its own idle timeout, and an MCP login by its sign-in timeout.
+    /// Requests the envelope timeout leaves alone: a subscription lives as long as its client
+    /// and a document reindex as the passes it follows, an agent or planning turn is bounded
+    /// per step, a wake-word session by its idle timeout, an MCP login by its sign-in timeout.
     fn outlives_dispatch_envelope(req: &Request) -> bool {
         matches!(
             req.body,
@@ -377,6 +381,7 @@ impl AppState {
                 | RequestBody::Task(TaskRequest::Refine { .. })
                 | RequestBody::PttStop
                 | RequestBody::McpLogin { .. }
+                | RequestBody::DocumentsReindex
                 | RequestBody::WakeWord {
                     op: WakeWordOp::TestStart
                 }
@@ -438,6 +443,13 @@ impl AppState {
                     .await
             }
             RequestBody::MemoryReindex => self.memory.handle_memory_reindex(id, tx).await,
+            RequestBody::DocumentsStatus => self.documents.handle_documents_status(id, tx).await,
+            RequestBody::DocumentsReindex => self.documents.handle_documents_reindex(id, tx).await,
+            RequestBody::DocumentsSearch { query, limit } => {
+                self.documents
+                    .handle_documents_search(id, query, limit, tx)
+                    .await
+            }
             RequestBody::GetPresence => replied(self.status.handle_get_presence(id, tx)).await,
             RequestBody::GetListenState => {
                 replied(self.voice.handle_get_listen_state(id, tx)).await
@@ -507,6 +519,18 @@ fn planner(config: &Config, subsystems: &Subsystems, agents: AgentSpec) -> Plann
         agents,
         config.tools.allow_auto_mode,
     )
+}
+
+/// The service that signs the configured MCP servers in and out and reports them.
+fn mcp_service(subsystems: &Subsystems, bus: EventBus) -> McpService {
+    McpService {
+        host: McpHost::new(
+            Arc::clone(&subsystems.tools),
+            Arc::clone(&subsystems.mcp_servers),
+            bus,
+        ),
+        accounts: subsystems.mcp_accounts.clone(),
+    }
 }
 
 async fn replied(reply: impl Future<Output = ()>) -> Result<(), DispatchError> {

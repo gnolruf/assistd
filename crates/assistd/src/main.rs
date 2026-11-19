@@ -10,7 +10,7 @@ use assistd_utils::terminal_text::escape_controls;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use client::{listen, mcp, memory, presence, ptt, task, voice_ctl};
+use client::{documents, listen, mcp, memory, presence, ptt, task, voice_ctl};
 
 mod client;
 mod daemon;
@@ -104,6 +104,10 @@ enum Commands {
     /// memories.
     Memory(memory::MemoryArgs),
 
+    /// Report the document index, walk the indexed folders now, or search the
+    /// indexed documents.
+    Documents(documents::DocumentsArgs),
+
     /// List saved tasks with their next fire times, run one now, or cancel a run.
     Task(task::TaskArgs),
 
@@ -186,6 +190,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         #[cfg(feature = "tray")]
         Commands::Tray(args) => tray::run(args).await,
         Commands::Memory(args) => memory::run(args).await,
+        Commands::Documents(args) => documents::run(args).await,
         Commands::Task(args) => task::run(args).await,
         Commands::Mcp(args) => mcp::run(args).await,
         Commands::VoiceWorker => voice_worker::run().await,

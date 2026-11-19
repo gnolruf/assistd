@@ -124,6 +124,9 @@ impl SemanticStore for FixedHits {
     async fn index_roots(&self) -> assistd_memory::Result<Vec<PathBuf>> {
         NoSemanticStore.index_roots().await
     }
+    async fn index_root_counts(&self) -> assistd_memory::Result<Vec<IndexRootCounts>> {
+        NoSemanticStore.index_root_counts().await
+    }
     async fn remove_index_root(&self, root: &Path) -> assistd_memory::Result<u64> {
         NoSemanticStore.remove_index_root(root).await
     }

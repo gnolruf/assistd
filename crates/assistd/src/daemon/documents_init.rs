@@ -1,6 +1,7 @@
 //! Document indexing for the daemon: the extraction worker runs under supervision
 //! from the daemon's own binary, sandboxed over the index roots, its readiness is
-//! published whenever it changes, and passes over the roots feed it.
+//! published whenever it changes, passes over the roots feed it, and what the index
+//! is doing is broadcast.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -121,6 +122,7 @@ async fn run(startup: DocumentsStartup, state: Arc<AppState>, shutdown: watch::R
     tokio::join!(
         supervise(worker, Arc::clone(extractor), shutdown.clone()),
         publish_changes(&state, changes, shutdown.clone()),
+        state.documents.broadcast_activity(shutdown.clone()),
         passes.run(deps, &state.subsystems.document_index, shutdown),
     );
 }

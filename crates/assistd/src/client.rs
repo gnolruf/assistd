@@ -4,6 +4,7 @@
 use anyhow::{Error, Result};
 use assistd_ipc::{Event, IpcClient, IpcClientError, Request};
 
+pub(crate) mod documents;
 pub(crate) mod listen;
 pub(crate) mod mcp;
 pub(crate) mod memory;

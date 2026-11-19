@@ -1,6 +1,6 @@
 //! When index passes run: after each request, one root at a time, until shutdown.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_config::{AbsoluteDir, DocumentsConfig};
@@ -12,22 +12,54 @@ use tokio::sync::{Notify, watch};
 use tracing::{info, warn};
 
 use super::DocumentsUnavailable;
-use super::pass::{IndexDeps, PassEnd, RootPass, SkipCause, index_root};
+use super::pass::{IndexDeps, PassCounts, PassEnd, RootPass, SkipCause, index_root};
 use super::walk::IndexRoot;
 
+/// The pass under way over one index root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassProgress {
+    pub root: PathBuf,
+    /// What the pass has done so far.
+    pub counts: PassCounts,
+}
+
+/// How far the index passes have got since the daemon started.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexProgress {
+    /// Rounds of one pass over every root that have ended.
+    pub rounds_ended: u64,
+    /// The pass under way; `None` between rounds.
+    pub running: Option<PassProgress>,
+}
+
+impl IndexProgress {
+    /// The root a pass is walking.
+    pub fn running_root(&self) -> Option<&Path> {
+        self.running.as_ref().map(|pass| pass.root.as_path())
+    }
+}
+
 /// The document index as the rest of the daemon sees it: where a pass is asked
-/// for, and what the last pass over each root did.
+/// for, how far the passes have got, and what the last pass over each root did.
 #[derive(Debug, Default)]
 pub struct DocumentIndex {
     requested: Notify,
     passes: Mutex<Vec<RootPass>>,
+    progress: watch::Sender<IndexProgress>,
 }
 
 impl DocumentIndex {
-    /// Ask for a pass over every root. One asked for while a pass runs starts when
-    /// that pass ends.
-    pub fn request_pass(&self) {
+    /// Ask for a round of one pass over every root. One asked for while a round runs
+    /// starts when that round ends. Returns the [`IndexProgress::rounds_ended`] at
+    /// which a round begun after this call has ended.
+    pub fn request_pass(&self) -> u64 {
+        let answered_at = {
+            let progress = self.progress.borrow();
+            let rounds_to_wait = if progress.running.is_some() { 2 } else { 1 };
+            progress.rounds_ended + rounds_to_wait
+        };
         self.requested.notify_one();
+        answered_at
     }
 
     /// What the last pass over each root did, in the order they ran; empty until
@@ -36,12 +68,34 @@ impl DocumentIndex {
         self.passes.lock().clone()
     }
 
+    /// Follows the passes as they run.
+    pub fn subscribe_progress(&self) -> watch::Receiver<IndexProgress> {
+        self.progress.subscribe()
+    }
+
+    /// Record what the pass over `root` has done so far.
+    pub(super) fn report_progress(&self, root: &Path, counts: &PassCounts) {
+        self.progress.send_modify(|progress| {
+            progress.running = Some(PassProgress {
+                root: root.to_path_buf(),
+                counts: counts.clone(),
+            });
+        });
+    }
+
     fn record(&self, pass: RootPass) {
         let mut passes = self.passes.lock();
         match passes.iter_mut().find(|last| last.root == pass.root) {
             Some(last) => *last = pass,
             None => passes.push(pass),
         }
+    }
+
+    fn end_round(&self) {
+        self.progress.send_modify(|progress| {
+            progress.rounds_ended += 1;
+            progress.running = None;
+        });
     }
 }
 
@@ -99,10 +153,13 @@ impl IndexPasses {
             if *shutdown.borrow() {
                 return;
             }
-            let pass = index_root(deps, Arc::clone(root), Arc::clone(&guards), shutdown).await;
+            index.report_progress(root.path(), &PassCounts::default());
+            let pass =
+                index_root(deps, index, Arc::clone(root), Arc::clone(&guards), shutdown).await;
             log_pass(&pass);
             index.record(pass);
         }
+        index.end_round();
     }
 }
 
@@ -157,5 +214,20 @@ fn log_pass(pass: &RootPass) {
             target: "assistd::documents",
             "the document index is full; {root} has files that were not stored"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pass_asked_for_mid_round_is_answered_by_the_round_after() {
+        let index = DocumentIndex::default();
+        assert_eq!(index.request_pass(), 1, "asked while idle");
+        index.report_progress(Path::new("/notes"), &PassCounts::default());
+        assert_eq!(index.request_pass(), 2, "asked while the first round runs");
+        index.end_round();
+        assert_eq!(index.request_pass(), 2, "asked once that round has ended");
     }
 }

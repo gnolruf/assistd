@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use assistd_config::ConfigIssue;
 use assistd_ipc::{
-    Attachment, ComponentReadiness, ConfirmSource, Event, ImageMime, IpcClient, PausedPrompt,
-    PermissionMode, PresenceState, Request, TaskQueueSnapshot, TaskRunId, TaskRunSummary,
-    VoiceCaptureState,
+    Attachment, ComponentReadiness, ConfirmSource, DocumentActivity, Event, ImageMime, IpcClient,
+    PausedPrompt, PermissionMode, PresenceState, Request, TaskQueueSnapshot, TaskRunId,
+    TaskRunSummary, VoiceCaptureState,
 };
 use assistd_utils::token_counter::TokenCounter;
 use chrono::{DateTime, Utc};
@@ -306,6 +306,8 @@ pub(super) struct App {
     pub panel: Option<Panel>,
     /// The task queue as last broadcast; `None` until the bus delivers it.
     task_queue: Option<TaskQueueSnapshot>,
+    /// What the document index was last broadcast as doing.
+    pub document_activity: DocumentActivity,
     /// The config file `/settings` edits.
     config_path: PathBuf,
     /// Throttles rewraps for a live block's timer to 1 Hz.
@@ -541,6 +543,7 @@ impl App {
             slash_dismissed: false,
             panel: None,
             task_queue: None,
+            document_activity: DocumentActivity::default(),
             config_path,
             last_live_seconds: None,
             session_title: None,
