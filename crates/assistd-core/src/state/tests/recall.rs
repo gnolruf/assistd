@@ -80,10 +80,13 @@ impl SemanticStore for FixedHits {
     }
     async fn chunks_missing_embedding(
         &self,
+        source: ChunkSource,
         after: Option<ChunkId>,
         limit: usize,
     ) -> assistd_memory::Result<Vec<(ChunkId, String)>> {
-        NoSemanticStore.chunks_missing_embedding(after, limit).await
+        NoSemanticStore
+            .chunks_missing_embedding(source, after, limit)
+            .await
     }
     async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> assistd_memory::Result<()> {
         NoSemanticStore.store_embeddings(embeddings).await

@@ -542,7 +542,7 @@ mod tests {
 
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        AdjacentChunks, BranchId, BranchSummary, ChunkId, Embedding, EmbeddingSpace,
+        AdjacentChunks, BranchId, BranchSummary, ChunkId, ChunkSource, Embedding, EmbeddingSpace,
         EmbeddingTarget, FileStamp, IndexPass, MemoryError, MemoryId, MemoryStore, NoSemanticStore,
         PersistedMessage, Seq, SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore,
         UnindexedRows,
@@ -633,6 +633,7 @@ mod tests {
         }
         async fn chunks_missing_embedding(
             &self,
+            _source: ChunkSource,
             _after: Option<ChunkId>,
             _limit: usize,
         ) -> Result<Vec<(ChunkId, String)>, MemoryError> {

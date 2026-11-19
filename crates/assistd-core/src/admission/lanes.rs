@@ -76,6 +76,11 @@ impl ModelLanes {
         self.held.borrow().contains_key(&MAIN_LANE)
     }
 
+    /// Whether a task run holds any lane.
+    pub(crate) fn held_by_run(&self) -> bool {
+        !self.held.borrow().is_empty()
+    }
+
     /// What holds each lane now.
     pub(super) fn holders(&self) -> Vec<LaneHolder> {
         let total = self.slots.borrow().get();

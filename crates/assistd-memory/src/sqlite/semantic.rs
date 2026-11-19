@@ -14,9 +14,9 @@ use rusqlite::types::FromSql;
 use rusqlite::{OptionalExtension, Params, Row, Transaction};
 
 use crate::{
-    AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, ContextChunk, DocumentId, Embedding,
-    EmbeddingHit, EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass, MemoryHit, MemoryId,
-    MessageId, Result, SemanticStore, SessionId, SessionScope, UnindexedRows,
+    AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, ChunkSource, ContextChunk, DocumentId,
+    Embedding, EmbeddingHit, EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass, MemoryHit,
+    MemoryId, MessageId, Result, SemanticStore, SessionId, SessionScope, UnindexedRows,
 };
 
 use super::connection::SqliteHandle;
@@ -71,10 +71,17 @@ const EMBEDDING_TABLES: [&str; 3] = [
     "memory_embeddings",
 ];
 
-/// Holds for a chunk `cc` that is embedded or marked unembeddable.
-const CHUNK_HAS_EMBEDDING: &str = "(
-    EXISTS (SELECT 1 FROM message_chunk_embeddings e WHERE e.chunk_id = cc.id)
-    OR EXISTS (SELECT 1 FROM document_chunk_embeddings e WHERE e.chunk_id = cc.id))";
+/// The message chunks `cc` neither embedded nor marked unembeddable, each with its
+/// message `src`.
+const MESSAGE_CHUNKS_MISSING_EMBEDDING: &str = "
+    FROM chunks cc JOIN messages src ON src.id = cc.message_id
+    WHERE NOT EXISTS (SELECT 1 FROM message_chunk_embeddings e WHERE e.chunk_id = cc.id)";
+
+/// The document chunks `cc` neither embedded nor marked unembeddable, each with its
+/// document `src`.
+const DOCUMENT_CHUNKS_MISSING_EMBEDDING: &str = "
+    FROM chunks cc JOIN documents src ON src.id = cc.document_id
+    WHERE NOT EXISTS (SELECT 1 FROM document_chunk_embeddings e WHERE e.chunk_id = cc.id)";
 
 /// A message chunk row's columns, read by [`message_context_chunk`]: chunk id, message
 /// id, session uuid, message time, role, session title, the session's opening user text,
@@ -211,11 +218,10 @@ impl SemanticStore for SqliteSemanticStore {
     async fn count_missing(&self) -> Result<UnindexedRows> {
         self.handle
             .read("count_missing", |c| {
-                let chunks = c.query_row(
-                    &format!("SELECT count(*) FROM chunks cc WHERE NOT {CHUNK_HAS_EMBEDDING}"),
-                    [],
-                    |r| r.get(0),
-                )?;
+                let count_chunks = |source| {
+                    let missing = missing_chunks_sql(source);
+                    c.query_row(&format!("SELECT count(*) {missing}"), [], |r| r.get(0))
+                };
                 let memories = c.query_row(
                     "SELECT count(*)
                      FROM memories mem
@@ -223,7 +229,11 @@ impl SemanticStore for SqliteSemanticStore {
                     [],
                     |r| r.get(0),
                 )?;
-                Ok(UnindexedRows { chunks, memories })
+                Ok(UnindexedRows {
+                    message_chunks: count_chunks(ChunkSource::Message)?,
+                    document_chunks: count_chunks(ChunkSource::Document)?,
+                    memories,
+                })
             })
             .await
     }
@@ -255,20 +265,19 @@ impl SemanticStore for SqliteSemanticStore {
 
     async fn chunks_missing_embedding(
         &self,
+        source: ChunkSource,
         after: Option<ChunkId>,
         limit: usize,
     ) -> Result<Vec<(ChunkId, String)>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let missing = missing_chunks_sql(source);
         self.handle
             .read("chunks_missing_embedding", move |c| {
                 c.prepare_cached(&format!(
                     "SELECT cc.id,
-                            CAST(substr(CAST(coalesce(msg.content, doc.content) AS BLOB),
+                            CAST(substr(CAST(src.content AS BLOB),
                                         cc.byte_start + 1, cc.byte_end - cc.byte_start) AS TEXT)
-                     FROM chunks cc
-                     LEFT JOIN messages msg ON msg.id = cc.message_id
-                     LEFT JOIN documents doc ON doc.id = cc.document_id
-                     WHERE cc.id > ifnull(?1, 0) AND NOT {CHUNK_HAS_EMBEDDING}
+                     {missing} AND cc.id > ifnull(?1, 0)
                      ORDER BY cc.id
                      LIMIT ?2"
                 ))?
@@ -488,6 +497,15 @@ impl<Group: PartialEq, Id> TopK<Group, Id> {
             .into_iter()
             .map(|e| (e.id, e.similarity))
             .collect()
+    }
+}
+
+/// The `FROM` and `WHERE` clauses selecting the chunks cut from `source` that are
+/// neither embedded nor marked unembeddable.
+fn missing_chunks_sql(source: ChunkSource) -> &'static str {
+    match source {
+        ChunkSource::Message => MESSAGE_CHUNKS_MISSING_EMBEDDING,
+        ChunkSource::Document => DOCUMENT_CHUNKS_MISSING_EMBEDDING,
     }
 }
 
