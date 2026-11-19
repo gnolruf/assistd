@@ -143,6 +143,9 @@ pub(crate) const SECTIONS: &[Section] = &[
             setting("documents.roots"),
             setting("documents.exclude"),
             setting("documents.max_file_mb"),
+            setting("documents.embed_during_interaction"),
+            setting("documents.embed_during_tasks"),
+            setting("documents.embed_during_gpu_sleep"),
         ],
     ),
     feature(

@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, SemanticStore, Seq,
+    ChunkSource, PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, SemanticStore, Seq,
     SqliteSemanticStore,
 };
 
@@ -558,7 +558,7 @@ async fn messages_stored_without_chunks_are_chunked_later() {
     assert_eq!(store.chunk_unchunked_messages().await.unwrap(), 1);
     assert_eq!(store.chunk_unchunked_messages().await.unwrap(), 0);
     let pending = SqliteSemanticStore::new(store.handle.clone())
-        .chunks_missing_embedding(None, 10)
+        .chunks_missing_embedding(ChunkSource::Message, None, 10)
         .await
         .unwrap();
     let texts: Vec<&str> = pending.iter().map(|(_, text)| text.as_str()).collect();

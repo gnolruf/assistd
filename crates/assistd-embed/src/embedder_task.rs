@@ -1,10 +1,11 @@
 //! Background worker that embeds the rows the semantic store lists as missing an
-//! embedding, a batch at a time, each time it is woken.
+//! embedding, a batch at a time, each time it is woken: message chunks and memories
+//! at once, document chunks only while a gate is open.
 
-use std::future::Future;
+use std::future::{Future, pending};
 use std::sync::Arc;
 
-use assistd_memory::{EmbeddingTarget, MemoryError, SemanticStore};
+use assistd_memory::{ChunkSource, EmbeddingTarget, MemoryError, SemanticStore};
 use assistd_utils::backoff::backoff_delay;
 use thiserror::Error;
 use tokio::sync::{Notify, watch};
@@ -21,20 +22,34 @@ enum PassError {
     Store(#[from] MemoryError),
 }
 
-/// Spawn the worker. It embeds every row missing an embedding at once and again after
-/// each `wake`, retrying a pass that stopped early with backoff. It exits on `shutdown`
-/// between batches; the database behind `store` must stay open until it exits.
-pub fn spawn_embedder_task(
+/// How a pass over the missing rows ended without failing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PassEnd {
+    /// No row is left to embed, or shutdown was signalled.
+    Finished,
+    /// The worker was woken while document chunks were still left or held back.
+    Woken,
+}
+
+/// What the worker embeds with and into, and the signals it runs on.
+struct EmbedWorker {
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn SemanticStore>,
     wake: Arc<Notify>,
-    mut shutdown: watch::Receiver<bool>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+    documents_gate: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
+}
+
+impl EmbedWorker {
+    async fn run(mut self) {
         let mut failed_passes = 0u32;
         loop {
-            let retry_in = match embed_missing_rows(&*embedder, &*store, &shutdown).await {
-                Ok(()) => {
+            let retry_in = match self.embed_missing_rows().await {
+                Ok(PassEnd::Woken) => {
+                    failed_passes = 0;
+                    continue;
+                }
+                Ok(PassEnd::Finished) => {
                     failed_passes = 0;
                     None
                 }
@@ -47,13 +62,80 @@ pub fn spawn_embedder_task(
             };
             tokio::select! {
                 biased;
-                _ = shutdown.wait_for(|stop| *stop) => break,
-                () = wake.notified() => {}
+                _ = self.shutdown.wait_for(|stop| *stop) => break,
+                () = self.wake.notified() => {}
                 () = tokio::time::sleep(retry_in.unwrap_or_default()), if retry_in.is_some() => {}
             }
         }
         tracing::debug!(target: "assistd::embed", "embed worker exiting");
-    })
+    }
+
+    /// Embed and store every message chunk, then every memory, then the document
+    /// chunks, missing an embedding.
+    async fn embed_missing_rows(&mut self) -> Result<PassEnd, PassError> {
+        let store = &*self.store;
+        embed_missing_of_kind(
+            &*self.embedder,
+            store,
+            &self.shutdown,
+            |after, limit| store.chunks_missing_embedding(ChunkSource::Message, after, limit),
+            EmbeddingTarget::Chunk,
+        )
+        .await?;
+        embed_missing_of_kind(
+            &*self.embedder,
+            store,
+            &self.shutdown,
+            |after, limit| store.memories_missing_embedding(after, limit),
+            EmbeddingTarget::Memory,
+        )
+        .await?;
+        self.embed_missing_document_chunks().await
+    }
+
+    /// Page through the document chunks missing an embedding in id order, waiting
+    /// before each page for the gate to be open, until they run out, the worker is
+    /// woken, shutdown flips, or a page has rows left for a later attempt.
+    async fn embed_missing_document_chunks(&mut self) -> Result<PassEnd, PassError> {
+        let mut after = None;
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.shutdown.wait_for(|stop| *stop) => return Ok(PassEnd::Finished),
+                () = self.wake.notified() => return Ok(PassEnd::Woken),
+                () = gate_open(&mut self.documents_gate) => {}
+            }
+            let page = self
+                .store
+                .chunks_missing_embedding(ChunkSource::Document, after, BATCH_SIZE)
+                .await?;
+            let Some(&(last_id, _)) = page.last() else {
+                return Ok(PassEnd::Finished);
+            };
+            after = Some(last_id);
+            embed_page(&*self.embedder, &*self.store, page, EmbeddingTarget::Chunk).await?;
+        }
+    }
+}
+
+/// Spawn the worker. It embeds the rows missing an embedding at once and again after each
+/// `wake`, document chunks last and only while `documents_gate` reads `true`, retrying a failed
+/// pass with backoff. It exits on `shutdown` between batches; `store`'s database must outlive it.
+pub fn spawn_embedder_task(
+    embedder: Arc<dyn Embedder>,
+    store: Arc<dyn SemanticStore>,
+    wake: Arc<Notify>,
+    documents_gate: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    let worker = EmbedWorker {
+        embedder,
+        store,
+        wake,
+        documents_gate,
+        shutdown,
+    };
+    tokio::spawn(worker.run())
 }
 
 fn log_stopped_pass(err: &PassError, earlier_failures: u32) {
@@ -73,28 +155,11 @@ fn log_stopped_pass(err: &PassError, earlier_failures: u32) {
     }
 }
 
-/// Embed and store every chunk, then every memory, missing an embedding.
-async fn embed_missing_rows(
-    embedder: &dyn Embedder,
-    store: &dyn SemanticStore,
-    shutdown: &watch::Receiver<bool>,
-) -> Result<(), PassError> {
-    embed_missing_of_kind(
-        embedder,
-        store,
-        shutdown,
-        |after, limit| store.chunks_missing_embedding(after, limit),
-        EmbeddingTarget::Chunk,
-    )
-    .await?;
-    embed_missing_of_kind(
-        embedder,
-        store,
-        shutdown,
-        |after, limit| store.memories_missing_embedding(after, limit),
-        EmbeddingTarget::Memory,
-    )
-    .await
+/// Wait until `gate` reads `true`; never returns once it can no longer do so.
+async fn gate_open(gate: &mut watch::Receiver<bool>) {
+    if gate.wait_for(|open| *open).await.is_err() {
+        pending::<()>().await;
+    }
 }
 
 /// Page through `list` in id order, embedding and storing each page, until it runs
@@ -118,17 +183,26 @@ where
             break;
         };
         after = Some(last_id);
-        let rows = page
-            .into_iter()
-            .map(|(id, text)| (to_target(id), text))
-            .collect();
-        let embedded = embed_rows(embedder, rows).await;
-        store.store_embeddings(embedded.embeddings).await?;
-        if let Some(err) = embedded.deferred {
-            return Err(err.into());
-        }
+        embed_page(embedder, store, page, to_target).await?;
     }
     Ok(())
+}
+
+/// Embed `page` in one batch and store what came back; fails when rows of it are
+/// left for a later attempt.
+async fn embed_page<Id>(
+    embedder: &dyn Embedder,
+    store: &dyn SemanticStore,
+    page: Vec<(Id, String)>,
+    to_target: fn(Id) -> EmbeddingTarget,
+) -> Result<(), PassError> {
+    let rows = page
+        .into_iter()
+        .map(|(id, text)| (to_target(id), text))
+        .collect();
+    let embedded = embed_rows(embedder, rows).await;
+    store.store_embeddings(embedded.embeddings).await?;
+    embedded.deferred.map_or(Ok(()), |err| Err(err.into()))
 }
 
 #[cfg(test)]
@@ -147,13 +221,18 @@ mod tests {
         UnindexedRows,
     };
 
+    /// The id of the first document chunk a [`Harness`] adds, above every message chunk's.
+    const FIRST_DOCUMENT_CHUNK: i64 = 1_000_000;
+
     use super::*;
 
-    /// Embeds every text as `[1.0]`, except that `"bad"` fails for its own content and
-    /// every call fails with a server error while `down`. Records the inputs of every call.
+    /// Embeds every text as `[1.0]` after `batch_time`, except that `"bad"` fails for its
+    /// own content and every call fails with a server error while `down`. Records the
+    /// inputs of every call.
     #[derive(Debug, Default)]
     struct ScriptedEmbedder {
         down: AtomicBool,
+        batch_time: Duration,
         calls: Mutex<Vec<Vec<String>>>,
     }
 
@@ -170,6 +249,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(texts.iter().map(|&t| t.to_owned()).collect());
+            tokio::time::sleep(self.batch_time).await;
             let failure = if self.down.load(Ordering::SeqCst) {
                 Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
             } else if texts.contains(&"bad") {
@@ -197,6 +277,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct PendingStore {
         missing_chunks: Mutex<BTreeMap<ChunkId, String>>,
+        missing_document_chunks: Mutex<BTreeMap<ChunkId, String>>,
         missing_memories: Mutex<BTreeMap<MemoryId, String>>,
         stored: Mutex<Vec<Embedding>>,
     }
@@ -254,15 +335,25 @@ mod tests {
         }
         async fn chunks_missing_embedding(
             &self,
+            source: ChunkSource,
             after: Option<ChunkId>,
             limit: usize,
         ) -> MemoryResult<Vec<(ChunkId, String)>> {
-            Ok(page_after(&self.missing_chunks, after, limit))
+            let missing = match source {
+                ChunkSource::Message => &self.missing_chunks,
+                ChunkSource::Document => &self.missing_document_chunks,
+            };
+            Ok(page_after(missing, after, limit))
         }
         async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> MemoryResult<()> {
             for embedding in embeddings {
                 match embedding.target {
-                    EmbeddingTarget::Chunk(id) => self.missing_chunks.lock().unwrap().remove(&id),
+                    EmbeddingTarget::Chunk(id) if id.0 < FIRST_DOCUMENT_CHUNK => {
+                        self.missing_chunks.lock().unwrap().remove(&id)
+                    }
+                    EmbeddingTarget::Chunk(id) => {
+                        self.missing_document_chunks.lock().unwrap().remove(&id)
+                    }
                     EmbeddingTarget::Memory(id) => {
                         self.missing_memories.lock().unwrap().remove(&id)
                     }
@@ -316,6 +407,7 @@ mod tests {
         embedder: Arc<ScriptedEmbedder>,
         store: Arc<PendingStore>,
         wake: Arc<Notify>,
+        documents_gate: watch::Sender<bool>,
         shutdown: watch::Sender<bool>,
         task: JoinHandle<()>,
     }
@@ -323,25 +415,34 @@ mod tests {
     impl Harness {
         /// Start the worker over a store already missing embeddings for `chunks`.
         fn spawn(chunks: &[&str], embedder_down: bool) -> Self {
-            let embedder = Arc::new(ScriptedEmbedder::default());
+            let embedder = ScriptedEmbedder::default();
             embedder.down.store(embedder_down, Ordering::SeqCst);
+            let harness = Self::spawn_with(embedder);
+            harness.add_chunks(chunks);
+            harness
+        }
+
+        /// Start the worker on `embedder` over an empty store, the documents gate open.
+        fn spawn_with(embedder: ScriptedEmbedder) -> Self {
+            let embedder = Arc::new(embedder);
             let store = Arc::new(PendingStore::default());
             let wake = Arc::new(Notify::new());
+            let (documents_gate, documents_gate_rx) = watch::channel(true);
             let (shutdown, shutdown_rx) = watch::channel(false);
-            let harness = Self {
+            Self {
                 task: spawn_embedder_task(
                     embedder.clone(),
                     store.clone(),
                     wake.clone(),
+                    documents_gate_rx,
                     shutdown_rx,
                 ),
                 embedder,
                 store,
                 wake,
+                documents_gate,
                 shutdown,
-            };
-            harness.add_chunks(chunks);
-            harness
+            }
         }
 
         fn add_chunks(&self, texts: &[&str]) {
@@ -354,8 +455,24 @@ mod tests {
             );
         }
 
+        fn add_document_chunks(&self, count: usize) {
+            let mut missing = self.store.missing_document_chunks.lock().unwrap();
+            let first_id = missing
+                .last_key_value()
+                .map_or(FIRST_DOCUMENT_CHUNK, |(id, _)| id.0 + 1);
+            missing.extend(
+                (first_id..)
+                    .take(count)
+                    .map(|id| (ChunkId(id), format!("d{id}"))),
+            );
+        }
+
         fn missing_chunks(&self) -> usize {
             self.store.missing_chunks.lock().unwrap().len()
+        }
+
+        fn missing_document_chunks(&self) -> usize {
+            self.store.missing_document_chunks.lock().unwrap().len()
         }
 
         /// Give the worker `wait` of paused time, then the vector stored for each chunk id.
@@ -447,6 +564,62 @@ mod tests {
         assert_eq!(
             harness.shut_down().await,
             [vec!["a", "bad", "c"], vec!["a"], vec!["bad"], vec!["c"]]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn worker_embeds_message_chunks_but_no_document_chunk_while_the_gate_is_closed() {
+        let harness = Harness::spawn(&["said"], false);
+        harness.documents_gate.send_replace(false);
+        harness.add_document_chunks(1);
+
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        assert_eq!(harness.missing_chunks(), 0);
+        assert_eq!(harness.missing_document_chunks(), 1);
+
+        harness.add_chunks(&["said later"]);
+        harness.wake.notify_one();
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        assert_eq!(harness.missing_chunks(), 0);
+        assert_eq!(harness.missing_document_chunks(), 1);
+
+        assert_eq!(
+            harness.shut_down().await,
+            [vec!["said"], vec!["said later"]]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn worker_stops_after_the_batch_in_flight_when_the_gate_closes_and_resumes_when_it_opens()
+    {
+        let harness = Harness::spawn_with(ScriptedEmbedder {
+            batch_time: Duration::from_secs(1),
+            ..ScriptedEmbedder::default()
+        });
+        harness.add_document_chunks(2 * BATCH_SIZE + 1);
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(harness.missing_document_chunks(), BATCH_SIZE + 1);
+        harness.documents_gate.send_replace(false);
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        assert_eq!(
+            harness.missing_document_chunks(),
+            1,
+            "the batch in flight was dropped, or another was sent"
+        );
+
+        harness.add_chunks(&["said"]);
+        harness.wake.notify_one();
+        harness.documents_gate.send_replace(true);
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        assert_eq!(harness.missing_document_chunks(), 0);
+
+        let calls = harness.shut_down().await;
+        assert_eq!(calls.len(), 4);
+        assert_eq!(
+            calls[2],
+            ["said"],
+            "a message chunk waited behind documents"
         );
     }
 }

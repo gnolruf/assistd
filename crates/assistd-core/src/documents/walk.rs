@@ -167,6 +167,7 @@ mod tests {
             ],
             exclude: vec!["drafts/**".into(), "*.log".into()],
             max_file_mb: 1.try_into().unwrap(),
+            ..DocumentsConfig::default()
         };
         let note = |name: &str| write(&root.join(name), b"text", EVERYONE_READS);
         for kept in ["plan.md", "work/deep.md"] {

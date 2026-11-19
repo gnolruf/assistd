@@ -296,7 +296,8 @@ async fn documents_and_messages_rank_apart_and_reindexing_replaces_document_chun
     assert_eq!(
         store.count_missing().await.unwrap(),
         UnindexedRows {
-            chunks: 1,
+            message_chunks: 0,
+            document_chunks: 1,
             memories: 0
         }
     );
@@ -381,14 +382,14 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
         .unwrap();
     let hit_ids: Vec<ChunkId> = hits.iter().map(|hit| hit.chunk_id).collect();
     assert_eq!(hit_ids, [intro], "the untouched chunk keeps its vector");
-    assert_eq!(store.count_missing().await.unwrap().chunks, 1);
+    assert_eq!(store.count_missing().await.unwrap().document_chunks, 1);
 
     assert_eq!(store.index_roots().await.unwrap(), [root]);
     assert_eq!(store.count_document_chunks().await.unwrap(), 2);
     assert_eq!(store.remove_index_root(root).await.unwrap(), 1);
     assert!(store.index_roots().await.unwrap().is_empty());
     assert_eq!(store.count_document_chunks().await.unwrap(), 0);
-    assert_eq!(store.count_missing().await.unwrap().chunks, 0);
+    assert_eq!(store.count_missing().await.unwrap().document_chunks, 0);
     assert!(store.begin_index_pass(root).await.unwrap() != second);
 }
 
@@ -424,7 +425,7 @@ async fn a_document_chunk_keeps_its_vector_wherever_its_text_moves() {
         .unwrap();
     assert!(added.is_empty(), "sections trading places are not new text");
     assert_eq!(
-        store.count_missing().await.unwrap().chunks,
+        store.count_missing().await.unwrap().document_chunks,
         1,
         "every section keeps its vector"
     );
@@ -476,7 +477,8 @@ async fn overwriting_a_memory_value_drops_its_stale_embedding() {
     assert_eq!(
         store.count_missing().await.unwrap(),
         UnindexedRows {
-            chunks: 0,
+            message_chunks: 0,
+            document_chunks: 0,
             memories: 1
         },
         "neither the trigger nor a late embedding of the old value may leave it indexed"
@@ -525,6 +527,11 @@ async fn missing_embedding_lists_only_unindexed_rows() {
     transcript.embedded_chunk(&store, "x", &unit_vec(0.0)).await;
     let (_, first) = transcript.append("y").await;
     let first_bare = first[0];
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let document = store
+        .index_document(pass, PathBuf::from("/notes/plan.md"), STAMP, "draft".into())
+        .await
+        .unwrap();
     let (_, second) = transcript.append("z").await;
     let second_bare = second[0];
 
@@ -533,26 +540,47 @@ async fn missing_embedding_lists_only_unindexed_rows() {
     let bare_mem = save_memory(&handle, "bare", "v2").await;
 
     assert_eq!(
-        store.chunks_missing_embedding(None, 100).await.unwrap(),
+        store
+            .chunks_missing_embedding(ChunkSource::Message, None, 100)
+            .await
+            .unwrap(),
         [
             (first_bare, "y".to_string()),
             (second_bare, "z".to_string())
         ]
     );
     assert_eq!(
-        store.chunks_missing_embedding(None, 1).await.unwrap(),
+        store
+            .chunks_missing_embedding(ChunkSource::Message, None, 1)
+            .await
+            .unwrap(),
         [(first_bare, "y".to_string())]
     );
     assert_eq!(
         store
-            .chunks_missing_embedding(Some(first_bare), 100)
+            .chunks_missing_embedding(ChunkSource::Message, Some(first_bare), 100)
             .await
             .unwrap(),
         [(second_bare, "z".to_string())]
     );
     assert_eq!(
+        store
+            .chunks_missing_embedding(ChunkSource::Document, None, 100)
+            .await
+            .unwrap(),
+        [(document[0], "draft".to_string())]
+    );
+    assert_eq!(
         store.memories_missing_embedding(None, 100).await.unwrap(),
         [(bare_mem, "v2".to_string())]
+    );
+    assert_eq!(
+        store.count_missing().await.unwrap(),
+        UnindexedRows {
+            message_chunks: 2,
+            document_chunks: 1,
+            memories: 1
+        }
     );
 
     embed_memory(&store, bare_mem, "v2", &unit_vec(0.0)).await;
@@ -610,13 +638,17 @@ async fn unembeddable_rows_are_neither_missing_nor_searched_until_cleared_or_cha
 
     assert_eq!(store.clear_unembeddable().await.unwrap(), 2);
     assert_eq!(
-        store.chunks_missing_embedding(None, 100).await.unwrap(),
+        store
+            .chunks_missing_embedding(ChunkSource::Message, None, 100)
+            .await
+            .unwrap(),
         [(chunk, "y".to_string())]
     );
     assert_eq!(
         store.count_missing().await.unwrap(),
         UnindexedRows {
-            chunks: 1,
+            message_chunks: 1,
+            document_chunks: 0,
             memories: 2
         }
     );
@@ -656,7 +688,8 @@ async fn adopting_a_different_embedding_space_drops_every_vector() {
     assert_eq!(
         store.count_missing().await.unwrap(),
         UnindexedRows {
-            chunks: 1,
+            message_chunks: 1,
+            document_chunks: 0,
             memories: 1
         }
     );
@@ -709,7 +742,8 @@ async fn adopting_a_space_that_differs_only_in_its_document_prefix_drops_every_v
     assert_eq!(
         store.count_missing().await.unwrap(),
         UnindexedRows {
-            chunks: 1,
+            message_chunks: 1,
+            document_chunks: 0,
             memories: 0
         }
     );

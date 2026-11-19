@@ -158,6 +158,13 @@ pub enum ChunkScope {
     Documents,
 }
 
+/// What a chunk's text was cut from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkSource {
+    Message,
+    Document,
+}
+
 /// One saved-memory hit, ranked by cosine similarity to the query.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemoryHit {
@@ -205,10 +212,11 @@ pub struct EmbeddingSpace {
     pub document_prefix: String,
 }
 
-/// Rows neither embedded nor marked unembeddable, by table.
+/// Rows neither embedded nor marked unembeddable, by what they hold.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UnindexedRows {
-    pub chunks: u64,
+    pub message_chunks: u64,
+    pub document_chunks: u64,
     pub memories: u64,
 }
 
@@ -286,10 +294,11 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         limit: usize,
     ) -> Result<Vec<(MemoryId, String)>>;
 
-    /// Up to `limit` chunks after `after` (from the start when `None`) neither
-    /// embedded nor marked unembeddable, in id order, as `(id, chunk text)`.
+    /// Up to `limit` chunks cut from `source` after `after` (from the start when `None`)
+    /// neither embedded nor marked unembeddable, in id order, as `(id, chunk text)`.
     async fn chunks_missing_embedding(
         &self,
+        source: ChunkSource,
         after: Option<ChunkId>,
         limit: usize,
     ) -> Result<Vec<(ChunkId, String)>>;
@@ -387,6 +396,7 @@ impl SemanticStore for NoSemanticStore {
     }
     async fn chunks_missing_embedding(
         &self,
+        _source: ChunkSource,
         _after: Option<ChunkId>,
         _limit: usize,
     ) -> Result<Vec<(ChunkId, String)>> {

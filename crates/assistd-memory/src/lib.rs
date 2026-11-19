@@ -19,7 +19,7 @@ pub use relay_traces::{
     PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, PersistedRelayStep,
 };
 pub use semantic::{
-    AdjacentChunks, ChunkLocator, ChunkScope, ContextChunk, Embedding, EmbeddingHit,
+    AdjacentChunks, ChunkLocator, ChunkScope, ChunkSource, ContextChunk, Embedding, EmbeddingHit,
     EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass, MemoryHit, NoSemanticStore,
     SemanticStore, SessionScope, SourcePointer, UnindexedRows,
 };

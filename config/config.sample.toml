@@ -130,6 +130,9 @@
 # roots = ["~/Documents/notes", "/srv/papers"]  # absolute or ~/...; none may hold another
 # exclude = ["drafts/**", "*.log"]  # .gitignore-style patterns below each root
 # max_file_mb = 20  # larger files are skipped
+# embed_during_interaction = false  # true: embed document text while you talk to the model too
+# embed_during_tasks = false  # true: also while a task runs
+# embed_during_gpu_sleep = false  # true: also while asleep for another program's VRAM
 
 [search]
 # A local SearXNG instance the web command searches through.

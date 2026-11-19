@@ -706,6 +706,19 @@ embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
 meantime stays pending and is embedded by a later pass.
 
+The worker keeps two backlogs. Message chunks and memories are few and
+feed recall, so every pass embeds them first and at once. Document chunks
+can number in the hundreds of thousands and the embedding server takes
+every CPU thread it is given, so each batch of them waits for a gate that
+`assistd-core` publishes: open unless the user's interaction is open (the
+quiet time after a reply included), a task run holds a model lane, or the
+daemon sleeps for another process's VRAM. `documents.embed_during_interaction`,
+`embed_during_tasks` and `embed_during_gpu_sleep` each let document chunks
+through one of those states. The gate is read between batches, so a turn
+waits for at most the batch in flight, and a wake in the middle of the
+document backlog sends the worker back to the messages first. Drowsy and
+Sleeping leave the gate open; the embedding server stays up in both.
+
 The semantic store exists from daemon start, but the
 embedder sits behind an `EmbedderHandle` that is `Starting` until the
 embedding server answers. The worker starts then, and its first pass

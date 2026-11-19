@@ -1,5 +1,6 @@
 //! Document indexing: the extraction worker's launch in a reader sandbox over the
-//! index roots, and the passes that walk those roots into the index.
+//! index roots, the passes that walk those roots into the index, and the gate on
+//! embedding what they store.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use assistd_config::DocumentsConfig;
 use assistd_documents::WorkerCommand;
 use assistd_tools::{ReaderProgram, ReaderSandbox, ReaderSandboxError, SandboxInfo, ToolsDisabled};
 
+pub(crate) mod embed_gate;
 mod indexer;
 mod pass;
 mod walk;

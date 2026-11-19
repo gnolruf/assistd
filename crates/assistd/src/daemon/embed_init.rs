@@ -57,7 +57,14 @@ pub(super) struct EmbeddingService {
 /// rows missing an embedding.
 struct RunningEmbedding {
     server: ChildServer,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<EmbedWorker>,
+}
+
+/// The worker, and the task keeping the gate on its document chunks; that task
+/// ends when the worker does.
+struct EmbedWorker {
+    worker: JoinHandle<()>,
+    documents_gate: JoinHandle<()>,
 }
 
 impl EmbeddingStartup {
@@ -118,7 +125,11 @@ impl EmbeddingService {
     }
 }
 
-async fn join_worker_within_budget(mut worker: JoinHandle<()>, deadline: Instant) {
+async fn join_worker_within_budget(embed_worker: EmbedWorker, deadline: Instant) {
+    let EmbedWorker {
+        mut worker,
+        documents_gate,
+    } = embed_worker;
     let drain_until = deadline.min(Instant::now() + EMBED_DRAIN_BUDGET);
     if tokio::time::timeout_at(drain_until, &mut worker)
         .await
@@ -131,6 +142,7 @@ async fn join_worker_within_budget(mut worker: JoinHandle<()>, deadline: Instant
         worker.abort();
         let _ = worker.await;
     }
+    let _ = documents_gate.await;
 }
 
 /// The handles requests use from startup and, when embedding is enabled,
@@ -223,7 +235,7 @@ async fn adopt_space_then_serve(
     embedder: Arc<dyn Embedder>,
     startup: EmbeddingStartup,
     worker_shutdown: watch::Receiver<bool>,
-) -> Option<JoinHandle<()>> {
+) -> Option<EmbedWorker> {
     let space = EmbeddingSpace {
         model: embedder.model().to_owned(),
         dim: embedder.dim(),
@@ -246,16 +258,21 @@ fn serve_embedder(
     embedder: Arc<dyn Embedder>,
     startup: EmbeddingStartup,
     worker_shutdown: watch::Receiver<bool>,
-) -> JoinHandle<()> {
+) -> EmbedWorker {
+    let (documents_gate_open, documents_gate) = state.status.document_embed_gate();
     let worker = spawn_embedder_task(
         embedder.clone(),
         state.memory.semantic.clone(),
         startup.embed_wake,
+        documents_gate_open,
         worker_shutdown,
     );
     state.memory.embedder.set(Readiness::Ready(embedder));
     state.subsystems.document_index.request_pass();
-    worker
+    EmbedWorker {
+        worker,
+        documents_gate,
+    }
 }
 
 /// Why the embedder did not come up, with the server when it started

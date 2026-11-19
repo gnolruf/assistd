@@ -1,4 +1,5 @@
-//! Document-search configuration: the directories indexed and which of their files are left out.
+//! Document-search configuration: the directories indexed, which of their files are
+//! left out, and when their text is embedded.
 
 use std::num::NonZeroU32;
 
@@ -27,6 +28,16 @@ pub struct DocumentsConfig {
     /// Largest file indexed, in MB of 1024 × 1024 bytes; a larger one is
     /// skipped.
     pub max_file_mb: NonZeroU32,
+    /// Embed document text while the user's interaction is open: from a message's
+    /// arrival until `tasks.resume_after_idle_secs` after its reply. When `false`,
+    /// it waits for the interaction to end, at most one batch into a turn.
+    pub embed_during_interaction: bool,
+    /// Embed document text while a task run holds a model lane. When `false`, it
+    /// waits for the run to end.
+    pub embed_during_tasks: bool,
+    /// Embed document text while the daemon sleeps for another process's VRAM
+    /// (`sleep.gpu_monitor_enabled`). When `false`, it waits for the next wake.
+    pub embed_during_gpu_sleep: bool,
 }
 
 impl DescribeSettings for DocumentsConfig {
@@ -45,6 +56,21 @@ impl DescribeSettings for DocumentsConfig {
             "Files larger than this are skipped",
             advanced
         ),
+        embed_during_interaction => (
+            "embed while you chat",
+            "Keep embedding document text during a chat instead of waiting for it to end",
+            advanced
+        ),
+        embed_during_tasks => (
+            "embed while tasks run",
+            "Keep embedding document text while a task runs instead of waiting for it to end",
+            advanced
+        ),
+        embed_during_gpu_sleep => (
+            "embed during GPU sleep",
+            "Keep embedding document text while asleep for another program's VRAM",
+            advanced
+        ),
     }
 }
 
@@ -55,6 +81,9 @@ impl Default for DocumentsConfig {
             roots: Vec::new(),
             exclude: Vec::new(),
             max_file_mb: nz32(20),
+            embed_during_interaction: false,
+            embed_during_tasks: false,
+            embed_during_gpu_sleep: false,
         }
     }
 }

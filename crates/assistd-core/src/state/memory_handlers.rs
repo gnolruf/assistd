@@ -7,8 +7,8 @@ use tracing::warn;
 use assistd_embed::{BATCH_SIZE, Embedder, embed_rows};
 use assistd_ipc::{Event, EventBody, ReindexKind};
 use assistd_memory::{
-    ChunkLocator, ChunkScope, EmbeddingTarget, MemoryError, MemoryId, SemanticStore, SessionScope,
-    UnindexedRows,
+    ChunkLocator, ChunkScope, ChunkSource, EmbeddingTarget, MemoryError, MemoryId, SemanticStore,
+    SessionScope, UnindexedRows,
 };
 use assistd_tools::DEFAULT_SEARCH_LIMIT;
 
@@ -186,7 +186,12 @@ impl MemoryStack {
             .unindexed_rows_with_marks_cleared()
             .await
             .context("reindex: count missing rows")?;
-        let chunks_total = u32::try_from(unindexed.chunks).unwrap_or(u32::MAX);
+        let chunks_total = u32::try_from(
+            unindexed
+                .message_chunks
+                .saturating_add(unindexed.document_chunks),
+        )
+        .unwrap_or(u32::MAX);
         let memories_total = u32::try_from(unindexed.memories).unwrap_or(u32::MAX);
 
         let _ = tx
@@ -212,19 +217,22 @@ impl MemoryStack {
 
         let semantic = self.semantic.as_ref();
         let embedder = embedder.as_ref();
+        let mut chunks = KindProgress::new(&id, &tx, ReindexKind::Chunks, chunks_total);
+        for source in [ChunkSource::Message, ChunkSource::Document] {
+            reindex_items(
+                embedder,
+                semantic,
+                &mut chunks,
+                |after, limit| semantic.chunks_missing_embedding(source, after, limit),
+                EmbeddingTarget::Chunk,
+            )
+            .await
+            .context("reindex: list missing chunks")?;
+        }
         reindex_items(
             embedder,
             semantic,
-            KindProgress::new(&id, &tx, ReindexKind::Chunks, chunks_total),
-            |after, limit| semantic.chunks_missing_embedding(after, limit),
-            EmbeddingTarget::Chunk,
-        )
-        .await
-        .context("reindex: list missing chunks")?;
-        reindex_items(
-            embedder,
-            semantic,
-            KindProgress::new(&id, &tx, ReindexKind::Memories, memories_total),
+            &mut KindProgress::new(&id, &tx, ReindexKind::Memories, memories_total),
             |after, limit| semantic.memories_missing_embedding(after, limit),
             EmbeddingTarget::Memory,
         )
@@ -284,12 +292,12 @@ impl<'a> KindProgress<'a> {
     }
 }
 
-/// Embed and store up to `progress.total` rows, listed a page at a time in
-/// id order. Failed embeds and stores are logged; a listing failure aborts.
+/// Embed and store rows until `progress` reaches its total, listed a page at a time
+/// in id order. Failed embeds and stores are logged; a listing failure aborts.
 async fn reindex_items<Id, L, LFut>(
     embedder: &dyn Embedder,
     semantic: &dyn SemanticStore,
-    mut progress: KindProgress<'_>,
+    progress: &mut KindProgress<'_>,
     list: L,
     to_target: fn(Id) -> EmbeddingTarget,
 ) -> Result<(), MemoryError>
