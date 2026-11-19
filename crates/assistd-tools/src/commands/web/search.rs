@@ -130,8 +130,7 @@ fn listed(results: &SearchResults, limit: usize) -> CommandOutput {
     }
     let stderr = if stdout.is_empty() {
         let why = unresponsive
-            .map(|engines| format!("; engines that did not answer: {engines}"))
-            .unwrap_or_default();
+            .map_or_default(|engines| format!("; engines that did not answer: {engines}"));
         format!(
             "[note] {NAME}: no results{why}. {}: fewer or different words\n",
             Hint::Try

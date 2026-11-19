@@ -38,8 +38,7 @@ impl ExchangeLine {
     fn render(&self) -> String {
         let score = self
             .similarity
-            .map(|similarity| format!(" sim={:.0}%", similarity * 100.0))
-            .unwrap_or_default();
+            .map_or_default(|similarity| format!(" sim={:.0}%", similarity * 100.0));
         format!(
             "{}{score}] {}",
             locator_tag(&self.locator),

@@ -173,7 +173,7 @@ fn describe(head: &[u8], size: u64, path: Option<&str>) -> Vec<u8> {
         },
         |t| t.mime_type().to_string(),
     );
-    let prefix = path.map(|p| format!("{p}: ")).unwrap_or_default();
+    let prefix = path.map_or_default(|p| format!("{p}: "));
     format!("{prefix}{mime}\n{prefix}{size} bytes\n").into_bytes()
 }
 

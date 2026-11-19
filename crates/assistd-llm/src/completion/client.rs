@@ -81,11 +81,7 @@ impl LlamaClient {
         health: Option<Arc<dyn LlmHealthProbe>>,
     ) -> Result<Self, LlamaClientError> {
         let client = local_client_builder()
-            .default_headers(
-                api_key
-                    .map(ApiKey::authorization_headers)
-                    .unwrap_or_default(),
-            )
+            .default_headers(api_key.map_or_default(ApiKey::authorization_headers))
             .connect_timeout(Duration::from_secs(10))
             .build()?;
         let base_url = format!("http://{}", model.listen_addr());

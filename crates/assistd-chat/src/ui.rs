@@ -728,8 +728,7 @@ fn render_status_line(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
     let offline = (!app.daemon_reachable).then(|| ("daemon offline".to_string(), warning_style));
     let queue = app
         .task_queue()
-        .map(queue_status::queue_segments)
-        .unwrap_or_default();
+        .map_or_default(queue_status::queue_segments);
     let queue = queue.into_iter().map(|segment| {
         let style = if segment.needs_input {
             warning_style

@@ -137,7 +137,7 @@ impl EntryEditor {
     /// Starts from `entry`, or blank when adding one.
     fn new(item: ListItem, entry: Option<&toml::Value>) -> Self {
         let field = |text: String| TextEditor::new(text, EditorShape::Line);
-        let text_of = |value: Option<&toml::Value>| value.map(entry_text).unwrap_or_default();
+        let text_of = |value: Option<&toml::Value>| value.map_or_default(entry_text);
         let (value, key_file) = match item {
             ListItem::Text => (field(text_of(entry)), None),
             ListItem::SearchEngine => match entry {

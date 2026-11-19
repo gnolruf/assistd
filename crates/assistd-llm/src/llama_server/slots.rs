@@ -118,11 +118,7 @@ impl SlotStash {
         health: Option<Arc<dyn LlmHealthProbe>>,
     ) -> Result<Self, LlamaServerError> {
         let client = local_client_builder()
-            .default_headers(
-                api_key
-                    .map(ApiKey::authorization_headers)
-                    .unwrap_or_default(),
-            )
+            .default_headers(api_key.map_or_default(ApiKey::authorization_headers))
             .timeout(SLOT_ACTION_TIMEOUT)
             .build()?;
         let worker = SlotWorker {

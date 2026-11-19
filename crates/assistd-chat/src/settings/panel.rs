@@ -630,8 +630,7 @@ impl SettingsPanel {
             | SettingKind::Prose => {
                 let text = self
                     .current_value(setting.key)
-                    .map(|value| editable_text(setting.kind(), value))
-                    .unwrap_or_default();
+                    .map_or_default(|value| editable_text(setting.kind(), value));
                 let shape = if setting.kind() == SettingKind::Prose {
                     EditorShape::Box { wrap_width: 0 }
                 } else {
