@@ -503,13 +503,15 @@ fn source_header(locator: &ChunkLocator) -> String {
 }
 
 /// The unclosed tag that opens a line in a source-scoped result: `[timestamp role`
-/// for a message, `[bytes start..end` for a document.
+/// for a message, `[page P bytes start..end` for a document.
 fn locator_tag(locator: &ChunkLocator) -> String {
     match locator {
         ChunkLocator::Message {
             timestamp, role, ..
         } => format!("[{} {}", timestamp.format(TIMESTAMP_FORMAT), role.as_wire()),
-        ChunkLocator::Document { bytes, .. } => format!("[bytes {}..{}", bytes.start, bytes.end),
+        ChunkLocator::Document { page, bytes, .. } => {
+            format!("[page {} bytes {}..{}", page + 1, bytes.start, bytes.end)
+        }
     }
 }
 
@@ -661,10 +663,10 @@ mod tests {
             pass: IndexPass,
             path: PathBuf,
             stamp: FileStamp,
-            content: String,
+            pages: Vec<String>,
         ) -> Result<Vec<ChunkId>, MemoryError> {
             NoSemanticStore
-                .index_document(pass, path, stamp, content)
+                .index_document(pass, path, stamp, pages)
                 .await
         }
         async fn finish_index_pass(&self, pass: IndexPass) -> Result<u64, MemoryError> {
@@ -685,9 +687,10 @@ mod tests {
         async fn document_text(
             &self,
             path: &Path,
+            page: usize,
             bytes: Range<usize>,
         ) -> Result<Option<DocumentText>, MemoryError> {
-            NoSemanticStore.document_text(path, bytes).await
+            NoSemanticStore.document_text(path, page, bytes).await
         }
     }
 

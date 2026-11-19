@@ -20,12 +20,14 @@ const PDF_EXTENSION: &str = "pdf";
 /// Columns an HTML file's text is wrapped to.
 const HTML_TEXT_WIDTH: usize = 100;
 
-/// How a file's bytes become its text.
+/// How a file's bytes become its text, and what its pages are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Format {
-    /// Plain text, Markdown and source code, kept as they are.
+    /// Plain text, Markdown and source code, kept as they are: one page.
     Text,
+    /// One page.
     Html,
+    /// Its pages.
     Pdf,
 }
 
@@ -46,17 +48,17 @@ impl Format {
 
     fn extract(self, bytes: Vec<u8>) -> Result<Extraction, SkipReason> {
         match self {
-            Self::Text => decode(&bytes).map(Extraction::of_text),
+            Self::Text => decode(&bytes).map(Extraction::of_one_page),
             Self::Html => decode(&bytes)
                 .and_then(|html| html_text(&html))
-                .map(Extraction::of_text),
+                .map(Extraction::of_one_page),
             Self::Pdf => pdf::page_texts(bytes),
         }
     }
 }
 
-/// The text of the regular file at `path`, or why it has none; a file larger
-/// than `max_file_bytes` is not read. Blocks on the filesystem.
+/// The text of the regular file at `path` page by page, or why it has none; a
+/// file larger than `max_file_bytes` is not read. Blocks on the filesystem.
 pub(crate) fn extract_text(path: &Path, max_file_bytes: u64) -> Extraction {
     read_file(path, max_file_bytes)
         .and_then(|bytes| Format::of(path).extract(bytes))
@@ -137,8 +139,8 @@ mod tests {
     }
 
     fn text(text: &str) -> Extraction {
-        Extraction::Text {
-            text: text.into(),
+        Extraction::Pages {
+            pages: vec![text.into()],
             truncated: false,
         }
     }
@@ -188,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pdf_yields_each_pages_text_and_untranscribed_is_skipped_when_no_page_has_any() {
+    fn a_pdf_yields_each_pages_text_and_an_empty_page_where_there_is_none() {
         let scanned = extraction_of("scan.PDF", &pdf_of(&[IMAGE_PAGE, IMAGE_PAGE]), 4096);
         assert_eq!(
             scanned,
@@ -197,10 +199,6 @@ mod tests {
                 truncated: false,
             }
         );
-        assert_eq!(
-            scanned.with_pages_joined(),
-            skipped(SkipReason::NoTextLayer)
-        );
 
         let pages = [&text_page("Minutes"), IMAGE_PAGE, &text_page("Appendix")];
         let mixed = extraction_of("minutes.pdf", &pdf_of(&pages), 4096);
@@ -208,14 +206,12 @@ mod tests {
             panic!("a PDF comes back as pages: {mixed:?}");
         };
         assert!(!truncated);
-        assert!(pages[0].contains("Minutes"), "{pages:?}");
-        assert_eq!(pages[1], "");
-        let Extraction::Text { text, .. } = mixed.with_pages_joined() else {
-            panic!("pages with text join into one text");
+        let [minutes, scan, appendix] = &pages[..] else {
+            panic!("a page of the file is a page of its text: {pages:?}");
         };
-        let (minutes, appendix) = text.split_once("\n\n").expect("a break between pages");
-        assert!(minutes.contains("Minutes"), "{text:?}");
-        assert!(appendix.contains("Appendix"), "{text:?}");
+        assert!(minutes.contains("Minutes"), "{pages:?}");
+        assert_eq!(scan, "");
+        assert!(appendix.contains("Appendix"), "{pages:?}");
     }
 
     #[test]

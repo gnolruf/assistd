@@ -82,9 +82,9 @@ impl Extractor {
         self.readiness.subscribe()
     }
 
-    /// The text of the file at `path`, or why it was skipped; a file larger than
-    /// `max_file_bytes` is. Requests are answered one at a time. A worker that
-    /// misses the deadline skips the file as timed out and is restarted.
+    /// The text of the file at `path` page by page, or why it was skipped; a file
+    /// larger than `max_file_bytes` is. Requests are answered one at a time. A
+    /// worker that misses the deadline skips the file as timed out and is restarted.
     pub async fn extract(
         &self,
         path: &Path,

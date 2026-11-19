@@ -34,10 +34,15 @@ pub enum ChunkLocator {
         /// The session's title, or its first user message cut short when untitled.
         session_label: String,
     },
-    /// A byte range of an indexed local document's text.
+    /// A byte range of one page of an indexed local document's text.
     Document {
         document_id: DocumentId,
         path: PathBuf,
+        /// The page's position in the file, counted from zero.
+        page: usize,
+        /// Pages in the document.
+        page_count: usize,
+        /// The bytes of the page's text the chunk covers.
         bytes: Range<usize>,
         indexed_at: DateTime<Utc>,
     },
@@ -138,14 +143,18 @@ pub struct AdjacentChunks {
     pub after: Option<ContextChunk>,
 }
 
-/// Part of an indexed document's stored text.
+/// Part of the stored text of one page of an indexed document.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DocumentText {
     pub text: String,
-    /// The bytes of the whole text that `text` covers.
+    /// The page's position in the file, counted from zero.
+    pub page: usize,
+    /// Pages in the document.
+    pub page_count: usize,
+    /// The bytes of the page's text that `text` covers.
     pub bytes: Range<usize>,
-    /// Length of the whole text in bytes.
-    pub total_bytes: usize,
+    /// Length of the page's text in bytes.
+    pub page_bytes: usize,
     pub indexed_at: DateTime<Utc>,
 }
 
@@ -278,7 +287,7 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
 
     /// The chunks around `locator` in its source: for a message, the last chunk of
     /// the previous user or assistant message in its session and the first of the next;
-    /// for a document, the chunks starting just before and just after it.
+    /// for a document, those starting just before and after it, on any of its pages.
     async fn adjacent_chunks(&self, locator: &ChunkLocator) -> Result<AdjacentChunks>;
 
     /// Top-K saved memories by cosine to the L2-normalised `query_vector`.
@@ -335,15 +344,15 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         files: Vec<(PathBuf, FileStamp)>,
     ) -> Result<Vec<(PathBuf, FileStamp)>>;
 
-    /// Store `content` as the text of the document at `path`, seen by `pass`. A chunk
-    /// whose text is unchanged keeps its vector wherever it now sits; the rest are
-    /// replaced. Returns the new chunks, which are missing embeddings.
+    /// Store `pages`, each page's text in file order, as the document at `path`, seen
+    /// by `pass`. No chunk spans two pages. A chunk whose text is unchanged keeps its
+    /// vector on whatever page it now sits; returns the new chunks, which have none.
     async fn index_document(
         &self,
         pass: IndexPass,
         path: PathBuf,
         stamp: FileStamp,
-        content: String,
+        pages: Vec<String>,
     ) -> Result<Vec<ChunkId>>;
 
     /// Remove every document of `pass`'s root that the pass did not see, returning
@@ -364,10 +373,15 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     /// How many chunks the stored documents are cut into.
     async fn count_document_chunks(&self) -> Result<u64>;
 
-    /// The stored text of the document indexed at `path` within `bytes`, narrowed to
-    /// whole characters and empty past the text's end; `None` when none is indexed there.
-    async fn document_text(&self, path: &Path, bytes: Range<usize>)
-    -> Result<Option<DocumentText>>;
+    /// The stored text of page `page`, counted from zero, of the document indexed at
+    /// `path`, within `bytes` of that page: narrowed to whole characters, and empty
+    /// past the page's end or the last page. `None` when none is indexed there.
+    async fn document_text(
+        &self,
+        path: &Path,
+        page: usize,
+        bytes: Range<usize>,
+    ) -> Result<Option<DocumentText>>;
 }
 
 /// No-op store: writes are discarded and searches find nothing.
@@ -439,7 +453,7 @@ impl SemanticStore for NoSemanticStore {
         _pass: IndexPass,
         _path: PathBuf,
         _stamp: FileStamp,
-        _content: String,
+        _pages: Vec<String>,
     ) -> Result<Vec<ChunkId>> {
         Ok(Vec::new())
     }
@@ -461,6 +475,7 @@ impl SemanticStore for NoSemanticStore {
     async fn document_text(
         &self,
         _path: &Path,
+        _page: usize,
         _bytes: Range<usize>,
     ) -> Result<Option<DocumentText>> {
         Ok(None)

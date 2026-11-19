@@ -21,7 +21,8 @@ erDiagram
     branches ||--o| branch_summaries : "compacted by"
     messages ||--o{ chunks : "split into"
     index_roots ||--o{ documents : "found under"
-    documents ||--o{ chunks : "split into"
+    documents ||--o{ document_pages : "made of"
+    document_pages ||--o{ chunks : "split into"
     messages ||--o{ relay_steps : "relayed by"
     relay_steps ||--o{ relay_entries : "did"
     chunks ||--o| message_chunk_embeddings : "embedded as"
@@ -125,8 +126,7 @@ erDiagram
         int id PK
         int root_id FK
         blob path UK
-        text content "the text as indexed"
-        blob content_hash "SHA-256 of content"
+        blob content_hash "SHA-256 of its pages in order"
         int mtime_ns "the file's stamp when read"
         int size
         int chunker "0 windows, 1 paragraphs"
@@ -135,10 +135,16 @@ erDiagram
         int seen_pass "the root's pass that last saw it"
         int indexed_at
     }
+    document_pages {
+        int document_id PK, FK
+        int page PK "position in the file, from 0"
+        text content "the page's text as indexed, empty when it has none"
+    }
     chunks {
         int id PK
         int message_id FK "set for a message chunk"
         int document_id FK "set for a document chunk"
+        int page FK "the document's page it is cut from"
         int byte_start
         int byte_end
     }
@@ -269,31 +275,39 @@ resumed, saying which.
 
 ## Embeddings
 
-- **`chunks`**: each chunk belongs to exactly one message or one
-  document, and is a byte range into `messages.content` or
-  `documents.content`, so the text itself is never stored twice. User
-  and assistant messages are cut into overlapping windows of 512
-  characters (64 shared) in the same transaction that saves the
-  message; tool results are not chunked. A document is cut where its
-  text divides instead: at blank lines and Markdown headings, with
-  whole paragraphs packed into a chunk of up to 512 characters and a
-  heading always starting a new one. Only a paragraph longer than that
-  is cut into the same overlapping windows.
+- **`chunks`**: each chunk belongs to exactly one message or one page
+  of a document, and is a byte range into `messages.content` or that
+  page's `document_pages.content`, so the text itself is never stored
+  twice. User and assistant messages are cut into overlapping windows of
+  512 characters (64 shared) in the same transaction that saves the
+  message; tool results are not chunked. A document is cut page by
+  page, so no chunk spans two pages, and within a page where its text
+  divides: at blank lines and Markdown headings, with whole paragraphs
+  packed into a chunk of up to 512 characters and a heading always
+  starting a new one. Only a paragraph longer than that is cut into the
+  same overlapping windows.
 - **`index_roots`**: the folders indexed for document search. Each
   walk over a root is a pass and bumps `pass`; deleting a root deletes
   its documents.
-- **`documents`**: local files indexed for search, one row per path,
-  holding the text as it was indexed. A file whose `mtime_ns`, `size`
-  and chunking match its row is not read again. One that is read and
-  hashes to the stored `content_hash` only has its stamp refreshed.
+- **`documents`**: local files indexed for search, one row per path.
+  A file whose `mtime_ns`, `size` and chunking match its row is not
+  read again. One that is read and hashes to the stored `content_hash`,
+  which covers its pages in order, only has its stamp refreshed.
   Otherwise each chunk whose text is unchanged keeps its vector and
-  takes the byte range that text now has, so an insertion re-embeds only
-  the paragraphs it touched, and the rest are replaced. `chunker` names
+  takes the page and byte range that text now has, so an insertion
+  re-embeds only the paragraphs it touched and a page added at the
+  front only that page, and the rest are replaced. `chunker` names
   the strategy that cut the row, so a new strategy cuts every stored
   document again on the next pass. Each row records the pass
   that last saw it, and finishing a pass deletes the root's documents
   it did not see. The rows are a rebuildable cache of files on disk,
   so a reset of `memory.db` costs only a re-index.
+- **`document_pages`**: a document's text as it was indexed, one row
+  per page. What a page is follows the file's format: a PDF's pages
+  are its own, and a text, Markdown, source or HTML file is one page.
+  `page` is the page's position in the file from 0, and a page without
+  text, as a scanned PDF page is, has a row with empty `content`, so a
+  page's number in the index is its number in the file.
 - **`message_chunk_embeddings`** / **`document_chunk_embeddings`** /
   **`memory_embeddings`**: at most one vector per chunk or memory,
   L2-normalised by the embedder so a dot product is cosine similarity. A chunk's

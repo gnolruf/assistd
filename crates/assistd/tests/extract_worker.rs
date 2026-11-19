@@ -71,8 +71,8 @@ async fn the_worker_reads_files_under_its_roots_and_none_outside_them() {
         .await;
     assert_eq!(
         indexed,
-        Ok(Extraction::Text {
-            text: "# Indexed\n\nvisible\n".into(),
+        Ok(Extraction::Pages {
+            pages: vec!["# Indexed\n\nvisible\n".into()],
             truncated: false,
         })
     );

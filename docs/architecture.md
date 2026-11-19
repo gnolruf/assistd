@@ -736,8 +736,8 @@ the user did not necessarily write. That never happens in the daemon: with
 `documents.enabled` and at least one root, the daemon runs an extraction
 worker, the hidden `assistd extract-worker` subcommand, and asks it for one
 file at a time over line-delimited JSON on its stdin and stdout. A request
-names a file and the largest size to read; the reply is the file's text, cut
-at 4 MiB with a flag saying so, or a `SkipReason`: an unsupported type (a
+names a file and the largest size to read; the reply is the file's text page
+by page, cut at 4 MiB with a flag saying so, or a `SkipReason`: an unsupported type (a
 recognised binary format, with its MIME type), binary, too large, not
 decodable, needs a password, no text layer, unreadable, extractor failed, or
 timed out.
@@ -747,7 +747,8 @@ or as the encoding their byte-order mark names, and kept as they are; text
 that is not valid in that encoding is skipped rather than patched with
 replacement characters. A file `cat` would call binary is skipped. `.html`,
 `.htm` and `.xhtml` files are rendered to text with `html2text`, headings as
-Markdown headings so the chunker cuts at them.
+Markdown headings so the chunker cuts at them. Each of these is reported as
+one page holding the whole text.
 
 A `.pdf` file is read with `pdf_oxide`, in the worker like every other
 format, and answered page by page: each page converted to Markdown, and an
@@ -755,10 +756,8 @@ empty string for a page whose conversion is empty, which is what a scanned
 page gives. The 4 MiB cap covers the pages together, and a file reports at
 most 20,000 of them. An encrypted PDF is opened with the empty password,
 which is all a file restricted only against printing or copying needs; one
-that needs a real password is skipped. `Extraction::with_pages_joined` is the
-reading for a daemon that transcribes nothing: the pages that have text
-joined by blank lines, and a file with none skipped as having no text layer
-instead of stored empty.
+that needs a real password is skipped. A page keeps its position, text or
+not, so the index numbers pages as a viewer does.
 
 A second request renders one page of a PDF for a model to transcribe: 150
 pixels per inch, or fewer when the longer edge would pass 2,048 pixels, as a
@@ -795,8 +794,9 @@ the daemon's memory.
 A pass brings the index in step with one root of `documents.roots`. It walks
 the root with the `ignore` crate, asks the store which of the files it found
 have a changed stamp, sends those to the extraction worker one at a time,
-stores each text, wakes the embedding worker, and finishes by removing the
-root's documents it did not see. Passes run over every root in turn, one at a
+stores each file's pages, wakes the embedding worker, and finishes by removing
+the root's documents it did not see. A file none of whose pages has text is
+skipped as having no text layer instead of stored empty. Passes run over every root in turn, one at a
 time: once the embedder is ready after daemon start, which is also when a
 changed `[documents]` takes effect, and again whenever `DocumentIndex` is
 asked for one. A stored root that `documents.roots` no longer lists is
@@ -830,13 +830,18 @@ The model reaches the index through the `docs` command, which `build_tools()`
 registers behind `run` only with `documents.enabled`; the system prompt then
 gains one line saying so. `docs search <query>` embeds the query and prints
 one line per document for the `embedding.top_k` best (or `-n`, at most 20):
-path, similarity, the byte range of the best-matching chunk, the date the
-document was indexed, and the chunk. `docs read [--offset N] <path>` prints the
-stored text of an indexed document from a byte offset, which is how a PDF is
-read at all, since `cat` refuses binary files; a path that is not indexed is
-an error pointing at `cat`. Both fit one tool result: a search drops the
-lowest-ranked hits past 8 KiB or the result cap, and a read stops short of the
-cap and names on stderr the bytes shown and the command that continues.
+path, similarity, the page of the best-matching chunk as `page 12 of 212`, the
+chunk's byte range within that page, the date the document was indexed, and
+the chunk. `docs read [--page P] [--offset N] <path>` prints the stored text
+of an indexed document from a byte of a page, pages counted from 1, which is
+how a PDF is read at all, since `cat` refuses binary files; a path that is not
+indexed is an error pointing at `cat`, and a page past the last is one that
+names the last. A read runs on into the following pages, and in a document of
+more than one page each page's text follows a line naming it, `[page 13 of
+212]`, which is all a page without text prints. Both fit one tool result: a
+search drops the lowest-ranked hits past 8 KiB or the result cap, and a read
+stops short of the cap and names on stderr the pages and bytes shown and the
+command that continues.
 Everything either prints from a document follows a header marking it as
 untrusted data, and both count as reading this machine, so a web request later
 in the turn asks first. A search says why when it cannot run: embedding is

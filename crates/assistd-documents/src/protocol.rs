@@ -23,9 +23,6 @@ const MAX_PAGE_IMAGE_BASE64_BYTES: usize = MAX_PAGE_IMAGE_BYTES.div_ceil(3) * 4;
 /// pages, and room for the rest of the message. A page image in base64 is shorter.
 pub(crate) const MAX_REPLY_LINE_BYTES: usize = 6 * MAX_TEXT_BYTES + 3 * MAX_PAGES + 1024;
 
-/// What separates one page's text from the next in a file's joined text.
-const PAGE_BREAK: &str = "\n\n";
-
 /// A line from the other side that is not a message this build knows.
 #[derive(Debug, Error)]
 #[error("malformed extraction-worker message: {0}")]
@@ -73,16 +70,11 @@ pub(crate) enum FromWorker {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Extraction {
-    Text {
-        /// At most [`MAX_TEXT_BYTES`] long.
-        text: String,
-        /// Whether the file held more text than `text` carries.
-        truncated: bool,
-    },
-    /// A file made of pages, such as a PDF.
+    /// The file's text as the pages its format divides it into: one page for a
+    /// format that has none.
     Pages {
-        /// Each page's text in page order, empty for a page without a text layer.
-        /// At most [`MAX_PAGES`] pages and [`MAX_TEXT_BYTES`] in all.
+        /// Each page's text in page order, empty for a page without text. At most
+        /// [`MAX_PAGES`] pages and [`MAX_TEXT_BYTES`] in all.
         pages: Vec<String>,
         /// Whether the file held more pages or text than `pages` carries.
         truncated: bool,
@@ -93,13 +85,11 @@ pub enum Extraction {
 }
 
 impl Extraction {
-    /// `text` cut to [`MAX_TEXT_BYTES`] at a character boundary.
-    pub(crate) fn of_text(mut text: String) -> Self {
-        let truncated = text.len() > MAX_TEXT_BYTES;
-        if truncated {
-            text.truncate(text.floor_char_boundary(MAX_TEXT_BYTES));
-        }
-        Self::Text { text, truncated }
+    /// `text` as the one page of a file whose format has no pages, cut to
+    /// [`MAX_TEXT_BYTES`] at a character boundary.
+    pub(crate) fn of_one_page(text: String) -> Self {
+        let Ok(extraction) = Self::of_pages([Ok::<_, Infallible>(text)]);
+        extraction
     }
 
     /// The pages of `texts` up to [`MAX_PAGES`] pages and [`MAX_TEXT_BYTES`] in
@@ -137,42 +127,14 @@ impl Extraction {
     /// This extraction with its text held to [`MAX_TEXT_BYTES`] and its pages to
     /// [`MAX_PAGES`], whatever the worker sent.
     pub(crate) fn capped(self) -> Self {
-        match self {
-            Self::Text { text, .. } if text.len() > MAX_TEXT_BYTES => Self::of_text(text),
-            Self::Pages { pages, truncated } => {
-                let Ok(capped) = Self::of_pages(pages.into_iter().map(Ok::<_, Infallible>));
-                capped.truncated_if(truncated)
-            }
-            extraction => extraction,
-        }
-    }
-
-    /// This extraction as a daemon that transcribes no page indexes it: the pages
-    /// that have text joined into one, and a file whose pages have none skipped
-    /// as [`SkipReason::NoTextLayer`].
-    pub fn with_pages_joined(self) -> Self {
         let Self::Pages { pages, truncated } = self else {
             return self;
         };
-        let texts: Vec<&str> = pages
-            .iter()
-            .map(|page| page.trim())
-            .filter(|page| !page.is_empty())
-            .collect();
-        if texts.is_empty() {
-            return Self::Skipped {
-                reason: SkipReason::NoTextLayer,
-            };
+        let Ok(mut capped) = Self::of_pages(pages.into_iter().map(Ok::<_, Infallible>));
+        if let Self::Pages { truncated: cut, .. } = &mut capped {
+            *cut |= truncated;
         }
-        Self::of_text(texts.join(PAGE_BREAK)).truncated_if(truncated)
-    }
-
-    /// This extraction, marked truncated when `source_was_cut`.
-    fn truncated_if(mut self, source_was_cut: bool) -> Self {
-        if let Self::Text { truncated, .. } | Self::Pages { truncated, .. } = &mut self {
-            *truncated |= source_was_cut;
-        }
-        self
+        capped
     }
 }
 
@@ -223,7 +185,7 @@ pub enum SkipReason {
     NotDecodable,
     #[error("needs a password")]
     PasswordProtected,
-    /// Every page is an image, and no page was transcribed.
+    /// No page has text, and no page was transcribed.
     #[error("no text layer")]
     NoTextLayer,
     #[error("cannot be read: {message}")]
@@ -307,16 +269,12 @@ mod tests {
             FromWorker::Ready,
             FromWorker::Reply {
                 id: 0,
-                extraction: Extraction::Text {
-                    text: "# Title\n\nBody with a \u{1} control, a tab\tand \u{2028} a separator."
-                        .into(),
-                    truncated: true,
-                },
-            },
-            FromWorker::Reply {
-                id: 0,
                 extraction: Extraction::Pages {
-                    pages: vec!["# Page one\n\nBody.".into(), String::new()],
+                    pages: vec![
+                        "# Title\n\nBody with a \u{1} control, a tab\tand \u{2028} a separator."
+                            .into(),
+                        String::new(),
+                    ],
                     truncated: true,
                 },
             },
@@ -344,7 +302,7 @@ mod tests {
     fn the_longest_reply_fits_the_reply_line_however_it_escapes() {
         let text = FromWorker::Reply {
             id: u64::MAX,
-            extraction: Extraction::of_text("\u{1}".repeat(MAX_TEXT_BYTES + 1)),
+            extraction: Extraction::of_one_page("\u{1}".repeat(MAX_TEXT_BYTES + 1)),
         };
         let texts = (0..=MAX_PAGES).map(|_| Ok::<_, Infallible>("\u{1}".repeat(1024)));
         let Ok(extraction) = Extraction::of_pages(texts);
