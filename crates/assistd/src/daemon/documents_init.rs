@@ -1,12 +1,15 @@
 //! Document indexing for the daemon: the extraction worker runs under supervision
-//! from the daemon's own binary, sandboxed over the index roots, and its readiness
-//! is published whenever it changes.
+//! from the daemon's own binary, sandboxed over the index roots, its readiness is
+//! published whenever it changes, and passes over the roots feed it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_config::Config;
-use assistd_core::{AppState, Component, DocumentsUnavailable, spawn_supervised};
+use assistd_core::{
+    AppState, Component, DocumentsUnavailable, IndexDeps, IndexPasses, remove_dropped_roots,
+    spawn_supervised,
+};
 use assistd_documents::{Extractor, WorkerCommand, supervise};
 use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_tools::{SandboxInfo, ToolsDisabled};
@@ -20,28 +23,31 @@ use super::SELF_EXE;
 /// The hidden subcommand the worker runs as.
 const WORKER_SUBCOMMAND: &str = "extract-worker";
 
-/// What starting the extraction worker needs.
+/// What document indexing starts with while `documents.enabled`.
 pub(super) struct DocumentsStartup {
-    command: WorkerCommand,
+    /// `documents.roots`; a stored root not among them is removed.
+    roots: Vec<PathBuf>,
+    /// The worker's command and the passes, or none when indexing is unavailable.
+    indexing: Option<(WorkerCommand, IndexPasses)>,
 }
 
-/// The background task that runs the extraction worker, or none when
-/// document indexing is unavailable.
+/// The background task that runs the extraction worker and the index passes, or
+/// none when document indexing is off.
 pub(super) struct DocumentsService {
     task: Option<JoinHandle<()>>,
 }
 
 impl DocumentsStartup {
-    /// Run the worker until `shutdown` flips.
+    /// Run the worker and the passes until `shutdown` flips.
     pub(super) fn spawn(
         self,
         state: Arc<AppState>,
         shutdown: watch::Receiver<bool>,
     ) -> DocumentsService {
         let task = spawn_supervised(
-            "extract_worker",
+            "document_indexing",
             Component::Documents,
-            run(self.command, state, shutdown),
+            run(self, state, shutdown),
         );
         DocumentsService { task: Some(task) }
     }
@@ -52,49 +58,73 @@ impl DocumentsService {
         Self { task: None }
     }
 
-    /// Wait for the worker to stop. Its shutdown stage must already have flipped.
+    /// Wait for the worker and the pass under way to stop. Their shutdown stage
+    /// must already have flipped, and the memory database must still be open.
     pub(super) async fn shutdown(self) {
         if let Some(task) = self.task
             && let Err(e) = task.await
         {
-            tracing::error!("extraction worker task failed: {e}");
+            tracing::error!("document indexing task failed: {e}");
         }
     }
 }
 
-/// The extractor requests see from startup and, when a worker can run in
-/// `sandbox`, what starting it needs.
+/// The extractor requests see from startup and, while `documents.enabled`, what
+/// document indexing starts with in `sandbox`.
 pub(super) fn prepare(
     config: &Config,
-    sandbox: Result<&SandboxInfo, &ToolsDisabled>,
+    sandbox: Result<&Arc<SandboxInfo>, &ToolsDisabled>,
 ) -> (Arc<Extractor>, Option<DocumentsStartup>) {
-    let command = assistd_core::extract_worker_command(
+    let startup = |indexing| DocumentsStartup {
+        roots: config
+            .documents
+            .roots
+            .iter()
+            .map(|root| root.as_path().to_path_buf())
+            .collect(),
+        indexing,
+    };
+    let indexing = assistd_core::document_indexing(
         &config.documents,
         sandbox,
         Path::new(SELF_EXE),
         WORKER_SUBCOMMAND,
     );
-    match command {
-        Ok(command) => (
+    match indexing {
+        Ok(indexing) => (
             Arc::new(Extractor::starting()),
-            Some(DocumentsStartup { command }),
+            Some(startup(Some(indexing))),
         ),
-        Err(reason) => {
-            match reason {
-                DocumentsUnavailable::Disabled => info!("document indexing: {reason}"),
-                _ => warn!("document indexing is unavailable: {reason}"),
-            }
+        Err(reason @ DocumentsUnavailable::Disabled) => {
+            info!("document indexing: {reason}");
             (Arc::new(Extractor::unavailable(reason.to_string())), None)
+        }
+        Err(reason) => {
+            warn!("document indexing is unavailable: {reason}");
+            (
+                Arc::new(Extractor::unavailable(reason.to_string())),
+                Some(startup(None)),
+            )
         }
     }
 }
 
-async fn run(command: WorkerCommand, state: Arc<AppState>, shutdown: watch::Receiver<bool>) {
+async fn run(startup: DocumentsStartup, state: Arc<AppState>, shutdown: watch::Receiver<bool>) {
+    remove_dropped_roots(state.memory.semantic.as_ref(), &startup.roots).await;
+    let Some((worker, passes)) = startup.indexing else {
+        return;
+    };
     let extractor = &state.subsystems.documents;
     let changes = extractor.subscribe_readiness();
+    let deps = IndexDeps {
+        store: Arc::clone(&state.memory.semantic),
+        extractor: Arc::clone(extractor),
+        embed_wake: Arc::clone(&state.memory.embed_wake),
+    };
     tokio::join!(
-        supervise(command, Arc::clone(extractor), shutdown.clone()),
-        publish_changes(&state, changes, shutdown),
+        supervise(worker, Arc::clone(extractor), shutdown.clone()),
+        publish_changes(&state, changes, shutdown.clone()),
+        passes.run(deps, &state.subsystems.document_index, shutdown),
     );
 }
 

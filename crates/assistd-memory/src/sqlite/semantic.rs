@@ -316,16 +316,20 @@ impl SemanticStore for SqliteSemanticStore {
             .await
     }
 
-    async fn document_unchanged(
+    async fn changed_documents(
         &self,
         pass: IndexPass,
-        path: &Path,
-        stamp: FileStamp,
-    ) -> Result<bool> {
-        let path = path.to_path_buf();
+        files: Vec<(PathBuf, FileStamp)>,
+    ) -> Result<Vec<(PathBuf, FileStamp)>> {
         self.handle
-            .write("document_unchanged", move |tx| {
-                documents::mark_seen_if_unchanged(tx, pass, &path, stamp)
+            .write("changed_documents", move |tx| {
+                let mut changed = Vec::new();
+                for (path, stamp) in files {
+                    if !documents::mark_seen_if_unchanged(tx, pass, &path, stamp)? {
+                        changed.push((path, stamp));
+                    }
+                }
+                Ok(changed)
             })
             .await
     }
@@ -361,11 +365,33 @@ impl SemanticStore for SqliteSemanticStore {
             .await
     }
 
+    async fn index_roots(&self) -> Result<Vec<PathBuf>> {
+        self.handle
+            .read("index_roots", |c| {
+                c.prepare_cached("SELECT path FROM index_roots ORDER BY id")?
+                    .query_map([], |r| Ok(PathBuf::from(OsString::from_vec(r.get(0)?))))?
+                    .collect()
+            })
+            .await
+    }
+
     async fn remove_index_root(&self, root: &Path) -> Result<u64> {
         let root = root.to_path_buf();
         self.handle
             .write("remove_index_root", move |tx| {
                 documents::remove_root(tx, &root)
+            })
+            .await
+    }
+
+    async fn count_document_chunks(&self) -> Result<u64> {
+        self.handle
+            .read("count_document_chunks", |c| {
+                c.query_row(
+                    "SELECT count(*) FROM chunks WHERE document_id IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )
             })
             .await
     }

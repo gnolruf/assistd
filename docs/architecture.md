@@ -60,7 +60,7 @@ flowchart TB
 | `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | every other `assistd-*` crate                                                    |
 | `assistd-chat`   | The `assistd chat` terminal window and the `assistd settings` panel, a client that only reads and writes the socket. | `config`, `ipc`, `utils`                                                         |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
-| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
+| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, document index passes, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-documents` | Document text extraction and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
@@ -774,6 +774,42 @@ is killed, the file is skipped (or the page failed) as timed out, and the worker
 `RestartPolicy` backoff, as it does when it dies. The daemon reads no line
 longer than the largest reply can be, so a compromised worker cannot grow
 the daemon's memory.
+
+### Document index passes (`assistd-core`)
+
+A pass brings the index in step with one root of `documents.roots`. It walks
+the root with the `ignore` crate, asks the store which of the files it found
+have a changed stamp, sends those to the extraction worker one at a time,
+stores each text, wakes the embedding worker, and finishes by removing the
+root's documents it did not see. Passes run over every root in turn, one at a
+time: once the embedder is ready after daemon start, which is also when a
+changed `[documents]` takes effect, and again whenever `DocumentIndex` is
+asked for one. A stored root that `documents.roots` no longer lists is
+removed with its documents at start.
+
+The walk leaves out hidden files and directories, whatever a `.gitignore` or
+`.ignore` at or below the root names (in a git repository or not), whatever a
+`documents.exclude` pattern matches, symlinks, anything that is not a regular
+file, files over `documents.max_file_mb`, and every file the path guards call
+a sensitive read, so the index never holds a file `cat` would ask about
+first. Stamps are checked 256 files to a store transaction, so a pass over a
+large unchanged root holds the database's only writer briefly and seldom.
+
+A pass removes documents only when it has seen the whole root. A root that is
+missing, cannot be listed, or is empty, as the mount point of an unmounted
+drive is, is skipped before its pass begins. A pass that could not list part
+of the root, that shutdown interrupted, or whose worker became unavailable
+ends without removing anything, and so does one whose root has gone by the
+time the walk ends. A directory the daemon may not read does not count as
+unlisted; it is a skipped file. When the worker exits over a file it is
+restarted and asked again, and a file it exits over twice is skipped, so one
+file that crashes the extractor cannot stop the pass.
+
+The stored documents are held to 500,000 chunks (`MAX_DOCUMENT_CHUNKS`), where
+one search scans about 410 MB of vectors in about 100 ms. Once a pass counts
+that many it stores no more files and reports them as skipped because the
+index is full. Each pass leaves its counts in memory, per root: files
+indexed, unchanged, removed, and skipped by reason.
 
 ### Voice (`assistd-voice`)
 

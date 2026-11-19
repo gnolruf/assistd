@@ -94,13 +94,12 @@ impl SemanticStore for FixedHits {
     async fn begin_index_pass(&self, root: &Path) -> assistd_memory::Result<IndexPass> {
         NoSemanticStore.begin_index_pass(root).await
     }
-    async fn document_unchanged(
+    async fn changed_documents(
         &self,
         pass: IndexPass,
-        path: &Path,
-        stamp: FileStamp,
-    ) -> assistd_memory::Result<bool> {
-        NoSemanticStore.document_unchanged(pass, path, stamp).await
+        files: Vec<(PathBuf, FileStamp)>,
+    ) -> assistd_memory::Result<Vec<(PathBuf, FileStamp)>> {
+        NoSemanticStore.changed_documents(pass, files).await
     }
     async fn index_document(
         &self,
@@ -119,8 +118,14 @@ impl SemanticStore for FixedHits {
     async fn remove_document(&self, path: &Path) -> assistd_memory::Result<bool> {
         NoSemanticStore.remove_document(path).await
     }
+    async fn index_roots(&self) -> assistd_memory::Result<Vec<PathBuf>> {
+        NoSemanticStore.index_roots().await
+    }
     async fn remove_index_root(&self, root: &Path) -> assistd_memory::Result<u64> {
         NoSemanticStore.remove_index_root(root).await
+    }
+    async fn count_document_chunks(&self) -> assistd_memory::Result<u64> {
+        NoSemanticStore.count_document_chunks().await
     }
 }
 

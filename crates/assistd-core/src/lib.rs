@@ -30,7 +30,10 @@ pub use build_tools::{
     probe_tool_sandbox,
 };
 pub use bus::{BusSubscription, ClientGone, EventBus, EventSink};
-pub use documents::{DocumentsUnavailable, extract_worker_command};
+pub use documents::{
+    DocumentIndex, DocumentsUnavailable, IndexDeps, IndexPasses, MAX_DOCUMENT_CHUNKS, PassCounts,
+    PassEnd, RootPass, SkipCause, document_indexing, remove_dropped_roots,
+};
 pub use recovery::{
     Component, StatusSeverity, drain_join_set, install_panic_hook, spawn_supervised,
 };

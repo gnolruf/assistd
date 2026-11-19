@@ -21,8 +21,8 @@ pub struct DocumentsConfig {
     /// `~/`. With symlinks followed, none may be `/`, be or sit under another, or hold
     /// or sit under assistd's config, data, state or cache directory. A missing one is skipped.
     pub roots: Vec<AbsoluteDir>,
-    /// Glob patterns matched against a file's path relative to its root; a
-    /// file one matches is not indexed.
+    /// Patterns in `.gitignore` syntax, matched against a path relative to its
+    /// root; a file or directory one matches is not indexed.
     pub exclude: Vec<String>,
     /// Largest file indexed, in MB of 1024 × 1024 bytes; a larger one is
     /// skipped.

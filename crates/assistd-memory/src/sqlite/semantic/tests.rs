@@ -335,29 +335,29 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
     embed_chunk(&store, detail, &unit_vec(0.1)).await;
 
     let second = store.begin_index_pass(root).await.unwrap();
-    assert!(
-        store
-            .document_unchanged(second, &plan, STAMP)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !store
-            .document_unchanged(second, &plan, touched)
-            .await
-            .unwrap()
-    );
+    let never_indexed = root.join("new.md");
+    let changed = store
+        .changed_documents(
+            second,
+            vec![
+                (plan.clone(), STAMP),
+                (never_indexed.clone(), STAMP),
+                (plan.clone(), touched),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed, [(never_indexed, STAMP), (plan.clone(), touched)]);
     let rewritten = store
         .index_document(second, plan.clone(), touched, section.clone())
         .await
         .unwrap();
     assert!(rewritten.is_empty(), "the same text must keep its chunks");
-    assert!(
-        store
-            .document_unchanged(second, &plan, touched)
-            .await
-            .unwrap()
-    );
+    let changed = store
+        .changed_documents(second, vec![(plan.clone(), touched)])
+        .await
+        .unwrap();
+    assert!(changed.is_empty(), "the stored stamp is the touched one");
     let edited = store
         .index_document(
             second,
@@ -383,7 +383,11 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
     assert_eq!(hit_ids, [intro], "the untouched chunk keeps its vector");
     assert_eq!(store.count_missing().await.unwrap().chunks, 1);
 
+    assert_eq!(store.index_roots().await.unwrap(), [root]);
+    assert_eq!(store.count_document_chunks().await.unwrap(), 2);
     assert_eq!(store.remove_index_root(root).await.unwrap(), 1);
+    assert!(store.index_roots().await.unwrap().is_empty());
+    assert_eq!(store.count_document_chunks().await.unwrap(), 0);
     assert_eq!(store.count_missing().await.unwrap().chunks, 0);
     assert!(store.begin_index_pass(root).await.unwrap() != second);
 }

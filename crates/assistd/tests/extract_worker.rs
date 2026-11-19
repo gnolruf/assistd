@@ -1,12 +1,14 @@
-//! The extraction worker in its sandbox: what it reads and what it cannot.
-//! Returns early when the bwrap sandbox cannot start.
+//! The extraction worker in its sandbox: what it reads, what it cannot, and an index
+//! pass through it. Returns early when the bwrap sandbox cannot start.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_config::DocumentsConfig;
+use assistd_core::{DocumentIndex, IndexDeps, PassEnd, RootPass, SkipCause};
 use assistd_documents::{Extraction, Extractor, SkipReason, supervise};
+use assistd_memory::{SemanticStore, SqliteHandle, SqliteSemanticStore};
 use assistd_tools::{
     Protected, SandboxInfo, SandboxRequest, SharedDirs, ToolSandbox, probe_sandbox,
 };
@@ -48,7 +50,7 @@ async fn the_worker_reads_files_under_its_roots_and_none_outside_them() {
         roots: vec![root.path().to_str().expect("utf-8").parse().expect("root")],
         ..DocumentsConfig::default()
     };
-    let command = assistd_core::extract_worker_command(
+    let (command, _passes) = assistd_core::document_indexing(
         &documents,
         Ok(&sandbox),
         Path::new(WORKER),
@@ -93,5 +95,97 @@ async fn the_worker_reads_files_under_its_roots_and_none_outside_them() {
     }
 
     stop.send_replace(true);
+    supervisor.await.expect("supervisor stops");
+}
+
+#[tokio::test]
+async fn a_pass_indexes_changed_files_through_the_worker_and_drops_deleted_ones() {
+    let Some(sandbox) = bwrap_sandbox() else {
+        return;
+    };
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("notes");
+    std::fs::create_dir(&root).expect("index root");
+    std::fs::write(root.join("plan.md"), "# Plan\n\nfirst draft\n").expect("document");
+    std::fs::write(root.join("old.md"), "to be deleted\n").expect("document");
+    std::fs::write(root.join("image.png"), b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").expect("binary");
+    let documents = DocumentsConfig {
+        enabled: true,
+        roots: vec![root.to_str().expect("utf-8").parse().expect("root")],
+        ..DocumentsConfig::default()
+    };
+    let (command, passes) = assistd_core::document_indexing(
+        &documents,
+        Ok(&sandbox),
+        Path::new(WORKER),
+        WORKER_SUBCOMMAND,
+    )
+    .expect("document indexing");
+    let handle = SqliteHandle::open(&temp.path().join("memory.db"))
+        .await
+        .expect("database");
+    let store = Arc::new(SqliteSemanticStore::new(handle));
+    let extractor = Arc::new(Extractor::starting());
+    let index = Arc::new(DocumentIndex::default());
+    let (stop, shutdown) = watch::channel(false);
+    let supervisor = tokio::spawn(supervise(command, Arc::clone(&extractor), shutdown.clone()));
+    let deps = IndexDeps {
+        store: store.clone(),
+        extractor,
+        embed_wake: Arc::default(),
+    };
+    let runner = {
+        let index = Arc::clone(&index);
+        tokio::spawn(async move { passes.run(deps, &index, shutdown).await })
+    };
+    let pass_after = |earlier: Option<RootPass>| {
+        let index = Arc::clone(&index);
+        async move {
+            index.request_pass();
+            let ended = async {
+                loop {
+                    match index.last_passes().pop() {
+                        Some(last) if Some(&last) != earlier.as_ref() => return last,
+                        _ => tokio::time::sleep(Duration::from_millis(20)).await,
+                    }
+                }
+            };
+            tokio::time::timeout(STARTUP_LIMIT, ended)
+                .await
+                .expect("the pass ends")
+        }
+    };
+
+    let first = pass_after(None).await;
+    assert_eq!(first.end, PassEnd::Finished);
+    assert_eq!((first.counts.indexed, first.counts.unchanged), (2, 0));
+    assert_eq!(first.counts.skipped.get(&SkipCause::Unsupported), Some(&1));
+    assert_eq!(store.count_document_chunks().await.unwrap(), 2);
+
+    std::fs::remove_file(root.join("old.md")).expect("deleted");
+    std::fs::write(root.join("plan.md"), "# Plan\n\nsecond draft, longer\n").expect("edited");
+    std::fs::write(root.join("new.md"), "a new note\n").expect("added");
+    let second = pass_after(Some(first)).await;
+    assert_eq!(second.end, PassEnd::Finished);
+    assert_eq!(
+        (
+            second.counts.indexed,
+            second.counts.unchanged,
+            second.counts.removed
+        ),
+        (2, 0, 1)
+    );
+    let third = pass_after(Some(second)).await;
+    assert_eq!(
+        (
+            third.counts.indexed,
+            third.counts.unchanged,
+            third.counts.removed
+        ),
+        (0, 2, 0)
+    );
+
+    stop.send_replace(true);
+    runner.await.expect("passes stop");
     supervisor.await.expect("supervisor stops");
 }

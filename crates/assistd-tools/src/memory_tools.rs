@@ -647,13 +647,12 @@ mod tests {
         async fn begin_index_pass(&self, root: &Path) -> Result<IndexPass, MemoryError> {
             NoSemanticStore.begin_index_pass(root).await
         }
-        async fn document_unchanged(
+        async fn changed_documents(
             &self,
             pass: IndexPass,
-            path: &Path,
-            stamp: FileStamp,
-        ) -> Result<bool, MemoryError> {
-            NoSemanticStore.document_unchanged(pass, path, stamp).await
+            files: Vec<(PathBuf, FileStamp)>,
+        ) -> Result<Vec<(PathBuf, FileStamp)>, MemoryError> {
+            NoSemanticStore.changed_documents(pass, files).await
         }
         async fn index_document(
             &self,
@@ -672,8 +671,14 @@ mod tests {
         async fn remove_document(&self, path: &Path) -> Result<bool, MemoryError> {
             NoSemanticStore.remove_document(path).await
         }
+        async fn index_roots(&self) -> Result<Vec<PathBuf>, MemoryError> {
+            NoSemanticStore.index_roots().await
+        }
         async fn remove_index_root(&self, root: &Path) -> Result<u64, MemoryError> {
             NoSemanticStore.remove_index_root(root).await
+        }
+        async fn count_document_chunks(&self) -> Result<u64, MemoryError> {
+            NoSemanticStore.count_document_chunks().await
         }
     }
 
