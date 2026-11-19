@@ -153,14 +153,13 @@ CREATE TABLE index_roots (
     pass INTEGER NOT NULL CHECK (pass >= 1)
 ) STRICT;
 
--- An indexed file: its text as indexed, the file's stamp and content hash, the
--- chunking it was cut with, and the root's pass that last saw it. `chunker` is
--- 0 character windows, 1 packed paragraphs.
+-- An indexed file: the file's stamp, the hash of its pages in order, the chunking
+-- it was cut with, and the root's pass that last saw it. `chunker` is 0 character
+-- windows, 1 packed paragraphs.
 CREATE TABLE documents (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     root_id       INTEGER NOT NULL REFERENCES index_roots(id) ON DELETE CASCADE,
     path          BLOB NOT NULL UNIQUE CHECK (length(path) > 0),
-    content       TEXT NOT NULL,
     content_hash  BLOB NOT NULL CHECK (length(content_hash) = 32),
     mtime_ns      INTEGER NOT NULL,
     size          INTEGER NOT NULL CHECK (size >= 0),
@@ -172,17 +171,30 @@ CREATE TABLE documents (
 ) STRICT;
 CREATE INDEX idx_documents_root ON documents(root_id);
 
--- A byte range into the content of the one message or document that owns it.
+-- One page of a document's text as indexed. `page` is its position in the file,
+-- from 0 and without gaps; a page with no text has empty `content`.
+CREATE TABLE document_pages (
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    page        INTEGER NOT NULL CHECK (page >= 0),
+    content     TEXT NOT NULL,
+    PRIMARY KEY (document_id, page)
+) STRICT;
+
+-- A byte range into the content of the one message or document page that owns it.
 CREATE TABLE chunks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id  INTEGER REFERENCES messages(id) ON DELETE CASCADE,
-    document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
+    document_id INTEGER,
+    page        INTEGER,
     byte_start  INTEGER NOT NULL,
     byte_end    INTEGER NOT NULL,
     CHECK (byte_start >= 0 AND byte_end > byte_start),
     CHECK ((message_id IS NULL) <> (document_id IS NULL)),
+    CHECK ((document_id IS NULL) = (page IS NULL)),
     UNIQUE (message_id, byte_start),
-    UNIQUE (document_id, byte_start)
+    UNIQUE (document_id, page, byte_start),
+    FOREIGN KEY (document_id, page)
+        REFERENCES document_pages(document_id, page) ON DELETE CASCADE
 ) STRICT;
 
 -- In the three embedding tables a NULL vector marks a row the model could not embed,

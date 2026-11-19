@@ -79,9 +79,10 @@ const MESSAGE_CHUNKS_MISSING_EMBEDDING: &str = "
     WHERE NOT EXISTS (SELECT 1 FROM message_chunk_embeddings e WHERE e.chunk_id = cc.id)";
 
 /// The document chunks `cc` neither embedded nor marked unembeddable, each with its
-/// document `src`.
+/// page `src`.
 const DOCUMENT_CHUNKS_MISSING_EMBEDDING: &str = "
-    FROM chunks cc JOIN documents src ON src.id = cc.document_id
+    FROM chunks cc
+    JOIN document_pages src ON src.document_id = cc.document_id AND src.page = cc.page
     WHERE NOT EXISTS (SELECT 1 FROM document_chunk_embeddings e WHERE e.chunk_id = cc.id)";
 
 /// A message chunk row's columns, read by [`message_context_chunk`]: chunk id, message
@@ -95,11 +96,18 @@ const MESSAGE_CHUNK_COLUMNS: &str = "
                 cc.byte_end - cc.byte_start) AS TEXT)";
 
 /// A document chunk row's columns, read by [`document_context_chunk`]: chunk id,
-/// document id, path, byte range, index time, chunk text.
+/// document id, path, page, page count, byte range, index time, chunk text.
 const DOCUMENT_CHUNK_COLUMNS: &str = "
-    cc.id, d.id, d.path, cc.byte_start, cc.byte_end, d.indexed_at,
-    CAST(substr(CAST(d.content AS BLOB), cc.byte_start + 1,
+    cc.id, d.id, d.path, cc.page,
+    (SELECT count(*) FROM document_pages n WHERE n.document_id = d.id),
+    cc.byte_start, cc.byte_end, d.indexed_at,
+    CAST(substr(CAST(p.content AS BLOB), cc.byte_start + 1,
                 cc.byte_end - cc.byte_start) AS TEXT)";
+
+/// Joins a document chunk `cc` to its document `d` and its page `p`.
+const DOCUMENT_CHUNK_OWNERS: &str = "
+    JOIN documents d ON d.id = cc.document_id
+    JOIN document_pages p ON p.document_id = cc.document_id AND p.page = cc.page";
 
 /// Characters of an untitled session's opening user message kept in its label.
 const SESSION_LABEL_CHARS: usize = 60;
@@ -349,11 +357,11 @@ impl SemanticStore for SqliteSemanticStore {
         pass: IndexPass,
         path: PathBuf,
         stamp: FileStamp,
-        content: String,
+        pages: Vec<String>,
     ) -> Result<Vec<ChunkId>> {
         self.handle
             .write("index_document", move |tx| {
-                documents::store_document(tx, pass, &path, stamp, &content)
+                documents::store_document(tx, pass, &path, stamp, &pages)
             })
             .await
     }
@@ -409,26 +417,34 @@ impl SemanticStore for SqliteSemanticStore {
     async fn document_text(
         &self,
         path: &Path,
+        page: usize,
         bytes: Range<usize>,
     ) -> Result<Option<DocumentText>> {
         let path = path.to_path_buf();
         self.handle
             .read("document_text", move |c| {
                 c.prepare_cached(
-                    "SELECT substr(CAST(content AS BLOB), ?2 + 1, ?3),
-                            length(CAST(content AS BLOB)), indexed_at
-                     FROM documents WHERE path = ?1",
+                    "SELECT substr(CAST(p.content AS BLOB), ?3 + 1, ?4),
+                            ifnull(length(CAST(p.content AS BLOB)), 0),
+                            (SELECT count(*) FROM document_pages n WHERE n.document_id = d.id),
+                            d.indexed_at
+                     FROM documents d
+                     LEFT JOIN document_pages p ON p.document_id = d.id AND p.page = ?2
+                     WHERE d.path = ?1",
                 )?
                 .query_row(
-                    rusqlite::params![path.as_os_str().as_bytes(), bytes.start, bytes.len()],
+                    rusqlite::params![path.as_os_str().as_bytes(), page, bytes.start, bytes.len()],
                     |row| {
-                        let (skipped, text) = whole_characters(row.get_ref(0)?.as_blob()?);
+                        let within = row.get_ref(0)?.as_blob_or_null()?.unwrap_or_default();
+                        let (skipped, text) = whole_characters(within);
                         let start = bytes.start + skipped;
                         Ok(DocumentText {
                             text: text.to_owned(),
+                            page,
+                            page_count: row.get(2)?,
                             bytes: start..start + text.len(),
-                            total_bytes: row.get(1)?,
-                            indexed_at: timestamp_at(row, 2)?,
+                            page_bytes: row.get(1)?,
+                            indexed_at: timestamp_at(row, 3)?,
                         })
                     },
                 )
@@ -614,8 +630,7 @@ fn nearest_document_chunks(
     )?;
     let select = format!(
         "SELECT {DOCUMENT_CHUNK_COLUMNS}
-         FROM chunks cc
-         JOIN documents d ON d.id = cc.document_id
+         FROM chunks cc {DOCUMENT_CHUNK_OWNERS}
          WHERE cc.id IN (SELECT value FROM json_each(?1))"
     );
     hydrate_in_rank_order(conn, &select, ranked, document_chunk_hit, set_similarity)
@@ -673,8 +688,11 @@ fn adjacent_chunk(
     match locator {
         ChunkLocator::Message { message_id, .. } => adjacent_message_chunk(conn, *message_id, side),
         ChunkLocator::Document {
-            document_id, bytes, ..
-        } => adjacent_document_chunk(conn, *document_id, bytes.start, side),
+            document_id,
+            page,
+            bytes,
+            ..
+        } => adjacent_document_chunk(conn, *document_id, (*page, bytes.start), side),
     }
 }
 
@@ -711,25 +729,25 @@ fn adjacent_message_chunk(
         .optional()
 }
 
-/// The chunk of `document` starting nearest `byte_start` on `side`.
+/// The chunk of `document` starting nearest `start`, a page and a byte of it, on
+/// `side`, on that page or another.
 fn adjacent_document_chunk(
     conn: &rusqlite::Connection,
     document: DocumentId,
-    byte_start: usize,
+    start: (usize, usize),
     side: Side,
 ) -> rusqlite::Result<Option<ContextChunk>> {
-    let (byte_test, order) = side.test_and_order();
+    let (start_test, order) = side.test_and_order();
     let sql = format!(
         "SELECT {DOCUMENT_CHUNK_COLUMNS}
-         FROM chunks cc
-         JOIN documents d ON d.id = cc.document_id
-         WHERE cc.document_id = ?1 AND cc.byte_start {byte_test} ?2
-         ORDER BY cc.byte_start {order}
+         FROM chunks cc {DOCUMENT_CHUNK_OWNERS}
+         WHERE cc.document_id = ?1 AND (cc.page, cc.byte_start) {start_test} (?2, ?3)
+         ORDER BY cc.page {order}, cc.byte_start {order}
          LIMIT 1"
     );
     conn.prepare_cached(&sql)?
         .query_row(
-            rusqlite::params![document, byte_start],
+            rusqlite::params![document, start.0, start.1],
             document_context_chunk,
         )
         .optional()
@@ -776,10 +794,12 @@ fn document_context_chunk(row: &Row<'_>) -> rusqlite::Result<ContextChunk> {
         locator: ChunkLocator::Document {
             document_id: row.get(1)?,
             path: PathBuf::from(OsString::from_vec(row.get(2)?)),
-            bytes: row.get(3)?..row.get(4)?,
-            indexed_at: timestamp_at(row, 5)?,
+            page: row.get(3)?,
+            page_count: row.get(4)?,
+            bytes: row.get(5)?..row.get(6)?,
+            indexed_at: timestamp_at(row, 7)?,
         },
-        text: row.get(6)?,
+        text: row.get(8)?,
     })
 }
 

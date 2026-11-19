@@ -381,10 +381,10 @@ mod tests {
             pass: IndexPass,
             path: PathBuf,
             stamp: FileStamp,
-            content: String,
+            pages: Vec<String>,
         ) -> MemoryResult<Vec<ChunkId>> {
             NoSemanticStore
-                .index_document(pass, path, stamp, content)
+                .index_document(pass, path, stamp, pages)
                 .await
         }
         async fn finish_index_pass(&self, pass: IndexPass) -> MemoryResult<u64> {
@@ -405,9 +405,10 @@ mod tests {
         async fn document_text(
             &self,
             path: &Path,
+            page: usize,
             bytes: Range<usize>,
         ) -> MemoryResult<Option<DocumentText>> {
-            NoSemanticStore.document_text(path, bytes).await
+            NoSemanticStore.document_text(path, page, bytes).await
         }
     }
 

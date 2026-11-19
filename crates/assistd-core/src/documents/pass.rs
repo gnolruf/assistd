@@ -174,8 +174,8 @@ impl RunningPass<'_> {
 
     /// Extract and store the file at `path`, returning how many chunks that added.
     async fn index_file(&mut self, path: PathBuf, stamp: FileStamp) -> Result<u64, PassStopped> {
-        let text = match self.extract(&path).await? {
-            Ok(text) => text,
+        let pages = match self.extract(&path).await? {
+            Ok(pages) => pages,
             Err(reason) => {
                 debug!(target: "assistd::documents", "skipped {}: {reason}", path.display());
                 self.counts.skip(SkipCause::from(&reason));
@@ -183,7 +183,7 @@ impl RunningPass<'_> {
             }
         };
         let store = &self.deps.store;
-        let added = store.index_document(self.pass, path, stamp, text).await?;
+        let added = store.index_document(self.pass, path, stamp, pages).await?;
         self.counts.indexed += 1;
         if !added.is_empty() {
             self.deps.embed_wake.notify_one();
@@ -191,16 +191,19 @@ impl RunningPass<'_> {
         Ok(added.len() as u64)
     }
 
-    /// The text of the file at `path`, or why it has none. A worker that exits is
-    /// waited for and asked again, and the file is skipped once the worker has
-    /// exited over it [`WORKER_EXITS_PER_FILE`] times.
-    async fn extract(&mut self, path: &Path) -> Result<Result<String, SkipReason>, PassStopped> {
+    /// The pages of the file at `path`, or why it is not indexed. A worker that
+    /// exits is waited for and asked again, and the file is skipped once the worker
+    /// has exited over it [`WORKER_EXITS_PER_FILE`] times.
+    async fn extract(
+        &mut self,
+        path: &Path,
+    ) -> Result<Result<Vec<String>, SkipReason>, PassStopped> {
         let mut worker_exits = 0;
         loop {
             self.worker_ready().await?;
             let extractor = &self.deps.extractor;
             match extractor.extract(path, self.max_file_bytes).await {
-                Ok(extraction) => return Ok(indexable_text(extraction)),
+                Ok(extraction) => return Ok(indexable_pages(extraction)),
                 Err(ExtractorError::NotReady(_)) => {}
                 Err(ExtractorError::Exited) => {
                     worker_exits += 1;
@@ -325,12 +328,15 @@ fn walk_in_batches(root: &IndexRoot, guards: &PathGuards, batches: &mpsc::Sender
     }
 }
 
-/// The text to store for `extraction`, its pages joined, or why there is none.
-fn indexable_text(extraction: Extraction) -> Result<String, SkipReason> {
-    match extraction.with_pages_joined() {
-        Extraction::Text { text, .. } => Ok(text),
-        Extraction::Skipped { reason } => Err(reason),
+/// The pages to store for `extraction`. A file none of whose pages has text is
+/// skipped as [`SkipReason::NoTextLayer`].
+fn indexable_pages(extraction: Extraction) -> Result<Vec<String>, SkipReason> {
+    match extraction {
+        Extraction::Pages { pages, .. } if pages.iter().any(|page| !page.trim().is_empty()) => {
+            Ok(pages)
+        }
         Extraction::Pages { .. } => Err(SkipReason::NoTextLayer),
+        Extraction::Skipped { reason } => Err(reason),
     }
 }
 
@@ -358,7 +364,7 @@ mod tests {
         let seeded = store.begin_index_pass(&root_dir).await.unwrap();
         for path in [&kept, &deleted] {
             let chunks = store
-                .index_document(seeded, path.clone(), stamp, "kept".into())
+                .index_document(seeded, path.clone(), stamp, vec!["kept".into()])
                 .await
                 .unwrap();
             assert_eq!(chunks.len(), 1);

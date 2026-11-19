@@ -64,6 +64,11 @@ impl Transcript {
     }
 }
 
+/// `text` as the pages of a file whose format has none.
+fn one_page(text: impl Into<String>) -> Vec<String> {
+    vec![text.into()]
+}
+
 /// 2-d unit vector at `angle` radians.
 fn unit_vec(angle: f32) -> Vec<f32> {
     vec![angle.cos(), angle.sin()]
@@ -238,18 +243,18 @@ async fn documents_and_messages_rank_apart_and_reindexing_replaces_document_chun
     let path = PathBuf::from("/notes/plan.md");
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
     let stale = store
-        .index_document(pass, path.clone(), STAMP, "draft".into())
+        .index_document(pass, path.clone(), STAMP, one_page("draft"))
         .await
         .unwrap();
     embed_chunk(&store, stale[0], &unit_vec(0.1)).await;
     let section = format!("{}{}", "intro ".repeat(90), "detail ".repeat(60));
     let fresh_chunks = store
-        .index_document(pass, path.clone(), STAMP, section.clone())
+        .index_document(pass, path.clone(), STAMP, one_page(&section))
         .await
         .unwrap();
     assert!(
         store
-            .index_document(pass, path.clone(), STAMP, section.clone())
+            .index_document(pass, path.clone(), STAMP, one_page(&section))
             .await
             .unwrap()
             .is_empty(),
@@ -282,13 +287,15 @@ async fn documents_and_messages_rank_apart_and_reindexing_replaces_document_chun
     assert_eq!(hit.chunk_id, detail);
     let ChunkLocator::Document {
         path: hit_path,
+        page,
+        page_count,
         bytes,
         ..
     } = &hit.locator
     else {
         panic!("a document search must hit documents");
     };
-    assert_eq!(hit_path, &path);
+    assert_eq!((hit_path, *page, *page_count), (&path, 0, 1));
     assert_eq!(hit.text, section[bytes.clone()]);
     let adjacent = store.adjacent_chunks(&hit.locator).await.unwrap();
     assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(intro));
@@ -304,24 +311,41 @@ async fn documents_and_messages_rank_apart_and_reindexing_replaces_document_chun
 }
 
 #[tokio::test]
-async fn document_text_narrows_a_byte_range_to_whole_characters() {
+async fn document_text_narrows_a_byte_range_of_one_page_to_whole_characters() {
     let (_handle, store, _temp) = fresh().await;
-    let path = PathBuf::from("/notes/menu.md");
+    let path = PathBuf::from("/notes/menu.pdf");
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let pages = vec!["café crème".to_string(), String::new(), "thé".to_string()];
     store
-        .index_document(pass, path.clone(), STAMP, "café crème".into())
+        .index_document(pass, path.clone(), STAMP, pages)
         .await
         .unwrap();
 
-    let inside = store.document_text(&path, 4..9).await.unwrap().unwrap();
+    let inside = store.document_text(&path, 0, 4..9).await.unwrap().unwrap();
     assert_eq!(
-        (inside.text.as_str(), inside.bytes, inside.total_bytes),
+        (inside.text.as_str(), inside.bytes, inside.page_bytes),
         (" cr", 5..8, 12),
         "the halves of é and è at either end must be left out"
     );
-    let past = store.document_text(&path, 40..50).await.unwrap().unwrap();
+    let past = store
+        .document_text(&path, 0, 40..50)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!((past.text.as_str(), past.bytes), ("", 40..40));
-    let unindexed = store.document_text(Path::new("/notes/other.md"), 0..9);
+    let last = store.document_text(&path, 2, 0..50).await.unwrap().unwrap();
+    assert_eq!(
+        (last.text.as_str(), last.page, last.page_count),
+        ("thé", 2, 3)
+    );
+    let textless = store.document_text(&path, 1, 0..50).await.unwrap().unwrap();
+    assert_eq!((textless.text.as_str(), textless.page_bytes), ("", 0));
+    let no_such_page = store.document_text(&path, 3, 0..50).await.unwrap().unwrap();
+    assert_eq!(
+        (no_such_page.text.as_str(), no_such_page.page_count),
+        ("", 3)
+    );
+    let unindexed = store.document_text(Path::new("/notes/other.md"), 0, 0..9);
     assert_eq!(unindexed.await.unwrap(), None);
 }
 
@@ -338,7 +362,7 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
 
     let first = store.begin_index_pass(root).await.unwrap();
     let indexed = store
-        .index_document(first, plan.clone(), STAMP, section.clone())
+        .index_document(first, plan.clone(), STAMP, one_page(&section))
         .await
         .unwrap();
     let [intro, detail] = indexed[..] else {
@@ -349,7 +373,7 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
             first,
             gone.clone(),
             STAMP,
-            "deleted before the next pass".into(),
+            one_page("deleted before the next pass"),
         )
         .await
         .unwrap();
@@ -372,7 +396,7 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
         .unwrap();
     assert_eq!(changed, [(never_indexed, STAMP), (plan.clone(), touched)]);
     let rewritten = store
-        .index_document(second, plan.clone(), touched, section.clone())
+        .index_document(second, plan.clone(), touched, one_page(&section))
         .await
         .unwrap();
     assert!(rewritten.is_empty(), "the same text must keep its chunks");
@@ -386,7 +410,7 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
             second,
             plan.clone(),
             touched,
-            section.replace("detail", "change"),
+            one_page(section.replace("detail", "change")),
         )
         .await
         .unwrap();
@@ -422,7 +446,12 @@ async fn a_document_chunk_keeps_its_vector_wherever_its_text_moves() {
     let [one, two, six] = ["# One\n\nalpha", "# Two\n\nbravo", "# Six\n\ndelta"];
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
     let stored = store
-        .index_document(pass, path.clone(), STAMP, [one, two, six].join("\n\n"))
+        .index_document(
+            pass,
+            path.clone(),
+            STAMP,
+            one_page([one, two, six].join("\n\n")),
+        )
         .await
         .unwrap();
     let [one_chunk, two_chunk, six_chunk] = stored[..] else {
@@ -435,14 +464,14 @@ async fn a_document_chunk_keeps_its_vector_wherever_its_text_moves() {
     let opening = "A new opening paragraph.";
     let prepended = [opening, one, two, six].join("\n\n");
     let added = store
-        .index_document(pass, path.clone(), STAMP, prepended)
+        .index_document(pass, path.clone(), STAMP, one_page(prepended))
         .await
         .unwrap();
     assert_eq!(added.len(), 1, "only the new paragraph is a new chunk");
 
     let swapped = [opening, two, one, six].join("\n\n");
     let added = store
-        .index_document(pass, path, STAMP, swapped)
+        .index_document(pass, path, STAMP, one_page(swapped))
         .await
         .unwrap();
     assert!(added.is_empty(), "sections trading places are not new text");
@@ -463,6 +492,67 @@ async fn a_document_chunk_keeps_its_vector_wherever_its_text_moves() {
     let adjacent = store.adjacent_chunks(&hit.locator).await.unwrap();
     assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(two_chunk));
     assert_eq!(adjacent.after.map(|chunk| chunk.chunk_id), Some(six_chunk));
+}
+
+#[tokio::test]
+async fn a_chunk_stays_on_its_page_and_keeps_its_vector_when_the_page_moves() {
+    let (_handle, store, _temp) = fresh().await;
+    let path = PathBuf::from("/notes/scan.pdf");
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let body = vec!["alpha".to_string(), String::new(), "bravo".to_string()];
+    let stored = store
+        .index_document(pass, path.clone(), STAMP, body.clone())
+        .await
+        .unwrap();
+    let [alpha, bravo] = stored[..] else {
+        panic!("two short pages must not share a chunk, got {stored:?}");
+    };
+    let missing = store.chunks_missing_embedding(ChunkSource::Document, None, 100);
+    assert_eq!(
+        missing.await.unwrap(),
+        [(alpha, "alpha".to_string()), (bravo, "bravo".to_string())]
+    );
+    embed_chunk(&store, alpha, &unit_vec(0.0)).await;
+    embed_chunk(&store, bravo, &unit_vec(1.0)).await;
+
+    let with_cover = [vec!["Cover".to_string()], body].concat();
+    let added = store
+        .index_document(pass, path, STAMP, with_cover)
+        .await
+        .unwrap();
+    let [cover] = added[..] else {
+        panic!("only the new page is new text, got {added:?}");
+    };
+    assert_eq!(
+        store.count_missing().await.unwrap().document_chunks,
+        1,
+        "every page that moved keeps its vectors"
+    );
+
+    let hits = store
+        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Documents)
+        .await
+        .unwrap();
+    let [hit] = &hits[..] else {
+        panic!("the document must hit once, got {hits:?}");
+    };
+    let ChunkLocator::Document {
+        page,
+        page_count,
+        bytes,
+        ..
+    } = &hit.locator
+    else {
+        panic!("a document search must hit documents");
+    };
+    assert_eq!(
+        (hit.chunk_id, *page, *page_count, bytes.clone()),
+        (alpha, 1, 4, 0..5),
+        "the page without text still counts"
+    );
+    let adjacent = store.adjacent_chunks(&hit.locator).await.unwrap();
+    assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(cover));
+    assert_eq!(adjacent.after.map(|chunk| chunk.chunk_id), Some(bravo));
 }
 
 #[tokio::test]
@@ -551,7 +641,12 @@ async fn missing_embedding_lists_only_unindexed_rows() {
     let first_bare = first[0];
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
     let document = store
-        .index_document(pass, PathBuf::from("/notes/plan.md"), STAMP, "draft".into())
+        .index_document(
+            pass,
+            PathBuf::from("/notes/plan.md"),
+            STAMP,
+            one_page("draft"),
+        )
         .await
         .unwrap();
     let (_, second) = transcript.append("z").await;

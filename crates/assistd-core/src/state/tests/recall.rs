@@ -109,10 +109,10 @@ impl SemanticStore for FixedHits {
         pass: IndexPass,
         path: PathBuf,
         stamp: FileStamp,
-        content: String,
+        pages: Vec<String>,
     ) -> assistd_memory::Result<Vec<ChunkId>> {
         NoSemanticStore
-            .index_document(pass, path, stamp, content)
+            .index_document(pass, path, stamp, pages)
             .await
     }
     async fn finish_index_pass(&self, pass: IndexPass) -> assistd_memory::Result<u64> {
@@ -133,9 +133,10 @@ impl SemanticStore for FixedHits {
     async fn document_text(
         &self,
         path: &Path,
+        page: usize,
         bytes: Range<usize>,
     ) -> assistd_memory::Result<Option<DocumentText>> {
-        NoSemanticStore.document_text(path, bytes).await
+        NoSemanticStore.document_text(path, page, bytes).await
     }
 }
 

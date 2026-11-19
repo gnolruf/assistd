@@ -16,7 +16,7 @@ use assistd_utils::text::collapse_whitespace;
 
 use crate::chain::Word;
 use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
-use crate::presentation::{PresentSpec, truncate_lines_bytes};
+use crate::presentation::{PresentSpec, count_lines, truncate_lines_bytes};
 
 const NAME: &str = "docs";
 
@@ -39,65 +39,178 @@ const READ_RESERVED_BYTES: usize = 1024;
 /// Lines of one result a read keeps free of document text, for the same three.
 const READ_RESERVED_LINES: usize = 3;
 
+/// Fewest lines a read has for document text: a page line and one line of the page.
+const MIN_READ_LINES: usize = 2;
+
 const INDEXED_DATE_FORMAT: &str = "%Y-%m-%d";
 
 const COUNT_FLAG: &str = "-n";
+
+const PAGE_FLAG: &str = "--page";
 
 const OFFSET_FLAG: &str = "--offset";
 
 const SEARCH_USAGE: &str = "docs search [-n N] <query...>";
 
-const READ_USAGE: &str = "docs read [--offset N] <path>";
+const READ_USAGE: &str = "docs read [--page P] [--offset N] <path>";
 
-const READ_HELP: &str = "usage: docs read [--offset N] <path>\n\
+const READ_HELP: &str = "usage: docs read [--page P] [--offset N] <path>\n\
     \n\
     Print the text stored for the indexed document at <path>, written as a \
     search hit gives it. For a PDF this is its extracted text, which `cat` \
     cannot show. Quote a path that has spaces.\n\
     \n\
-    Prints a header line, then the text from byte N (default 0), as much as \
-    fits one result. A note on stderr gives the bytes shown and the date the \
-    document was indexed, and, when more text follows, the command that \
-    continues from there. The text is the document as of that date; the file \
-    may have changed since.\n\
+    Prints a header line, then the text from byte N of page P, running on \
+    into the pages after it for as much as fits one result. A PDF's pages are \
+    numbered as in the file; any other document is one page. In a document \
+    of more than one page, each page's text follows a line naming it, \
+    `[page P of TOTAL]`, and a page with no text is that line alone. A note \
+    on stderr gives what was shown and the date the document was indexed, \
+    and, when more text follows, the command that continues from there. The \
+    text is the document as of that date; the file may have changed since.\n\
     \n\
     Options:\n  \
-      --offset N        start at byte N, as a search hit or the note gives it\n\
+      --page P          start at page P, counted from 1 (default 1)\n  \
+      --offset N        start at byte N of that page (default 0), as a search hit or the note gives it\n\
     \n\
     Exit 1 when the path is not an indexed document (read other files with \
-    `cat`) or N is past the end of the text; exit 2 on usage errors.\n";
+    `cat`), P is past the last page, or N is past the end of the page; exit \
+    2 on usage errors.\n";
 
 /// The document text one result of a read has room for.
-#[derive(Debug)]
-struct Page {
+#[derive(Debug, Clone, Copy)]
+struct ReadRoom {
     bytes: usize,
     lines: usize,
 }
 
-impl Page {
+impl ReadRoom {
     /// What is left of one result of `output` once [`READ_RESERVED_BYTES`] and
-    /// [`READ_RESERVED_LINES`] are set aside, and never less than half its bytes or one line.
+    /// [`READ_RESERVED_LINES`] are set aside, and never less than half its bytes or
+    /// [`MIN_READ_LINES`].
     fn within(output: &PresentSpec) -> Self {
         Self {
             bytes: output
                 .max_bytes
                 .saturating_sub(READ_RESERVED_BYTES)
                 .max(output.max_bytes / 2),
-            lines: output.max_lines.saturating_sub(READ_RESERVED_LINES).max(1),
+            lines: output
+                .max_lines
+                .saturating_sub(READ_RESERVED_LINES)
+                .max(MIN_READ_LINES),
         }
     }
 }
 
+/// A place in a document's text: a page, counted from zero, and a byte of its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Place {
+    page: usize,
+    byte: usize,
+}
+
+/// The text one read prints, gathered a page at a time while there is room.
+#[derive(Debug)]
+struct Excerpt {
+    text: String,
+    room: ReadRoom,
+    from: Place,
+    /// The last page shown and the byte of it the text stops before.
+    to: Place,
+    /// Whether the last page shown was shown to its end.
+    page_finished: bool,
+}
+
+impl Excerpt {
+    /// An excerpt of at most `room` that opens with `first`, the text its reader
+    /// asked to start from.
+    fn opening_with(first: &DocumentText, room: ReadRoom) -> Self {
+        let from = Place {
+            page: first.page,
+            byte: first.bytes.start,
+        };
+        let mut excerpt = Self {
+            text: String::new(),
+            room,
+            from,
+            to: from,
+            page_finished: false,
+        };
+        excerpt.take(first);
+        excerpt
+    }
+
+    /// Append as much of `stored` as there is room for, under its page line in a
+    /// document of more than one page. Returns false, appending nothing, for a page
+    /// after the first that nothing of fits.
+    fn take(&mut self, stored: &DocumentText) -> bool {
+        let opening = self.page_opening(stored);
+        let page_lines = usize::from(stored.page_count > 1);
+        let (Some(bytes), Some(lines)) = (
+            self.room.bytes.checked_sub(opening.len()),
+            self.room.lines.checked_sub(page_lines),
+        ) else {
+            return false;
+        };
+        let shown = truncate_lines_bytes(&stored.text, lines, bytes);
+        let end = stored.bytes.start + shown.len();
+        let finished = end >= stored.page_bytes;
+        if shown.is_empty() && !finished && !self.text.is_empty() {
+            return false;
+        }
+        self.text.push_str(&opening);
+        self.text.push_str(&shown);
+        self.room = ReadRoom {
+            bytes: bytes - shown.len(),
+            lines: lines - count_lines(&shown),
+        };
+        self.to = Place {
+            page: stored.page,
+            byte: end,
+        };
+        self.page_finished = finished;
+        true
+    }
+
+    /// What goes before the text of `stored`: nothing in a document of one page,
+    /// else the line naming its page, on a line of its own.
+    fn page_opening(&self, stored: &DocumentText) -> String {
+        if stored.page_count <= 1 {
+            return String::new();
+        }
+        let line_break = if self.text.is_empty() || self.text.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        format!(
+            "{line_break}[page {} of {}]\n",
+            stored.page + 1,
+            stored.page_count
+        )
+    }
+
+    /// Where the next read starts; `None` at the end of a document of `page_count`
+    /// pages.
+    fn next(&self, page_count: usize) -> Option<Place> {
+        if !self.page_finished {
+            return Some(self.to);
+        }
+        let page = self.to.page + 1;
+        (page < page_count).then_some(Place { page, byte: 0 })
+    }
+}
+
 /// `docs <search|read>`: ranks the indexed documents by similarity to a query, and
-/// prints the text stored for one a page at a time. Document text it prints follows
-/// a header marking it as untrusted data.
+/// prints the text stored for one, as much as fits a result at a time. Document
+/// text it prints follows a header marking it as untrusted data.
 #[derive(Debug)]
 pub struct DocsCommand {
     embedder: Arc<EmbedderHandle>,
     semantic: Arc<dyn SemanticStore>,
     default_hits: usize,
     search_bytes: usize,
-    page: Page,
+    read_room: ReadRoom,
 }
 
 impl DocsCommand {
@@ -115,7 +228,7 @@ impl DocsCommand {
             semantic,
             default_hits,
             search_bytes: SEARCH_OUTPUT_BYTES.min(output.max_bytes.saturating_sub(FOOTER_BYTES)),
-            page: Page::within(output),
+            read_room: ReadRoom::within(output),
         }
     }
 
@@ -128,11 +241,13 @@ impl DocsCommand {
              quoting is not needed: docs search lease renewal terms\n\
              \n\
              Prints a header line, then one line per document, best first, as \
-             TSV: path, similarity, the byte range of its best-matching \
-             passage, the date the document was indexed, and that passage. The \
-             passage is the document as of that date; the file may have \
-             changed since. Read on from a hit with \
-             `docs read --offset <start> \"<path>\"`.\n\
+             TSV: path, similarity, the page its best-matching passage is on, \
+             the byte range of that passage within the page, the date the \
+             document was indexed, and the passage. A PDF's pages are numbered \
+             as in the file; any other document is page 1 of 1. The passage is \
+             the document as of that date; the file may have changed since. \
+             Read on from a hit with \
+             `docs read --page <page> --offset <start> \"<path>\"`.\n\
              \n\
              Options:\n  \
                -n N              at most N documents (default {default}, max {MAX_HITS})\n\
@@ -186,55 +301,46 @@ impl DocsCommand {
         let request = ReadArgs::parse(args)
             .map_err(|what| CommandError::usage(format_args!("read: {what}"), READ_USAGE))?;
         let path = expand_tilde_from_env(request.path);
-        let wanted = request.offset..request.offset.saturating_add(self.page.bytes);
-        let stored = self
-            .semantic
-            .document_text(&path, wanted)
+        let mut stored = self
+            .stored_text(&path, request.start, self.read_room.bytes)
+            .await?;
+        refuse_start_past_the_end(&path, request.start, &stored)?;
+        let mut excerpt = Excerpt::opening_with(&stored, self.read_room);
+        while excerpt.page_finished
+            && let Some(next) = excerpt.next(stored.page_count)
+        {
+            stored = self.stored_text(&path, next, excerpt.room.bytes).await?;
+            if !excerpt.take(&stored) {
+                break;
+            }
+        }
+        let note = shown_note(&path, &excerpt, &stored);
+        Ok(CommandOutput {
+            stdout: format!("{UNTRUSTED_HEADER}{}", excerpt.text).into_bytes(),
+            stderr: note.into_bytes(),
+            ..CommandOutput::default()
+        })
+    }
+
+    /// Up to `max_bytes` of the text stored for the document at `path` from `start`.
+    async fn stored_text(
+        &self,
+        path: &Path,
+        start: Place,
+        max_bytes: usize,
+    ) -> Result<DocumentText, CommandError> {
+        let wanted = start.byte..start.byte.saturating_add(max_bytes);
+        self.semantic
+            .document_text(path, start.page, wanted)
             .await
             .map_err(|error| index_unreadable(&error))?
             .ok_or_else(|| {
                 CommandError::failed(
                     format_args!("{} is not an indexed document", path.display()),
                     Hint::Use,
-                    format_args!("cat {} to read the file itself", quoted(&path)),
+                    format_args!("cat {} to read the file itself", quoted(path)),
                 )
-            })?;
-        if request.offset > 0 && request.offset >= stored.total_bytes {
-            return Err(CommandError::failed(
-                format_args!(
-                    "offset {} is past the end of the text, which is {} bytes",
-                    request.offset, stored.total_bytes
-                ),
-                Hint::Use,
-                format_args!("docs read {} to start from the top", quoted(&path)),
-            ));
-        }
-        Ok(self.page_of(&path, &stored))
-    }
-
-    fn page_of(&self, path: &Path, stored: &DocumentText) -> CommandOutput {
-        let shown = truncate_lines_bytes(&stored.text, self.page.lines, self.page.bytes);
-        let end = stored.bytes.start + shown.len();
-        let next = if end < stored.total_bytes {
-            format!(
-                "{}: docs read {OFFSET_FLAG} {end} {} for what follows",
-                Hint::Use,
-                quoted(path)
-            )
-        } else {
-            "That is the end of the document".to_string()
-        };
-        let note = format!(
-            "[note] {NAME}: showed bytes {}..{end} of {}, indexed {}. {next}\n",
-            stored.bytes.start,
-            stored.total_bytes,
-            stored.indexed_at.format(INDEXED_DATE_FORMAT),
-        );
-        CommandOutput {
-            stdout: format!("{UNTRUSTED_HEADER}{shown}").into_bytes(),
-            stderr: note.into_bytes(),
-            ..CommandOutput::default()
-        }
+            })
     }
 }
 
@@ -253,14 +359,14 @@ impl Command for DocsCommand {
             "search <query...>, or docs read <path>",
             "Subcommands:\n  \
                search [-n N] <query...>\n          \
-             rank the indexed documents by meaning; TSV: path, similarity, bytes, date, passage\n  \
-               read [--offset N] <path>\n          \
-             print the text stored for an indexed document, a page at a time\n\
+             rank the indexed documents by meaning; TSV: path, similarity, page, bytes, date, passage\n  \
+               read [--page P] [--offset N] <path>\n          \
+             print the text stored for an indexed document, as much as fits one result\n\
              \n\
              Indexed documents are the files in the folders the user chose to \
-             index, PDFs included, kept as plain text. Search first, then \
-             `docs read` the best hit from the byte offset it gives. Read a \
-             file that is not indexed with `cat`.\n\
+             index, PDFs included, kept as plain text page by page. Search \
+             first, then `docs read` the best hit from the page and byte \
+             offset it gives. Read a file that is not indexed with `cat`.\n\
              \n\
              Call either subcommand with no arguments to see its parameter help.\n",
         )
@@ -314,27 +420,31 @@ impl SearchArgs {
 
 #[derive(Debug)]
 struct ReadArgs<'a> {
-    offset: usize,
+    start: Place,
     path: &'a str,
 }
 
 impl<'a> ReadArgs<'a> {
     fn parse(args: &'a [Word]) -> Result<Self, String> {
-        let (offset, path) = match args {
-            [path] if path != OFFSET_FLAG => (0, path),
-            [flag, offset, path] | [path, flag, offset] if flag == OFFSET_FLAG => {
-                (parse_offset(offset.as_str())?, path)
-            }
-            _ => {
-                return Err(format!(
-                    "expected one path, with {OFFSET_FLAG} N before or after it; \
-                     quote a path that has spaces"
-                ));
-            }
+        let one_path = || {
+            format!(
+                "expected one path, with {PAGE_FLAG} P and {OFFSET_FLAG} N before or after \
+                 it; quote a path that has spaces"
+            )
         };
+        let (mut page, mut byte, mut path) = (0, 0, None);
+        let mut words = args.iter();
+        while let Some(word) = words.next() {
+            match word.as_str() {
+                PAGE_FLAG => page = parse_page(flag_value(PAGE_FLAG, words.next())?)?,
+                OFFSET_FLAG => byte = parse_offset(flag_value(OFFSET_FLAG, words.next())?)?,
+                word if path.is_none() => path = Some(word),
+                _ => return Err(one_path()),
+            }
+        }
         Ok(Self {
-            offset,
-            path: path.as_str(),
+            start: Place { page, byte },
+            path: path.ok_or_else(one_path)?,
         })
     }
 }
@@ -349,6 +459,97 @@ fn parse_limit(raw: &str) -> Result<usize, String> {
 fn parse_offset(raw: &str) -> Result<usize, String> {
     raw.parse()
         .map_err(|_| format!("{OFFSET_FLAG} takes a byte offset, got '{raw}'"))
+}
+
+/// The page `raw` numbers from one, counted from zero.
+fn parse_page(raw: &str) -> Result<usize, String> {
+    raw.parse::<usize>()
+        .ok()
+        .and_then(|number| number.checked_sub(1))
+        .ok_or_else(|| format!("{PAGE_FLAG} takes a page number from 1, got '{raw}'"))
+}
+
+fn flag_value<'a>(flag: &str, value: Option<&'a Word>) -> Result<&'a str, String> {
+    value
+        .map(Word::as_str)
+        .ok_or_else(|| format!("{flag} needs a value"))
+}
+
+/// Errors when `start` is past the document's last page or at or past the end of
+/// its own page, going by `stored`, the text fetched from there.
+fn refuse_start_past_the_end(
+    path: &Path,
+    start: Place,
+    stored: &DocumentText,
+) -> Result<(), CommandError> {
+    if start.page >= stored.page_count {
+        return Err(CommandError::failed(
+            format_args!(
+                "page {} is past the last page, which is page {}",
+                start.page + 1,
+                stored.page_count
+            ),
+            Hint::Use,
+            format_args!("docs read {} to start from the top", quoted(path)),
+        ));
+    }
+    if start.byte > 0 && start.byte >= stored.page_bytes {
+        return Err(CommandError::failed(
+            format_args!(
+                "offset {} is past the end of page {}, which is {} bytes",
+                start.byte,
+                start.page + 1,
+                stored.page_bytes
+            ),
+            Hint::Use,
+            format_args!(
+                "docs read {PAGE_FLAG} {} {} to read that page from its top",
+                start.page + 1,
+                quoted(path)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The note a read of the document at `path` leaves on stderr: what `excerpt`
+/// showed, when the document was indexed, and the command that continues.
+/// `last` is the text most recently fetched for it.
+fn shown_note(path: &Path, excerpt: &Excerpt, last: &DocumentText) -> String {
+    let (from, to) = (excerpt.from, excerpt.to);
+    let several_pages = last.page_count > 1;
+    let shown = if several_pages {
+        format!(
+            "page {} byte {} to page {} byte {} of {} pages",
+            from.page + 1,
+            from.byte,
+            to.page + 1,
+            to.byte,
+            last.page_count
+        )
+    } else {
+        format!("bytes {}..{} of {}", from.byte, to.byte, last.page_bytes)
+    };
+    let next = match excerpt.next(last.page_count) {
+        None => "That is the end of the document".to_string(),
+        Some(next) => {
+            let page = if several_pages {
+                format!("{PAGE_FLAG} {} ", next.page + 1)
+            } else {
+                String::new()
+            };
+            format!(
+                "{}: docs read {page}{OFFSET_FLAG} {} {} for what follows",
+                Hint::Use,
+                next.byte,
+                quoted(path)
+            )
+        }
+    };
+    format!(
+        "[note] {NAME}: showed {shown}, indexed {}. {next}\n",
+        last.indexed_at.format(INDEXED_DATE_FORMAT),
+    )
 }
 
 /// The header, then one line per hit, best first, in at most `budget` bytes;
@@ -374,6 +575,8 @@ fn listed(hits: &[EmbeddingHit], budget: usize) -> String {
 fn hit_line(hit: &EmbeddingHit) -> Option<String> {
     let ChunkLocator::Document {
         path,
+        page,
+        page_count,
         bytes,
         indexed_at,
         ..
@@ -382,9 +585,10 @@ fn hit_line(hit: &EmbeddingHit) -> Option<String> {
         return None;
     };
     Some(format!(
-        "{}\tsim={:.0}%\tbytes {}..{}\tindexed {}\t{}\n",
+        "{}\tsim={:.0}%\tpage {} of {page_count}\tbytes {}..{}\tindexed {}\t{}\n",
         path.display(),
         hit.similarity * 100.0,
+        page + 1,
         bytes.start,
         bytes.end,
         indexed_at.format(INDEXED_DATE_FORMAT),
@@ -442,9 +646,9 @@ mod tests {
         }
     }
 
-    /// `docs` over a fresh index holding `text` at `path`, with no embedder; hold
+    /// `docs` over a fresh index holding `pages` at `path`, with no embedder; hold
     /// the tempdir for the test.
-    async fn docs_over(path: &str, text: &str) -> (DocsCommand, TempDir) {
+    async fn docs_over(path: &str, pages: &[&str]) -> (DocsCommand, TempDir) {
         let temp = tempfile::tempdir().unwrap();
         let handle = SqliteHandle::open(&temp.path().join("memory.db"))
             .await
@@ -455,8 +659,9 @@ mod tests {
             mtime_ns: 1,
             size: 1,
         };
+        let pages = pages.iter().copied().map(String::from).collect();
         store
-            .index_document(pass, PathBuf::from(path), stamp, text.to_string())
+            .index_document(pass, PathBuf::from(path), stamp, pages)
             .await
             .unwrap();
         let embedder = EmbedderHandle::new(Readiness::Unavailable("disabled in config".into()));
@@ -474,12 +679,50 @@ mod tests {
         run_rendered(docs, input).await
     }
 
+    /// What each read prints after the header when the document at `path` is read
+    /// from its top by following every note's command to the end.
+    async fn read_to_the_end(docs: &DocsCommand, path: &str) -> Vec<String> {
+        let follows = format!(" \"{path}\" for what follows\n");
+        let mut results = Vec::new();
+        let mut command = vec!["read".to_string(), path.to_string()];
+        loop {
+            let args: Vec<&str> = command.iter().map(String::as_str).collect();
+            let out = run(docs, &args).await;
+            let (stdout, note) = (
+                String::from_utf8(out.stdout).unwrap(),
+                String::from_utf8(out.stderr).unwrap(),
+            );
+            assert_eq!(out.exit_code, 0, "{note}");
+            assert!(stdout.len() + note.len() <= SPEC_BYTES, "{note}");
+            assert!(stdout.lines().count() + note.lines().count() < SPEC_LINES);
+            let shown = stdout.strip_prefix(UNTRUSTED_HEADER).expect("header");
+            assert!(!shown.is_empty(), "a read must make progress: {note}");
+            results.push(shown.to_string());
+            let Some((_, next)) = note.split_once("Use: docs read ") else {
+                assert!(note.contains("That is the end of the document"), "{note}");
+                return results;
+            };
+            let flags = next
+                .strip_suffix(&follows)
+                .expect("the path closes the command");
+            let continued: Vec<String> = std::iter::once("read")
+                .chain(flags.split(' '))
+                .chain([path])
+                .map(String::from)
+                .collect();
+            assert_ne!(continued, command, "a read must move on: {note}");
+            command = continued;
+        }
+    }
+
     fn hit(path: &str, text: &str) -> EmbeddingHit {
         EmbeddingHit {
             chunk_id: ChunkId(1),
             locator: ChunkLocator::Document {
                 document_id: DocumentId(1),
                 path: PathBuf::from(path),
+                page: 11,
+                page_count: 212,
                 bytes: 512..1024,
                 indexed_at: Default::default(),
             },
@@ -511,51 +754,63 @@ mod tests {
         );
         let fields: Vec<&str> = shown[0].split('\t').collect();
         assert_eq!(
-            fields[..4],
+            fields[..5],
             [
                 "/notes/plan 0.md",
                 "sim=83%",
+                "page 12 of 212",
                 "bytes 512..1024",
                 "indexed 1970-01-01"
             ]
         );
-        assert_eq!(fields.len(), 5, "a passage must stay one field: {shown:?}");
+        assert_eq!(fields.len(), 6, "a passage must stay one field: {shown:?}");
     }
 
     #[tokio::test]
-    async fn read_pages_through_a_document_under_the_header_within_one_result() {
+    async fn reads_follow_one_another_through_a_one_page_document_within_one_result_each() {
         let short_lines: String = (1..=60).map(|line| format!("line {line}\n")).collect();
         let text = format!("{short_lines}{} end\n", "é".repeat(1500));
-        let (docs, _temp) = docs_over("/notes/long plan.md", &text).await;
+        let (docs, _temp) = docs_over("/notes/long plan.md", &[&text]).await;
 
-        let mut read = String::new();
-        let mut command = vec!["read".to_string(), "/notes/long plan.md".to_string()];
-        loop {
-            let args: Vec<&str> = command.iter().map(String::as_str).collect();
-            let out = run(&docs, &args).await;
-            let (stdout, note) = (
-                String::from_utf8(out.stdout).unwrap(),
-                String::from_utf8(out.stderr).unwrap(),
-            );
-            assert_eq!(out.exit_code, 0, "{note}");
-            let page = stdout.strip_prefix(UNTRUSTED_HEADER).expect("header");
-            assert!(!page.is_empty(), "a page must make progress: {note}");
-            assert!(stdout.len() + note.len() <= SPEC_BYTES, "{note}");
-            assert!(stdout.lines().count() + note.lines().count() < SPEC_LINES);
-            read.push_str(page);
-            let Some((_, next)) = note.split_once("Use: docs read --offset ") else {
-                assert!(note.contains("That is the end of the document"), "{note}");
-                break;
-            };
-            let (offset, rest) = next.split_once(' ').unwrap();
-            assert_eq!(rest, "\"/notes/long plan.md\" for what follows\n");
-            command = vec![
-                "read".into(),
-                "--offset".into(),
-                offset.into(),
-                "/notes/long plan.md".into(),
-            ];
+        let results = read_to_the_end(&docs, "/notes/long plan.md").await;
+
+        assert!(results.len() > 1, "{results:?}");
+        assert_eq!(results.concat(), text);
+    }
+
+    #[tokio::test]
+    async fn reads_follow_one_another_through_every_page_under_its_page_line() {
+        let many_lines: String = (1..=60).map(|line| format!("line {line}\n")).collect();
+        let long_line = format!("{} end", "é".repeat(1500));
+        let pages = [many_lines.as_str(), "", long_line.as_str(), "tail\n"];
+        let path = "/notes/scanned report.pdf";
+        let (docs, _temp) = docs_over(path, &pages).await;
+
+        let results = read_to_the_end(&docs, path).await;
+
+        let mut read = vec![String::new(); pages.len()];
+        let mut order = Vec::new();
+        for result in &results {
+            for line in result.split_inclusive('\n') {
+                let page_line = line
+                    .strip_prefix("[page ")
+                    .and_then(|rest| rest.strip_suffix(" of 4]\n"));
+                match page_line {
+                    Some(number) => order.push(number.parse::<usize>().unwrap() - 1),
+                    None => read[*order.last().expect("a page line first")].push_str(line),
+                }
+            }
         }
-        assert_eq!(read, text);
+        assert!(order.is_sorted(), "{order:?}");
+        order.dedup();
+        assert_eq!(order, [0, 1, 2, 3], "the page without text is still named");
+        for (read, page) in read.iter().zip(pages) {
+            assert_eq!(read.trim_end_matches('\n'), page.trim_end_matches('\n'));
+        }
+
+        let past = run(&docs, &["read", "--page", "5", path]).await;
+        let error = String::from_utf8(past.stderr).unwrap();
+        assert_eq!(past.exit_code, 1, "{error}");
+        assert!(error.contains("which is page 4"), "{error}");
     }
 }
