@@ -306,11 +306,9 @@ impl DocsCommand {
             .await?;
         refuse_start_past_the_end(&path, request.start, &stored)?;
         let mut excerpt = Excerpt::opening_with(&stored, self.read_room);
-        while excerpt.page_finished && excerpt.to.page + 1 < stored.page_count {
-            let next = Place {
-                page: excerpt.to.page + 1,
-                byte: 0,
-            };
+        while excerpt.page_finished
+            && let Some(next) = excerpt.next(stored.page_count)
+        {
             stored = self.stored_text(&path, next, excerpt.room.bytes).await?;
             if !excerpt.take(&stored) {
                 break;

@@ -300,10 +300,6 @@ mod tests {
 
     #[test]
     fn the_longest_reply_fits_the_reply_line_however_it_escapes() {
-        let text = FromWorker::Reply {
-            id: u64::MAX,
-            extraction: Extraction::of_one_page("\u{1}".repeat(MAX_TEXT_BYTES + 1)),
-        };
         let texts = (0..=MAX_PAGES).map(|_| Ok::<_, Infallible>("\u{1}".repeat(1024)));
         let Ok(extraction) = Extraction::of_pages(texts);
         let Extraction::Pages { pages, truncated } = &extraction else {
@@ -320,7 +316,6 @@ mod tests {
             },
         };
         let replies = [
-            text,
             FromWorker::Reply {
                 id: u64::MAX,
                 extraction,

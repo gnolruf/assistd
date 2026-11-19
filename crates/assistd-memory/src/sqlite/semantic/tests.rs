@@ -495,13 +495,13 @@ async fn a_document_chunk_keeps_its_vector_wherever_its_text_moves() {
 }
 
 #[tokio::test]
-async fn a_chunk_stays_on_one_page_and_names_that_pages_place_in_the_file() {
+async fn a_chunk_stays_on_its_page_and_keeps_its_vector_when_the_page_moves() {
     let (_handle, store, _temp) = fresh().await;
     let path = PathBuf::from("/notes/scan.pdf");
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
-    let pages = vec!["alpha".to_string(), String::new(), "bravo".to_string()];
+    let body = vec!["alpha".to_string(), String::new(), "bravo".to_string()];
     let stored = store
-        .index_document(pass, path, STAMP, pages)
+        .index_document(pass, path.clone(), STAMP, body.clone())
         .await
         .unwrap();
     let [alpha, bravo] = stored[..] else {
@@ -512,8 +512,22 @@ async fn a_chunk_stays_on_one_page_and_names_that_pages_place_in_the_file() {
         missing.await.unwrap(),
         [(alpha, "alpha".to_string()), (bravo, "bravo".to_string())]
     );
-    embed_chunk(&store, alpha, &unit_vec(1.0)).await;
-    embed_chunk(&store, bravo, &unit_vec(0.0)).await;
+    embed_chunk(&store, alpha, &unit_vec(0.0)).await;
+    embed_chunk(&store, bravo, &unit_vec(1.0)).await;
+
+    let with_cover = [vec!["Cover".to_string()], body].concat();
+    let added = store
+        .index_document(pass, path, STAMP, with_cover)
+        .await
+        .unwrap();
+    let [cover] = added[..] else {
+        panic!("only the new page is new text, got {added:?}");
+    };
+    assert_eq!(
+        store.count_missing().await.unwrap().document_chunks,
+        1,
+        "every page that moved keeps its vectors"
+    );
 
     let hits = store
         .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Documents)
@@ -533,64 +547,12 @@ async fn a_chunk_stays_on_one_page_and_names_that_pages_place_in_the_file() {
     };
     assert_eq!(
         (hit.chunk_id, *page, *page_count, bytes.clone()),
-        (bravo, 2, 3, 0..5),
+        (alpha, 1, 4, 0..5),
         "the page without text still counts"
     );
     let adjacent = store.adjacent_chunks(&hit.locator).await.unwrap();
-    assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(alpha));
-    assert!(adjacent.after.is_none());
-}
-
-#[tokio::test]
-async fn a_page_added_at_the_front_adds_only_its_own_chunks() {
-    let (_handle, store, _temp) = fresh().await;
-    let path = PathBuf::from("/notes/report.pdf");
-    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
-    let body = vec!["# One\n\nalpha".to_string(), "# Two\n\nbravo".to_string()];
-    let stored = store
-        .index_document(pass, path.clone(), STAMP, body.clone())
-        .await
-        .unwrap();
-    let [one_chunk, two_chunk] = stored[..] else {
-        panic!("expected a chunk per page, got {stored:?}");
-    };
-    embed_chunk(&store, one_chunk, &unit_vec(0.0)).await;
-    embed_chunk(&store, two_chunk, &unit_vec(0.1)).await;
-
-    let with_cover = [vec!["Cover".to_string()], body].concat();
-    let added = store
-        .index_document(pass, path, STAMP, with_cover)
-        .await
-        .unwrap();
-    let [cover_chunk] = added[..] else {
-        panic!("only the new page is new text, got {added:?}");
-    };
-    assert_eq!(
-        store.count_missing().await.unwrap().document_chunks,
-        1,
-        "every page that moved keeps its vectors"
-    );
-
-    let hits = store
-        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Documents)
-        .await
-        .unwrap();
-    let [hit] = &hits[..] else {
-        panic!("the document must hit once, got {hits:?}");
-    };
-    let ChunkLocator::Document {
-        page, page_count, ..
-    } = &hit.locator
-    else {
-        panic!("a document search must hit documents");
-    };
-    assert_eq!((hit.chunk_id, *page, *page_count), (one_chunk, 1, 3));
-    let adjacent = store.adjacent_chunks(&hit.locator).await.unwrap();
-    assert_eq!(
-        adjacent.before.map(|chunk| chunk.chunk_id),
-        Some(cover_chunk)
-    );
-    assert_eq!(adjacent.after.map(|chunk| chunk.chunk_id), Some(two_chunk));
+    assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(cover));
+    assert_eq!(adjacent.after.map(|chunk| chunk.chunk_id), Some(bravo));
 }
 
 #[tokio::test]

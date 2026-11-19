@@ -20,14 +20,12 @@ const PDF_EXTENSION: &str = "pdf";
 /// Columns an HTML file's text is wrapped to.
 const HTML_TEXT_WIDTH: usize = 100;
 
-/// How a file's bytes become its text, and what its pages are.
+/// How a file's bytes become its text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Format {
-    /// Plain text, Markdown and source code, kept as they are: one page.
+    /// Plain text, Markdown and source code, kept as they are.
     Text,
-    /// One page.
     Html,
-    /// Its pages.
     Pdf,
 }
 

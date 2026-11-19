@@ -261,7 +261,7 @@ pub(super) fn store_document(
     let stored = StoredPages::load(tx, id)?;
     let cuts = page_cuts(pages, document.chunking);
     let recut = stored.recut(pages, &cuts);
-    write_pages(tx, id, pages)?;
+    write_changed_pages(tx, id, &stored.pages, pages)?;
     recut.apply(tx, id, longest_page(&stored.pages).max(longest_page(pages)))?;
     remove_pages_from(tx, id, pages.len())?;
     let mut insert = tx.prepare_cached(
@@ -339,17 +339,23 @@ fn longest_page(pages: &[String]) -> usize {
     pages.iter().map(String::len).max().unwrap_or_default()
 }
 
-/// Store `pages` as the first pages of `document`, over any stored at those positions.
-fn write_pages(
+/// Store `pages` as the first pages of `document`, writing only those that differ
+/// from the page `stored` holds at the same position.
+fn write_changed_pages(
     tx: &Transaction<'_>,
     document: DocumentId,
+    stored: &[String],
     pages: &[String],
 ) -> rusqlite::Result<()> {
     let mut write = tx.prepare_cached(
         "INSERT INTO document_pages (document_id, page, content) VALUES (?1, ?2, ?3)
          ON CONFLICT(document_id, page) DO UPDATE SET content = excluded.content",
     )?;
-    for (page, content) in pages.iter().enumerate() {
+    let changed = pages
+        .iter()
+        .enumerate()
+        .filter(|(page, content)| stored.get(*page) != Some(*content));
+    for (page, content) in changed {
         write.execute(rusqlite::params![document, page, content])?;
     }
     Ok(())
