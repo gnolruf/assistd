@@ -56,17 +56,6 @@ impl IndexRoot {
         self.max_file_bytes
     }
 
-    /// Why the root's files cannot be told from deleted ones: it is missing, cannot
-    /// be listed, or is empty, as the mount point of an unmounted drive is. `None`
-    /// when it holds something. Blocks on the filesystem.
-    pub(super) fn unavailable(&self) -> Option<String> {
-        match std::fs::read_dir(&self.path).map(|mut entries| entries.next().is_none()) {
-            Ok(false) => None,
-            Ok(true) => Some("it is empty".to_owned()),
-            Err(error) => Some(error.to_string()),
-        }
-    }
-
     /// Hand `visit` what the walk makes of each entry under the root until it
     /// breaks. Ignore files count from the root down, in or out of a git
     /// repository. Blocks on the filesystem.
@@ -114,6 +103,17 @@ impl IndexRoot {
             stamp: FileStamp::of(&metadata),
             path: entry.into_path(),
         })
+    }
+}
+
+/// Why the files of the index root at `path` cannot be told from deleted ones: it is
+/// missing, cannot be listed, or is empty, as the mount point of an unmounted drive
+/// is. `None` when it holds something. Blocks on the filesystem.
+pub(crate) fn root_unavailable(path: &Path) -> Option<String> {
+    match std::fs::read_dir(path).map(|mut entries| entries.next().is_none()) {
+        Ok(false) => None,
+        Ok(true) => Some("it is empty".to_owned()),
+        Err(error) => Some(error.to_string()),
     }
 }
 

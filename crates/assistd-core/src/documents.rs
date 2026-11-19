@@ -15,7 +15,9 @@ mod indexer;
 mod pass;
 mod walk;
 
-pub use indexer::{DocumentIndex, IndexPasses, remove_dropped_roots};
+pub(crate) use walk::root_unavailable;
+
+pub use indexer::{DocumentIndex, IndexPasses, IndexProgress, PassProgress, remove_dropped_roots};
 pub use pass::{IndexDeps, MAX_DOCUMENT_CHUNKS, PassCounts, PassEnd, RootPass, SkipCause};
 
 /// Where the daemon's program looks for its own shared libraries, under the

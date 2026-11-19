@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub mod attachment;
 #[cfg(feature = "client")]
 pub mod client;
+mod documents;
 mod event;
 pub mod mcp;
 mod permission;
@@ -23,6 +24,10 @@ pub mod wakeword;
 pub use attachment::{Attachment, ImageAttachment, ImageMime};
 #[cfg(feature = "client")]
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
+pub use documents::{
+    DocumentActivity, DocumentPass, DocumentPassCounts, DocumentPassEnd, DocumentRootStatus,
+    DocumentSkipReason, SkippedFiles,
+};
 pub use event::{Event, EventBody, EventKind, ReindexKind, Role, TurnStats};
 pub use mcp::{McpServerState, McpTransportKind, TokenRevocation};
 pub use permission::{ConfirmSource, PermissionMode, PlanMode, PlanVerdict};

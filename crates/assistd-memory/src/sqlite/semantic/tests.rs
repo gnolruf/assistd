@@ -432,6 +432,15 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
 
     assert_eq!(store.index_roots().await.unwrap(), [root]);
     assert_eq!(store.count_document_chunks().await.unwrap(), 2);
+    assert_eq!(
+        store.index_root_counts().await.unwrap(),
+        [IndexRootCounts {
+            root: root.to_path_buf(),
+            documents: 1,
+            chunks: 2,
+            unembedded_chunks: 1,
+        }]
+    );
     assert_eq!(store.remove_index_root(root).await.unwrap(), 1);
     assert!(store.index_roots().await.unwrap().is_empty());
     assert_eq!(store.count_document_chunks().await.unwrap(), 0);

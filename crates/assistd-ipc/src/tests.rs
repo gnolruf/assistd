@@ -32,6 +32,7 @@ fn request_cases() -> Vec<(Request, &'static str)> {
         task_confirm_request_cases(),
         task_refine_request_cases(),
         mcp_request_cases(),
+        document_request_cases(),
     ]
     .concat()
 }
@@ -242,6 +243,8 @@ fn event_cases() -> Vec<(Event, &'static str)> {
         task_event_cases(),
         task_queue_event_cases(),
         mcp_event_cases(),
+        document_status_event_cases(),
+        document_pass_and_search_event_cases(),
     ]
     .concat()
 }
@@ -1031,6 +1034,137 @@ fn mcp_event_cases() -> Vec<(Event, &'static str)> {
                 },
             }),
             r#"{"id":"r","type":"mcp_logged_out","server":"drive","revocation":{"outcome":"failed","reason":"HTTP 503"}}"#,
+        ),
+    ]
+}
+
+fn document_request_cases() -> Vec<(Request, &'static str)> {
+    vec![
+        (
+            request(RequestBody::DocumentsStatus),
+            r#"{"id":"r","type":"documents_status"}"#,
+        ),
+        (
+            request(RequestBody::DocumentsReindex),
+            r#"{"id":"r","type":"documents_reindex"}"#,
+        ),
+        (
+            request(RequestBody::DocumentsSearch {
+                query: "lease renewal".into(),
+                limit: 3,
+            }),
+            r#"{"id":"r","type":"documents_search","query":"lease renewal","limit":3}"#,
+        ),
+    ]
+}
+
+/// A pass over an index root that ended as `end` at 2026-11-05 14:00 UTC.
+fn sample_document_pass(end: DocumentPassEnd, counts: DocumentPassCounts) -> DocumentPass {
+    DocumentPass {
+        ended_at: DateTime::from_timestamp(1_793_887_200, 0).unwrap(),
+        end,
+        counts,
+    }
+}
+
+fn document_status_event_cases() -> Vec<(Event, &'static str)> {
+    let stopped_early = sample_document_pass(
+        DocumentPassEnd::Incomplete {
+            reason: "the daemon is shutting down".into(),
+        },
+        DocumentPassCounts {
+            indexed: 1,
+            unchanged: 1,
+            removed: 0,
+            skipped: vec![
+                SkippedFiles {
+                    reason: DocumentSkipReason::TooLarge,
+                    files: 2,
+                },
+                SkippedFiles {
+                    reason: DocumentSkipReason::IndexFull,
+                    files: 1,
+                },
+            ],
+        },
+    );
+    vec![
+        (
+            event(EventBody::DocumentIndex {
+                indexing: ComponentReadiness::Ready,
+                embedding: ComponentReadiness::Unavailable {
+                    reason: "server failed to start".into(),
+                },
+                chunks: 12,
+                chunk_limit: 500_000,
+                running_pass: Some("/home/u/notes".into()),
+            }),
+            r#"{"id":"r","type":"document_index","indexing":{"state":"ready"},"embedding":{"state":"unavailable","reason":"server failed to start"},"chunks":12,"chunk_limit":500000,"running_pass":"/home/u/notes"}"#,
+        ),
+        (
+            event(EventBody::DocumentRoot {
+                status: DocumentRootStatus {
+                    root: "/home/u/notes".into(),
+                    unavailable: Some("it is empty".into()),
+                    documents: 2,
+                    chunks: 12,
+                    unembedded_chunks: 5,
+                    last_pass: Some(stopped_early),
+                },
+            }),
+            r#"{"id":"r","type":"document_root","status":{"root":"/home/u/notes","unavailable":"it is empty","documents":2,"chunks":12,"unembedded_chunks":5,"last_pass":{"ended_at":"2026-11-05T14:00:00Z","end":{"outcome":"incomplete","reason":"the daemon is shutting down"},"counts":{"indexed":1,"unchanged":1,"removed":0,"skipped":[{"reason":"too_large","files":2},{"reason":"index_full","files":1}]}}}}"#,
+        ),
+        (
+            event(EventBody::DocumentActivity {
+                activity: DocumentActivity {
+                    indexing: Some("/home/u/notes".into()),
+                    unembedded_chunks: 40,
+                },
+            }),
+            r#"{"id":"r","type":"document_activity","activity":{"indexing":"/home/u/notes","unembedded_chunks":40}}"#,
+        ),
+    ]
+}
+
+fn document_pass_and_search_event_cases() -> Vec<(Event, &'static str)> {
+    let finished = sample_document_pass(
+        DocumentPassEnd::Finished,
+        DocumentPassCounts {
+            unchanged: 2,
+            removed: 1,
+            ..DocumentPassCounts::default()
+        },
+    );
+    vec![
+        (
+            event(EventBody::DocumentPassProgress {
+                root: "/home/u/notes".into(),
+                counts: DocumentPassCounts {
+                    indexed: 1,
+                    ..DocumentPassCounts::default()
+                },
+            }),
+            r#"{"id":"r","type":"document_pass_progress","root":"/home/u/notes","counts":{"indexed":1,"unchanged":0,"removed":0}}"#,
+        ),
+        (
+            event(EventBody::DocumentPassEnded {
+                root: "/home/u/notes".into(),
+                pass: finished,
+            }),
+            r#"{"id":"r","type":"document_pass_ended","root":"/home/u/notes","pass":{"ended_at":"2026-11-05T14:00:00Z","end":{"outcome":"finished"},"counts":{"indexed":0,"unchanged":2,"removed":1}}}"#,
+        ),
+        (
+            event(EventBody::DocumentHit {
+                path: "/home/u/notes/lease.pdf".into(),
+                page: 2,
+                page_count: 9,
+                byte_start: 0,
+                byte_end: 640,
+                indexed_at: DateTime::from_timestamp(1_793_887_200, 0).unwrap(),
+                content: "renewal terms".into(),
+                similarity: 0.5,
+            }),
+            r#"{"id":"r","type":"document_hit","path":"/home/u/notes/lease.pdf","page":2,"page_count":9,"byte_start":0,"byte_end":640,"indexed_at":"2026-11-05T14:00:00Z","content":"renewal terms","similarity":0.5}"#,
         ),
     ]
 }

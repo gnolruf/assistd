@@ -546,9 +546,9 @@ mod tests {
     use assistd_embed::EmbedError;
     use assistd_memory::{
         AdjacentChunks, BranchId, BranchSummary, ChunkId, ChunkSource, DocumentText, Embedding,
-        EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass, MemoryError, MemoryId, MemoryStore,
-        NoSemanticStore, PersistedMessage, Seq, SqliteHandle, SqliteSemanticStore,
-        SqliteTranscriptStore, UnindexedRows,
+        EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass, IndexRootCounts, MemoryError,
+        MemoryId, MemoryStore, NoSemanticStore, PersistedMessage, Seq, SqliteHandle,
+        SqliteSemanticStore, SqliteTranscriptStore, UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -677,6 +677,9 @@ mod tests {
         }
         async fn index_roots(&self) -> Result<Vec<PathBuf>, MemoryError> {
             NoSemanticStore.index_roots().await
+        }
+        async fn index_root_counts(&self) -> Result<Vec<IndexRootCounts>, MemoryError> {
+            NoSemanticStore.index_root_counts().await
         }
         async fn remove_index_root(&self, root: &Path) -> Result<u64, MemoryError> {
             NoSemanticStore.remove_index_root(root).await

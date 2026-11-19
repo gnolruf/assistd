@@ -15,7 +15,8 @@ use thiserror::Error;
 use tokio::sync::{Notify, mpsc, watch};
 use tracing::debug;
 
-use super::walk::{IndexRoot, Walked};
+use super::indexer::DocumentIndex;
+use super::walk::{IndexRoot, Walked, root_unavailable};
 
 /// Most chunks the stored documents are cut into. A search scans every document
 /// vector, about 100 ms and 410 MB of them here; a pass that reaches this stores
@@ -131,6 +132,8 @@ enum PassStopped {
 
 struct RunningPass<'a> {
     deps: &'a IndexDeps,
+    index: &'a DocumentIndex,
+    root: &'a Path,
     pass: IndexPass,
     max_file_bytes: u64,
     counts: &'a mut PassCounts,
@@ -158,6 +161,7 @@ impl RunningPass<'_> {
         let walked = files.len() as u64;
         let changed = self.deps.store.changed_documents(self.pass, files).await?;
         self.counts.unchanged += walked - changed.len() as u64;
+        self.index.report_progress(self.root, self.counts);
         if changed.is_empty() {
             return Ok(());
         }
@@ -168,6 +172,7 @@ impl RunningPass<'_> {
             } else {
                 chunks += self.index_file(path, stamp).await?;
             }
+            self.index.report_progress(self.root, self.counts);
         }
         Ok(())
     }
@@ -233,10 +238,11 @@ impl RunningPass<'_> {
     }
 }
 
-/// Run one pass over `root`, leaving out the files `guards` call sensitive. Stops
-/// between files once `shutdown` flips.
+/// Run one pass over `root`, leaving out the files `guards` call sensitive and
+/// reporting its progress to `index`. Stops between files once `shutdown` flips.
 pub(super) async fn index_root(
     deps: &IndexDeps,
+    index: &DocumentIndex,
     root: Arc<IndexRoot>,
     guards: Arc<PathGuards>,
     shutdown: &watch::Receiver<bool>,
@@ -244,7 +250,7 @@ pub(super) async fn index_root(
     let mut counts = PassCounts::default();
     let end = match unavailable(&root).await {
         Some(why) => PassEnd::RootUnavailable(why),
-        None => match walk_and_store(deps, &root, guards, shutdown, &mut counts).await {
+        None => match walk_and_store(deps, index, &root, guards, shutdown, &mut counts).await {
             Ok(()) => PassEnd::Finished,
             Err(stopped) => PassEnd::Incomplete(stopped.to_string()),
         },
@@ -259,13 +265,14 @@ pub(super) async fn index_root(
 
 async fn unavailable(root: &Arc<IndexRoot>) -> Option<String> {
     let root = Arc::clone(root);
-    on_blocking_pool(move || root.unavailable()).await
+    on_blocking_pool(move || root_unavailable(root.path())).await
 }
 
 /// Begin a pass, store what the walk finds, and finish the pass only when the
 /// whole root was listed and is still there.
 async fn walk_and_store(
     deps: &IndexDeps,
+    index: &DocumentIndex,
     root: &Arc<IndexRoot>,
     guards: Arc<PathGuards>,
     shutdown: &watch::Receiver<bool>,
@@ -274,6 +281,8 @@ async fn walk_and_store(
     let pass = deps.store.begin_index_pass(root.path()).await?;
     let mut running = RunningPass {
         deps,
+        index,
+        root: root.path(),
         pass,
         max_file_bytes: root.max_file_bytes(),
         counts,
@@ -377,7 +386,8 @@ mod tests {
         let root = Arc::new(IndexRoot::new(&root_dir, &DocumentsConfig::default()).unwrap());
         let guards = Arc::new(PathGuards::default());
         let (_stop, shutdown) = watch::channel(false);
-        let pass = || index_root(&deps, root.clone(), guards.clone(), &shutdown);
+        let index = DocumentIndex::default();
+        let pass = || index_root(&deps, &index, root.clone(), guards.clone(), &shutdown);
 
         let present = pass().await;
         assert_eq!(present.end, PassEnd::Finished);

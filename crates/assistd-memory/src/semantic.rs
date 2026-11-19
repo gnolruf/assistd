@@ -240,6 +240,17 @@ pub struct UnindexedRows {
     pub memories: u64,
 }
 
+/// What the index holds of one registered index root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexRootCounts {
+    pub root: PathBuf,
+    pub documents: u64,
+    /// Chunks its documents are cut into.
+    pub chunks: u64,
+    /// Those of its chunks neither embedded nor marked unembeddable.
+    pub unembedded_chunks: u64,
+}
+
 /// A file's modification time and size; a document whose stored stamp still
 /// matches is taken as unchanged without being read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,6 +377,9 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     /// Every registered index root.
     async fn index_roots(&self) -> Result<Vec<PathBuf>>;
 
+    /// What the index holds of every registered index root.
+    async fn index_root_counts(&self) -> Result<Vec<IndexRootCounts>>;
+
     /// Forget index root `root`, removing every document found under it and
     /// returning how many.
     async fn remove_index_root(&self, root: &Path) -> Result<u64>;
@@ -464,6 +478,9 @@ impl SemanticStore for NoSemanticStore {
         Ok(false)
     }
     async fn index_roots(&self) -> Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+    async fn index_root_counts(&self) -> Result<Vec<IndexRootCounts>> {
         Ok(Vec::new())
     }
     async fn remove_index_root(&self, _root: &Path) -> Result<u64> {

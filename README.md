@@ -185,4 +185,5 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | `assistd voice-toggle`   | Toggle TTS playback.                                          |
 | `assistd voice-skip`     | Abort the current spoken response.                            |
 | `assistd memory …`       | Inspect or mutate persistent memory; see `memory --help`.     |
+| `assistd documents …`    | Show what is indexed (`status`), walk the indexed folders now (`reindex`), or `search` them. |
 | `assistd tray`           | System tray icon and desktop notifications.                   |

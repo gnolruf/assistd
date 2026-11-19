@@ -5,7 +5,8 @@
 use std::time::Instant;
 
 use assistd_ipc::{
-    ConfirmSource, PermissionMode, PresenceState, TaskRunState, TurnStats, VoiceCaptureState,
+    ConfirmSource, DocumentActivity, PermissionMode, PresenceState, TaskRunState, TurnStats,
+    VoiceCaptureState,
 };
 use assistd_utils::terminal_text::escape_controls_single_line;
 use chrono::{DateTime, Utc};
@@ -771,6 +772,7 @@ fn status_segments(app: &App) -> Vec<String> {
         }
         Some(state) => segments.push(format!("model is {}", state.as_str())),
     }
+    segments.extend(document_indicator(&app.document_activity));
     match app.pending_attachments.len() {
         0 => {}
         1 => segments.push("1 attachment".into()),
@@ -802,6 +804,16 @@ fn chat_hint(app: &App) -> Option<String> {
         Some("Esc to interrupt".to_string())
     } else {
         None
+    }
+}
+
+/// The pass under way, else the chunks left to embed; nothing while the index is idle.
+fn document_indicator(activity: &DocumentActivity) -> Option<String> {
+    match (&activity.indexing, activity.unembedded_chunks) {
+        (Some(_), _) => Some("indexing documents".to_string()),
+        (None, 0) => None,
+        (None, 1) => Some("1 document chunk to embed".to_string()),
+        (None, chunks) => Some(format!("{chunks} document chunks to embed")),
     }
 }
 

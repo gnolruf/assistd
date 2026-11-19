@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 use assistd_config::Config;
 use assistd_documents::Extractor;
 use assistd_embed::EmbedderHandle;
-use assistd_ipc::Component;
+use assistd_ipc::{Component, DocumentActivity};
 use assistd_tools::ToolsDisabled;
 use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::readiness::ReadinessCell;
@@ -34,6 +34,8 @@ pub struct StatusService {
     pub(super) tools_disabled: Option<ToolsDisabled>,
     pub(super) web_search: Arc<ReadinessCell<ChildServerStatus>>,
     pub(super) documents: Arc<Extractor>,
+    /// What the document index was last broadcast as doing.
+    pub(super) document_activity: watch::Receiver<DocumentActivity>,
     pub(super) embedder: Arc<EmbedderHandle>,
     pub(super) admission: Arc<TurnAdmission>,
     pub(super) bus: EventBus,

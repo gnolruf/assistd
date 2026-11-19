@@ -86,6 +86,7 @@ async fn subscribe_bus(ipc: &IpcClient) -> Option<EventStream> {
                     EventKind::ContextSize,
                     EventKind::TaskQueue,
                     EventKind::Readiness,
+                    EventKind::DocumentActivity,
                     EventKind::Done,
                     EventKind::Error,
                 ],

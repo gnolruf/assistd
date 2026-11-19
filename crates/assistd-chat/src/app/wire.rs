@@ -4,8 +4,8 @@
 use std::time::{Duration, Instant};
 
 use assistd_ipc::{
-    Event, EventBody, ListenPhase, PresenceState, RelayEvent, RelayStepRecord, Role,
-    StartupComponent, StatusKind, StatusSeverity, ToolReport, TurnStats, VoiceCaptureState,
+    DocumentActivity, Event, EventBody, ListenPhase, PresenceState, RelayEvent, RelayStepRecord,
+    Role, StartupComponent, StatusKind, StatusSeverity, ToolReport, TurnStats, VoiceCaptureState,
 };
 use assistd_utils::time::saturating_millis;
 use serde_json::Value;
@@ -78,6 +78,7 @@ impl App {
     /// Drop the indicator state the daemon last reported, which may no longer hold.
     fn on_daemon_unreachable(&mut self) {
         self.daemon_reachable = false;
+        self.document_activity = DocumentActivity::default();
         self.presence_state = None;
         self.listening = VoiceCaptureState::Idle;
         self.wake_word_heard = false;
@@ -96,6 +97,10 @@ impl App {
         }
         if let EventBody::TaskQueue { snapshot } = ev.body {
             self.on_task_queue(snapshot);
+            return;
+        }
+        if let EventBody::DocumentActivity { activity } = ev.body {
+            self.document_activity = activity;
             return;
         }
         if let EventBody::Readiness {
@@ -177,6 +182,12 @@ impl App {
             | EventBody::MemoryRow { .. }
             | EventBody::MemoryForgetResult { .. }
             | EventBody::ReindexProgress { .. }
+            | EventBody::DocumentIndex { .. }
+            | EventBody::DocumentRoot { .. }
+            | EventBody::DocumentPassProgress { .. }
+            | EventBody::DocumentPassEnded { .. }
+            | EventBody::DocumentHit { .. }
+            | EventBody::DocumentActivity { .. }
             | EventBody::WakeWordStatus { .. }
             | EventBody::WakeWordTest { .. }
             | EventBody::WakeWordSpeech { .. }

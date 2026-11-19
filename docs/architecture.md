@@ -826,6 +826,24 @@ that many it stores no more files and reports them as skipped because the
 index is full. Each pass leaves its counts in memory, per root: files
 indexed, unchanged, removed, and skipped by reason.
 
+`assistd documents status` (`DocumentsStatus`) prints those counts beside what
+the store holds of each root: its documents, their chunks, and the chunks
+still waiting for a vector. It also says whether each root can be listed now,
+whether the extraction worker and the embedder run, and how many chunks the
+index holds of its ceiling. `assistd documents reindex` (`DocumentsReindex`)
+asks for a round of passes and streams the progress of the round that answers
+it, which is the next one when a round is already under way; it is refused
+when no worker will run, and is not held to the dispatch timeout.
+`assistd documents search <query>` (`DocumentsSearch`) ranks the documents as
+`docs search` does, without a turn.
+
+The daemon broadcasts a `DocumentActivity` whenever the root being walked or
+the number of document chunks left to embed changes. It counts those chunks
+when a pass starts or ends and every five seconds while one runs or some
+wait, and reports none while there is no embedder to take them. The chat's
+status line shows `indexing documents` during a pass and otherwise the chunks
+left to embed.
+
 The model reaches the index through the `docs` command, which `build_tools()`
 registers behind `run` only with `documents.enabled`; the system prompt then
 gains one line saying so. `docs search <query>` embeds the query and prints

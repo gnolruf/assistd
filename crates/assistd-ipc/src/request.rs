@@ -65,6 +65,9 @@ impl Request {
             RequestBody::MemoryForget { .. } => "memory_forget",
             RequestBody::MemorySemanticSearch { .. } => "memory_semantic_search",
             RequestBody::MemoryReindex => "memory_reindex",
+            RequestBody::DocumentsStatus => "documents_status",
+            RequestBody::DocumentsReindex => "documents_reindex",
+            RequestBody::DocumentsSearch { .. } => "documents_search",
             RequestBody::ConfirmResponse { .. } => "confirm_response",
             RequestBody::SetPermissionMode { .. } => "set_permission_mode",
             RequestBody::PlanVerdict { .. } => "plan_verdict",
@@ -157,6 +160,19 @@ pub enum RequestBody {
     /// Embed every row lacking an embedding under the current model. Emits `ReindexProgress`es,
     /// then `Done`.
     MemoryReindex,
+    /// Report the document index and every index root. Emits `DocumentIndex`, one
+    /// `DocumentRoot` per `documents.roots` entry, then `Done`.
+    DocumentsStatus,
+    /// Start a pass over every index root and follow it. Emits `DocumentPassProgress`es and
+    /// one `DocumentPassEnded` per root, then `Done`; errors when no extraction worker runs.
+    DocumentsReindex,
+    /// Rank the indexed documents by similarity to `query`, as the `docs search` command
+    /// does; `limit = 0` uses `embedding.top_k`. Emits `DocumentHit`s best-first, then `Done`.
+    DocumentsSearch {
+        query: String,
+        #[serde(default)]
+        limit: u32,
+    },
     /// Answer the [`EventBody::ConfirmRequest`](crate::EventBody::ConfirmRequest) with this
     /// `confirm_id` on the same connection.
     ConfirmResponse {
@@ -208,8 +224,8 @@ pub enum RequestBody {
     GetReadiness,
     /// Forward broadcast events matching `filter`, tagged with their turn's `id`, until the
     /// client disconnects; no `Done`, and `ToolResult` attachments are stripped. Opens with the
-    /// current `TaskQueue`, `Presence`, `ListenState` and `VoiceState`, then sends every
-    /// presence change, each tagged with this request's `id`.
+    /// current `TaskQueue`, `Presence`, `ListenState`, `VoiceState` and `DocumentActivity`,
+    /// then sends every presence change, each tagged with this request's `id`.
     Subscribe {
         #[serde(default)]
         filter: SubscribeFilter,

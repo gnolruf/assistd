@@ -26,9 +26,9 @@ use assistd_llm::{
 use assistd_memory::{
     AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkScope, ChunkSource, DocumentText,
     Embedding, EmbeddingHit, EmbeddingSpace, FileStamp, HistoryRow, HistoryScope, IndexPass,
-    MemoryHit, MemoryId, MemoryStore, MessageId, MessageKind, NoSemanticStore, PersistedMessage,
-    PersistedRole, PersistedToolCall, SemanticStore, SessionId, SessionScope, SqliteHandle,
-    SqliteTranscriptStore, TaskStore, TranscriptStore, UnindexedRows,
+    IndexRootCounts, MemoryHit, MemoryId, MemoryStore, MessageId, MessageKind, NoSemanticStore,
+    PersistedMessage, PersistedRole, PersistedToolCall, SemanticStore, SessionId, SessionScope,
+    SqliteHandle, SqliteTranscriptStore, TaskStore, TranscriptStore, UnindexedRows,
 };
 use assistd_tools::{
     Approval, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, OutputCap, PresentSpec, RunTool,
@@ -428,6 +428,23 @@ async fn semantic_requests_before_embedding_is_up_say_it_is_starting() {
             .unwrap(),
         None,
         "turn context skips recall instead of failing"
+    );
+}
+
+#[tokio::test]
+async fn document_reindex_without_a_worker_fails_instead_of_waiting_for_a_pass() {
+    let state = state_mid_startup().await;
+    let (result, events) = dispatch(&state, Request::new("d", RequestBody::DocumentsReindex)).await;
+    assert!(
+        matches!(result, Err(DispatchError::DocumentsUnavailable(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        events,
+        [error(
+            "d",
+            "document indexing is unavailable: not configured"
+        )]
     );
 }
 
