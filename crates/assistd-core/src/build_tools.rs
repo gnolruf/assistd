@@ -21,8 +21,8 @@ use assistd_tools::{
     SandboxError, SandboxInfo, SandboxRequest, SharedDirs, StandingApprovals, ToolRegistry,
     ToolSandbox, VisionGate,
     commands::{
-        BashCommand, BashPolicyCfg, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, WebCommand,
-        WmCommand, WriteCommand, WritePolicyCfg, register_readers,
+        BashCommand, BashPolicyCfg, DocsCommand, ScreenshotCommand, ScreenshotPolicyCfg,
+        SeeCommand, WebCommand, WmCommand, WriteCommand, WritePolicyCfg, register_readers,
     },
     presentation::is_spill_file_name,
     probe_sandbox,
@@ -152,9 +152,9 @@ pub fn mcp_tool_approvals(config_path: &Path) -> Result<Approvals, BuildToolsErr
     Ok(Approvals::load(config_dir.join(APPROVED_MCP_TOOLS_FILE))?)
 }
 
-/// Assemble the tool registry: the built-in commands behind `run`, `relay` and, with
-/// `memory.enabled`, the memory tools; and beside it the planning registry. Removes earlier
-/// spill files from [`BuildToolsDeps::overflow_dir`].
+/// Assemble the tool registry: the built-in commands behind `run`, `docs` among them only
+/// with `documents.enabled`, `relay` and, with `memory.enabled`, the memory tools; and beside
+/// it the planning registry. Removes earlier spill files from [`BuildToolsDeps::overflow_dir`].
 pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsError> {
     let BuildToolsDeps {
         config,
@@ -206,6 +206,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
             sandbox: Arc::clone(&sandbox),
             confirmation_gate: Arc::clone(&confirmation_gate),
             search: search.clone(),
+            docs: docs_command(config, &embedder, &semantic, &output_cap),
         }),
         output_cap: Arc::clone(&output_cap),
         scratch_dir: scratch_dir.as_deref(),
@@ -237,6 +238,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
         vision_gate,
         window_manager,
         search,
+        docs: docs_command(config, &embedder, &semantic, &output_cap),
     });
 
     let run = RunTool::new(Arc::new(commands), Arc::clone(&output_cap));
@@ -253,6 +255,24 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
     Ok(BuiltTools {
         registry: Arc::new(tools),
         planning,
+    })
+}
+
+/// `docs` over the document index, its results sized to fit `output_cap`; `None`
+/// unless `documents.enabled`.
+fn docs_command(
+    config: &Config,
+    embedder: &Arc<EmbedderHandle>,
+    semantic: &Arc<dyn SemanticStore>,
+    output_cap: &OutputCap,
+) -> Option<DocsCommand> {
+    config.documents.enabled.then(|| {
+        DocsCommand::new(
+            Arc::clone(embedder),
+            Arc::clone(semantic),
+            config.embedding.top_k.get() as usize,
+            output_cap.spec(),
+        )
     })
 }
 
@@ -390,10 +410,11 @@ pub(crate) struct PlanningCommandDeps {
     pub(crate) sandbox: Arc<SandboxInfo>,
     pub(crate) confirmation_gate: Arc<dyn ConfirmationGate>,
     pub(crate) search: Option<SearxngClient>,
+    pub(crate) docs: Option<DocsCommand>,
 }
 
-/// The commands of a planning turn: the readers, `web`, and `bash`, with no "always allow"
-/// approvals, so a script or text program run unasked is read-only by its own class.
+/// The commands of a planning turn: the readers, `web`, `docs` when given, and `bash`, with no
+/// "always allow" approvals, so a script or text program run unasked is read-only by its own class.
 pub(crate) fn planning_commands(deps: PlanningCommandDeps) -> CommandRegistry {
     let PlanningCommandDeps {
         bash_cfg,
@@ -401,6 +422,7 @@ pub(crate) fn planning_commands(deps: PlanningCommandDeps) -> CommandRegistry {
         sandbox,
         confirmation_gate,
         search,
+        docs,
     } = deps;
     let unapproved = BashPolicyCfg {
         allowlist: Arc::new(Allowlist::unsaved(sandbox.search_path())),
@@ -410,6 +432,9 @@ pub(crate) fn planning_commands(deps: PlanningCommandDeps) -> CommandRegistry {
     let mut commands = CommandRegistry::new();
     register_readers(&mut commands, &unapproved, &sandbox, &confirmation_gate);
     commands.register(WebCommand::new(approved_hosts, search));
+    if let Some(docs) = docs {
+        commands.register(docs);
+    }
     commands.register(BashCommand::new(unapproved, sandbox, confirmation_gate));
     commands
 }
@@ -425,6 +450,7 @@ struct BuiltinCommandDeps {
     vision_gate: Arc<VisionGate>,
     window_manager: Arc<dyn WindowManager>,
     search: Option<SearxngClient>,
+    docs: Option<DocsCommand>,
 }
 
 fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
@@ -439,6 +465,7 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
         vision_gate,
         window_manager,
         search,
+        docs,
     } = deps;
 
     let mut commands = CommandRegistry::new();
@@ -455,6 +482,9 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
     ));
     commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
     commands.register(WebCommand::new(approved_hosts, search));
+    if let Some(docs) = docs {
+        commands.register(docs);
+    }
     commands.register(BashCommand::new(
         bash_cfg.clone(),
         sandbox.clone(),

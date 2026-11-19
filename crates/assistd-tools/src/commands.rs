@@ -13,6 +13,7 @@ use crate::policy::{ConfirmationGate, FileScope, SandboxInfo};
 
 pub mod bash;
 pub mod cat;
+pub mod docs;
 pub mod echo;
 pub mod ls;
 pub mod program;
@@ -28,6 +29,7 @@ pub(crate) mod test_support;
 pub use crate::policy::BashPolicyCfg;
 pub use bash::BashCommand;
 pub use cat::CatCommand;
+pub use docs::DocsCommand;
 pub use echo::EchoCommand;
 pub use ls::LsCommand;
 pub use program::ProgramCommand;

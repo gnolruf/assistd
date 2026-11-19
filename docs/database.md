@@ -318,7 +318,7 @@ resumed, saying which.
   `embedding.query_prefix` is not recorded: it shapes only the query
   vector, which is never stored.
 
-Search (`recall`, `reminisce`) scans every vector of one source kind,
+Search (`recall`, `reminisce`, `docs search`) scans every vector of one source kind,
 messages or documents, on that kind's own read-only connection and keeps
 the top matches; there is no vector index. `reminisce` leaves out the
 current session's messages.

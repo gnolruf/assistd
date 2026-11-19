@@ -538,14 +538,15 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolError> {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
     use std::path::{Path, PathBuf};
 
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        AdjacentChunks, BranchId, BranchSummary, ChunkId, ChunkSource, Embedding, EmbeddingSpace,
-        EmbeddingTarget, FileStamp, IndexPass, MemoryError, MemoryId, MemoryStore, NoSemanticStore,
-        PersistedMessage, Seq, SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore,
-        UnindexedRows,
+        AdjacentChunks, BranchId, BranchSummary, ChunkId, ChunkSource, DocumentText, Embedding,
+        EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass, MemoryError, MemoryId, MemoryStore,
+        NoSemanticStore, PersistedMessage, Seq, SqliteHandle, SqliteSemanticStore,
+        SqliteTranscriptStore, UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -680,6 +681,13 @@ mod tests {
         }
         async fn count_document_chunks(&self) -> Result<u64, MemoryError> {
             NoSemanticStore.count_document_chunks().await
+        }
+        async fn document_text(
+            &self,
+            path: &Path,
+            bytes: Range<usize>,
+        ) -> Result<Option<DocumentText>, MemoryError> {
+            NoSemanticStore.document_text(path, bytes).await
         }
     }
 

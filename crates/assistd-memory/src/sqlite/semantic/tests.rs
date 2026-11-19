@@ -304,6 +304,28 @@ async fn documents_and_messages_rank_apart_and_reindexing_replaces_document_chun
 }
 
 #[tokio::test]
+async fn document_text_narrows_a_byte_range_to_whole_characters() {
+    let (_handle, store, _temp) = fresh().await;
+    let path = PathBuf::from("/notes/menu.md");
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    store
+        .index_document(pass, path.clone(), STAMP, "café crème".into())
+        .await
+        .unwrap();
+
+    let inside = store.document_text(&path, 4..9).await.unwrap().unwrap();
+    assert_eq!(
+        (inside.text.as_str(), inside.bytes, inside.total_bytes),
+        (" cr", 5..8, 12),
+        "the halves of é and è at either end must be left out"
+    );
+    let past = store.document_text(&path, 40..50).await.unwrap().unwrap();
+    assert_eq!((past.text.as_str(), past.bytes), ("", 40..40));
+    let unindexed = store.document_text(Path::new("/notes/other.md"), 0..9);
+    assert_eq!(unindexed.await.unwrap(), None);
+}
+
+#[tokio::test]
 async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_documents() {
     let (_handle, store, _temp) = fresh().await;
     let root = Path::new("/notes");

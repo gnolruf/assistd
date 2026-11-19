@@ -17,7 +17,8 @@ use crate::voice::UnitInterval;
 #[serde(default)]
 pub struct ChatConfig {
     /// First message of every request; empty disables it. Need not list
-    /// tools: requests carry their schemas.
+    /// tools: requests carry their schemas. While `documents.enabled`, a line
+    /// on searching the indexed documents follows it.
     pub system_prompt: String,
     /// Approximate token budget for system prompt plus history; older
     /// messages are summarized past it. Together with `max_response_tokens`,

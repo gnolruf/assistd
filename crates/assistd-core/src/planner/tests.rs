@@ -28,6 +28,7 @@ fn planning_registry() -> Arc<ToolRegistry> {
         sandbox: Arc::clone(&sandbox),
         confirmation_gate: gate,
         search: None,
+        docs: None,
     });
     planning_tools(PlanningToolDeps {
         commands,

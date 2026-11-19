@@ -161,7 +161,7 @@ impl TaskService {
         }
         self.end_planning_backend().await;
         let backend = self.deps.llm.isolated_backend(
-            task_system_prompt(&self.deps.config.chat.system_prompt),
+            task_system_prompt(&self.deps.config),
             SlotAssignment::Shared(SlotHolder::TaskRefine),
         )?;
         let ask = PlanAsk::Work(prompt.as_str().to_string());

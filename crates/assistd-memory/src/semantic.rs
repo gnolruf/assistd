@@ -138,6 +138,17 @@ pub struct AdjacentChunks {
     pub after: Option<ContextChunk>,
 }
 
+/// Part of an indexed document's stored text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentText {
+    pub text: String,
+    /// The bytes of the whole text that `text` covers.
+    pub bytes: Range<usize>,
+    /// Length of the whole text in bytes.
+    pub total_bytes: usize,
+    pub indexed_at: DateTime<Utc>,
+}
+
 /// Which sessions a chunk search ranks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionScope {
@@ -352,6 +363,11 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
 
     /// How many chunks the stored documents are cut into.
     async fn count_document_chunks(&self) -> Result<u64>;
+
+    /// The stored text of the document indexed at `path` within `bytes`, narrowed to
+    /// whole characters and empty past the text's end; `None` when none is indexed there.
+    async fn document_text(&self, path: &Path, bytes: Range<usize>)
+    -> Result<Option<DocumentText>>;
 }
 
 /// No-op store: writes are discarded and searches find nothing.
@@ -441,5 +457,12 @@ impl SemanticStore for NoSemanticStore {
     }
     async fn count_document_chunks(&self) -> Result<u64> {
         Ok(0)
+    }
+    async fn document_text(
+        &self,
+        _path: &Path,
+        _bytes: Range<usize>,
+    ) -> Result<Option<DocumentText>> {
+        Ok(None)
     }
 }
