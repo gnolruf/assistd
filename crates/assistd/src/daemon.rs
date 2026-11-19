@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use assistd_config::Config;
+use assistd_config::{ChatConfig, Config};
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::socket::StartupLock;
 use assistd_core::{
@@ -465,8 +465,12 @@ fn build_main_backend(
     health_probe: Arc<dyn LlmHealthProbe>,
     slot_stash: Arc<SlotStash>,
 ) -> Result<Arc<dyn LlmBackend>> {
+    let chat = ChatConfig {
+        system_prompt: assistd_core::system_prompt(config),
+        ..config.chat.clone()
+    };
     let llm = LlamaClient::new(
-        &config.chat,
+        &chat,
         &config.model,
         &config.timeouts,
         Some(api_key),

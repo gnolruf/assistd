@@ -208,6 +208,7 @@ async fn embed_page<Id>(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::ops::Range;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -216,9 +217,9 @@ mod tests {
     use async_trait::async_trait;
 
     use assistd_memory::{
-        AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit, EmbeddingSpace,
-        FileStamp, IndexPass, MemoryHit, MemoryId, NoSemanticStore, Result as MemoryResult,
-        UnindexedRows,
+        AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, DocumentText, Embedding, EmbeddingHit,
+        EmbeddingSpace, FileStamp, IndexPass, MemoryHit, MemoryId, NoSemanticStore,
+        Result as MemoryResult, UnindexedRows,
     };
 
     /// The id of the first document chunk a [`Harness`] adds, above every message chunk's.
@@ -400,6 +401,13 @@ mod tests {
         }
         async fn count_document_chunks(&self) -> MemoryResult<u64> {
             NoSemanticStore.count_document_chunks().await
+        }
+        async fn document_text(
+            &self,
+            path: &Path,
+            bytes: Range<usize>,
+        ) -> MemoryResult<Option<DocumentText>> {
+            NoSemanticStore.document_text(path, bytes).await
         }
     }
 

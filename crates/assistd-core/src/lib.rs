@@ -32,7 +32,7 @@ pub use build_tools::{
 pub use bus::{BusSubscription, ClientGone, EventBus, EventSink};
 pub use documents::{
     DocumentIndex, DocumentsUnavailable, IndexDeps, IndexPasses, MAX_DOCUMENT_CHUNKS, PassCounts,
-    PassEnd, RootPass, SkipCause, document_indexing, remove_dropped_roots,
+    PassEnd, RootPass, SkipCause, document_indexing, remove_dropped_roots, system_prompt,
 };
 pub use recovery::{
     Component, StatusSeverity, drain_join_set, install_panic_hook, spawn_supervised,

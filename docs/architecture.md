@@ -462,9 +462,10 @@ A planning turn shows how the agent means to do a piece of work before
 anything runs. The `Planner` drives the
 agent loop over a given backend with the planning registry, which
 `build_tools()` assembles beside the main one: `run` over the
-readers, `web` and a `bash` whose policy holds no "always allow" approvals,
-plus `reminisce` when memory is on. No `write`, `wm`, `see`, `screenshot`,
-`relay`, `remember` or MCP tools. The turn runs under
+readers, `web`, `docs` with `documents.enabled`, and a `bash` whose policy
+holds no "always allow" approvals, plus `reminisce` when memory is on. No
+`write`, `wm`, `see`, `screenshot`, `relay`, `remember` or MCP tools. The
+turn runs under
 `ConfirmRouter::for_planning`, which refuses every ask without prompting
 anyone in any mode, so the planning turn runs only what needs no
 confirmation; each refusal is counted and the tool result gains a note
@@ -559,9 +560,10 @@ Three additional `Tool`s sit alongside `run`: `relay` (hand a task to a
 sub-agent), `remember` (save or search facts) and `reminisce`. They don't fit the shell mold, so they're regular
 LLM-facing tools with their own JSON schemas.
 
-Built-in commands: `bash`, `cat`, `echo`, `grep`, `head`, `ls`,
+Built-in commands: `bash`, `cat`, `docs`, `echo`, `grep`, `head`, `ls`,
 `screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`,
-`write`. `cat`, `ls` and `echo` run in the daemon; `cat` and `see` put
+`write`. `docs` is registered only with `documents.enabled`. `cat`, `ls`
+and `echo` run in the daemon; `cat` and `see` put
 each file through the path guards first and ask before reading
 credentials or an owner-only file in `$HOME`. `grep`, `head`,
 `tail`, `sort`, `uniq` and `wc` are the system's GNU programs: their
@@ -823,6 +825,23 @@ one search scans about 410 MB of vectors in about 100 ms. Once a pass counts
 that many it stores no more files and reports them as skipped because the
 index is full. Each pass leaves its counts in memory, per root: files
 indexed, unchanged, removed, and skipped by reason.
+
+The model reaches the index through the `docs` command, which `build_tools()`
+registers behind `run` only with `documents.enabled`; the system prompt then
+gains one line saying so. `docs search <query>` embeds the query and prints
+one line per document for the `embedding.top_k` best (or `-n`, at most 20):
+path, similarity, the byte range of the best-matching chunk, the date the
+document was indexed, and the chunk. `docs read [--offset N] <path>` prints the
+stored text of an indexed document from a byte offset, which is how a PDF is
+read at all, since `cat` refuses binary files; a path that is not indexed is
+an error pointing at `cat`. Both fit one tool result: a search drops the
+lowest-ranked hits past 8 KiB or the result cap, and a read stops short of the
+cap and names on stderr the bytes shown and the command that continues.
+Everything either prints from a document follows a header marking it as
+untrusted data, and both count as reading this machine, so a web request later
+in the turn asks first. A search says why when it cannot run: embedding is
+not ready, nothing is indexed, or nothing indexed is embedded yet. A relay's
+quarantine has no `docs`; a sub-agent reads the inputs it was given.
 
 ### Voice (`assistd-voice`)
 

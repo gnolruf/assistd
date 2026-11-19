@@ -20,9 +20,10 @@ window-manager bindings), and integrates with the running compositor for context
   `see`, `screenshot`, `web`, `wm`, …) the model composes with `|`,
   `&&`, `||`, `;`, plus `~` and glob expansion. `web` both fetches
   pages as readable text and, with a local SearXNG installed, searches
-  the web ([web search](docs/web-search.md)). Alongside it, `remember`
-  saves and looks up facts, and `reminisce` searches
-  transcripts from earlier sessions.
+  the web ([web search](docs/web-search.md)). With folders indexed
+  (`[documents]`), `docs` searches them by meaning and reads what it
+  finds, PDFs included. Alongside `run`, `remember` saves and looks up
+  facts, and `reminisce` searches transcripts from earlier sessions.
 - **Voice in/out.** Push-to-talk and hands-free
   [wake-word listening](docs/voice/wake-word.md) via Parakeet speech-to-text,
   with the wake phrase found by a keyword spotter and tested in the chat

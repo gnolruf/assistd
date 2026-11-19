@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::hash::Hash;
-use std::os::unix::ffi::OsStringExt;
+use std::ops::Range;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -15,8 +16,8 @@ use rusqlite::{OptionalExtension, Params, Row, Transaction};
 
 use crate::{
     AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, ChunkSource, ContextChunk, DocumentId,
-    Embedding, EmbeddingHit, EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass, MemoryHit,
-    MemoryId, MessageId, Result, SemanticStore, SessionId, SessionScope, UnindexedRows,
+    DocumentText, Embedding, EmbeddingHit, EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass,
+    MemoryHit, MemoryId, MessageId, Result, SemanticStore, SessionId, SessionScope, UnindexedRows,
 };
 
 use super::connection::SqliteHandle;
@@ -404,6 +405,37 @@ impl SemanticStore for SqliteSemanticStore {
             })
             .await
     }
+
+    async fn document_text(
+        &self,
+        path: &Path,
+        bytes: Range<usize>,
+    ) -> Result<Option<DocumentText>> {
+        let path = path.to_path_buf();
+        self.handle
+            .read("document_text", move |c| {
+                c.prepare_cached(
+                    "SELECT substr(CAST(content AS BLOB), ?2 + 1, ?3),
+                            length(CAST(content AS BLOB)), indexed_at
+                     FROM documents WHERE path = ?1",
+                )?
+                .query_row(
+                    rusqlite::params![path.as_os_str().as_bytes(), bytes.start, bytes.len()],
+                    |row| {
+                        let (skipped, text) = whole_characters(row.get_ref(0)?.as_blob()?);
+                        let start = bytes.start + skipped;
+                        Ok(DocumentText {
+                            text: text.to_owned(),
+                            bytes: start..start + text.len(),
+                            total_bytes: row.get(1)?,
+                            indexed_at: timestamp_at(row, 2)?,
+                        })
+                    },
+                )
+                .optional()
+            })
+            .await
+    }
 }
 
 /// Which neighbour of a chunk's source position [`adjacent_chunk`] looks up.
@@ -762,6 +794,20 @@ fn session_label(title: Option<String>, opening: Option<&str>) -> String {
         Some((cut, _)) => format!("{}…", &first_line[..cut]),
         None => first_line.to_string(),
     }
+}
+
+/// The whole characters of `bytes`, a slice of UTF-8 text cut anywhere, and how many
+/// bytes of a character cut at its start come before them.
+fn whole_characters(bytes: &[u8]) -> (usize, &str) {
+    let skipped = bytes
+        .iter()
+        .take_while(|&&byte| byte & 0xC0 == 0x80)
+        .count();
+    let whole = bytes[skipped..]
+        .utf8_chunks()
+        .next()
+        .map_or("", |chunk| chunk.valid());
+    (skipped, whole)
 }
 
 fn memory_hit(row: &Row<'_>) -> rusqlite::Result<MemoryHit> {

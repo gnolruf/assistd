@@ -5,6 +5,7 @@ use std::fmt::{Display, Write};
 use std::num::NonZeroU32;
 
 use assistd_search::{SearchError, SearchQuery, SearchResults, SearxngClient};
+use assistd_utils::text::collapse_whitespace;
 
 use crate::chain::Word;
 use crate::command::{CommandError, CommandOutput, Hint};
@@ -148,8 +149,7 @@ fn listed(results: &SearchResults, limit: usize) -> CommandOutput {
 fn tsv(results: &SearchResults, limit: usize) -> String {
     let mut out = String::new();
     for answer in &results.answers {
-        let answer = answer.split_whitespace().collect::<Vec<_>>().join(" ");
-        let _ = writeln!(out, "answer\t{answer}");
+        let _ = writeln!(out, "answer\t{}", collapse_whitespace(answer));
     }
     for (rank, hit) in results.results.iter().take(limit).enumerate() {
         let _ = writeln!(

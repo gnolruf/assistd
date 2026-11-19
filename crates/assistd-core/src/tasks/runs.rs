@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, info_span, warn};
 
+use assistd_config::Config;
 use assistd_ipc::{ConfirmSource, Event, EventBody, TaskId, TaskRunId, TaskTrigger};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent, SlotHolder};
 use assistd_memory::{
@@ -25,6 +26,7 @@ use super::{FailedStep, TaskError, TaskService};
 use crate::admission::lanes::LaneLease;
 use crate::admission::queue::QueuedRun;
 use crate::bus::EventSink;
+use crate::documents::system_prompt;
 use crate::judge::{BackendJudgeModel, safety_judge};
 use crate::presence::RequestGuard;
 use crate::relay::delete_answer_files;
@@ -196,7 +198,7 @@ impl TaskService {
         let Some(awake) = self.wake_for_task_run(None, cancel).await? else {
             return Ok(None);
         };
-        let system_prompt = task_system_prompt(&self.deps.config.chat.system_prompt);
+        let system_prompt = task_system_prompt(&self.deps.config);
         let holder = SlotHolder::TaskRun(turn.run);
         let backend = self
             .deps
@@ -365,7 +367,8 @@ impl TaskService {
 }
 
 /// The main system prompt followed by [`TASK_PREAMBLE`].
-pub(super) fn task_system_prompt(main: &str) -> String {
+pub(super) fn task_system_prompt(config: &Config) -> String {
+    let main = system_prompt(config);
     if main.trim().is_empty() {
         TASK_PREAMBLE.to_string()
     } else {

@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer};
 use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::http::{BodyError, local_client_builder, read_capped};
 use assistd_utils::readiness::{NotReady, ReadinessCell};
+use assistd_utils::text::collapse_whitespace;
 
 use crate::error::SearchError;
 
@@ -150,7 +151,7 @@ impl SearxngClient {
 
 fn collapsed_whitespace<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     let text = Option::<String>::deserialize(deserializer)?.unwrap_or_default();
-    Ok(text.split_whitespace().collect::<Vec<_>>().join(" "))
+    Ok(collapse_whitespace(&text))
 }
 
 fn answer_texts<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {

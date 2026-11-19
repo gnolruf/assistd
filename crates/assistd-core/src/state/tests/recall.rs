@@ -130,6 +130,13 @@ impl SemanticStore for FixedHits {
     async fn count_document_chunks(&self) -> assistd_memory::Result<u64> {
         NoSemanticStore.count_document_chunks().await
     }
+    async fn document_text(
+        &self,
+        path: &Path,
+        bytes: Range<usize>,
+    ) -> assistd_memory::Result<Option<DocumentText>> {
+        NoSemanticStore.document_text(path, bytes).await
+    }
 }
 
 fn recall_hit(session_id: SessionId, message: i64, similarity: f32, text: &str) -> EmbeddingHit {
