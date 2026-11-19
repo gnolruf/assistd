@@ -29,8 +29,8 @@ pub(crate) struct DocumentsArgs {
 #[derive(Subcommand)]
 pub(crate) enum DocumentsAction {
     /// Whether indexing and embedding run and how full the index is, then for each
-    /// indexed folder: whether it can be read, what is stored from it and still waiting
-    /// for a vector, and what the last pass over it did and skipped.
+    /// indexed folder: whether it can be read and is watched, what is stored from it and
+    /// still waiting for a vector, and what the last pass over it did and skipped.
     Status,
     /// Walk every indexed folder now, indexing changed files and dropping removed
     /// ones. Prints a progress line as files are handled, then what the pass over
@@ -192,6 +192,14 @@ fn describe_root(status: &DocumentRootStatus) -> String {
         None => "available".to_owned(),
         Some(reason) => format!("unavailable ({})", escape_controls_single_line(reason)),
     };
+    let unwatched = status
+        .unwatched
+        .as_ref()
+        .map(|reason| {
+            let reason = escape_controls_single_line(reason);
+            format!("  changes: wait for the next pass ({reason})\n")
+        })
+        .unwrap_or_default();
     let last_pass = status
         .last_pass
         .as_ref()
@@ -203,8 +211,8 @@ fn describe_root(status: &DocumentRootStatus) -> String {
         .map(|skipped| format!("  skipped: {skipped}\n"))
         .unwrap_or_default();
     format!(
-        "{}\n  folder: {folder}\n  stored: {} documents in {} chunks, {} waiting for a vector\n  \
-         last pass: {last_pass}\n{skipped}",
+        "{}\n  folder: {folder}\n{unwatched}  stored: {} documents in {} chunks, {} waiting for a \
+         vector\n  last pass: {last_pass}\n{skipped}",
         escape_controls_single_line(&status.root),
         status.documents,
         status.chunks,

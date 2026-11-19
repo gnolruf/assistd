@@ -390,6 +390,13 @@ mod tests {
         async fn finish_index_pass(&self, pass: IndexPass) -> MemoryResult<u64> {
             NoSemanticStore.finish_index_pass(pass).await
         }
+        async fn finish_index_pass_under(
+            &self,
+            pass: IndexPass,
+            paths: Vec<PathBuf>,
+        ) -> MemoryResult<u64> {
+            NoSemanticStore.finish_index_pass_under(pass, paths).await
+        }
         async fn remove_document(&self, path: &Path) -> MemoryResult<bool> {
             NoSemanticStore.remove_document(path).await
         }

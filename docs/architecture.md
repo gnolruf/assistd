@@ -60,7 +60,7 @@ flowchart TB
 | `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | every other `assistd-*` crate                                                    |
 | `assistd-chat`   | The `assistd chat` terminal window and the `assistd settings` panel, a client that only reads and writes the socket. | `config`, `ipc`, `utils`                                                         |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
-| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, document index passes, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
+| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, document index passes and the watches between them, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-documents` | Document text extraction and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
@@ -820,6 +820,27 @@ unlisted; it is a skipped file. When the worker exits over a file it is
 restarted and asked again, and a file it exits over twice is skipped, so one
 file that crashes the extractor cannot stop the pass.
 
+Between passes every root is watched recursively with `notify` (inotify), one
+watcher per root, set up on the blocking pool before the first pass. The
+paths that change under a root are gathered for two seconds after the first
+one, then a pass held to them runs: the same walk, pruned to those paths and
+the directories that lead to them, so the same files are left out; the same
+stamp check and extraction; and at its end the removal of the documents at
+or under those paths that it did not see. That covers a deleted file, both
+ends of a rename, and a directory moved in or out, which inotify reports as
+one path. A read is not a change, and a pass over changed paths is not
+recorded as the root's last pass. An edited `.gitignore` takes effect for the
+files it names at the next whole pass.
+
+When the kernel's event queue overflows, or more than 65,536 paths change
+under a root within one window, that root gets a whole pass instead. A root
+that cannot be watched, because the user is out of inotify watches
+(`fs.inotify.max_user_watches`) or the folder is missing at start, is logged
+once and left to passes. So is a root whose watch fails later or whose
+folder is removed or moved, after one last pass over it; the watch is not
+set up again before the daemon restarts. Passes and the indexing a watch
+asks for share one loop and never overlap, and a requested round goes first.
+
 The stored documents are held to 500,000 chunks (`MAX_DOCUMENT_CHUNKS`), where
 one search scans about 410 MB of vectors in about 100 ms. Once a pass counts
 that many it stores no more files and reports them as skipped because the
@@ -829,8 +850,9 @@ indexed, unchanged, removed, and skipped by reason.
 `assistd documents status` (`DocumentsStatus`) prints those counts beside what
 the store holds of each root: its documents, their chunks, and the chunks
 still waiting for a vector. It also says whether each root can be listed now,
-whether the extraction worker and the embedder run, and how many chunks the
-index holds of its ceiling. `assistd documents reindex` (`DocumentsReindex`)
+why its changes wait for a pass when it is not watched, whether the
+extraction worker and the embedder run, and how many chunks the index holds
+of its ceiling. `assistd documents reindex` (`DocumentsReindex`)
 asks for a round of passes and streams the progress of the round that answers
 it, which is the next one when a round is already under way; it is refused
 when no worker will run, and is not held to the dispatch timeout.
@@ -841,8 +863,8 @@ The daemon broadcasts a `DocumentActivity` whenever the root being walked or
 the number of document chunks left to embed changes. It counts those chunks
 when a pass starts or ends and every five seconds while one runs or some
 wait, and reports none while there is no embedder to take them. The chat's
-status line shows `indexing documents` during a pass and otherwise the chunks
-left to embed.
+status line shows `indexing documents` during a pass, one over changed paths
+included, and otherwise the chunks left to embed.
 
 The model reaches the index through the `docs` command, which `build_tools()`
 registers behind `run` only with `documents.enabled`; the system prompt then

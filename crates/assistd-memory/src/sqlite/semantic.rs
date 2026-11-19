@@ -385,6 +385,17 @@ impl SemanticStore for SqliteSemanticStore {
             .await
     }
 
+    async fn finish_index_pass_under(&self, pass: IndexPass, paths: Vec<PathBuf>) -> Result<u64> {
+        self.handle
+            .write("finish_index_pass_under", move |tx| {
+                paths
+                    .iter()
+                    .map(|path| documents::remove_unseen_under(tx, pass, path))
+                    .sum()
+            })
+            .await
+    }
+
     async fn remove_document(&self, path: &Path) -> Result<bool> {
         let path = path.to_path_buf();
         self.handle

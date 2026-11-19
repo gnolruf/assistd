@@ -1,5 +1,6 @@
-//! One pass over one index root: check the stamp of every file the walk finds,
-//! extract and store the changed ones, and remove the documents no longer found.
+//! One pass over one index root or over the changed parts of it: check the stamp of
+//! every file the walk finds, extract and store the changed ones, and remove the
+//! documents no longer found.
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
@@ -16,7 +17,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use tracing::debug;
 
 use super::indexer::DocumentIndex;
-use super::walk::{IndexRoot, Walked, root_unavailable};
+use super::walk::{IndexRoot, WalkScope, Walked, root_unavailable};
 
 /// Most chunks the stored documents are cut into. A search scans every document
 /// vector, about 100 ms and 410 MB of them here; a pass that reaches this stores
@@ -238,22 +239,26 @@ impl RunningPass<'_> {
     }
 }
 
-/// Run one pass over `root`, leaving out the files `guards` call sensitive and
-/// reporting its progress to `index`. Stops between files once `shutdown` flips.
+/// Run one pass over `scope` of `root`, leaving out the files `guards` call sensitive
+/// and reporting its progress to `index`. Stops between files once `shutdown` flips.
 pub(super) async fn index_root(
     deps: &IndexDeps,
     index: &DocumentIndex,
     root: Arc<IndexRoot>,
+    scope: WalkScope,
     guards: Arc<PathGuards>,
     shutdown: &watch::Receiver<bool>,
 ) -> RootPass {
     let mut counts = PassCounts::default();
     let end = match unavailable(&root).await {
         Some(why) => PassEnd::RootUnavailable(why),
-        None => match walk_and_store(deps, index, &root, guards, shutdown, &mut counts).await {
-            Ok(()) => PassEnd::Finished,
-            Err(stopped) => PassEnd::Incomplete(stopped.to_string()),
-        },
+        None => {
+            let stored = walk_and_store(deps, index, &root, scope, guards, shutdown, &mut counts);
+            match stored.await {
+                Ok(()) => PassEnd::Finished,
+                Err(stopped) => PassEnd::Incomplete(stopped.to_string()),
+            }
+        }
     };
     RootPass {
         root: root.path().to_path_buf(),
@@ -268,12 +273,13 @@ async fn unavailable(root: &Arc<IndexRoot>) -> Option<String> {
     on_blocking_pool(move || root_unavailable(root.path())).await
 }
 
-/// Begin a pass, store what the walk finds, and finish the pass only when the
-/// whole root was listed and is still there.
+/// Begin a pass, store what the walk finds, and finish the pass only when all of
+/// `scope` was listed and the root is still there.
 async fn walk_and_store(
     deps: &IndexDeps,
     index: &DocumentIndex,
     root: &Arc<IndexRoot>,
+    scope: WalkScope,
     guards: Arc<PathGuards>,
     shutdown: &watch::Receiver<bool>,
     counts: &mut PassCounts,
@@ -291,8 +297,10 @@ async fn walk_and_store(
         worker: deps.extractor.subscribe_readiness(),
     };
     let (batches_tx, batches) = mpsc::channel(WALK_QUEUE_BATCHES);
-    let walked_root = Arc::clone(root);
-    let walk = on_blocking_pool(move || walk_in_batches(&walked_root, &guards, &batches_tx));
+    let (walked_root, walked_scope) = (Arc::clone(root), scope.clone());
+    let walk = on_blocking_pool(move || {
+        walk_in_batches(&walked_root, &walked_scope, &guards, &batches_tx);
+    });
     let ((), stored) = tokio::join!(walk, store_batches(&mut running, batches));
     stored?;
     if let Some(error) = running.unlisted.take() {
@@ -301,7 +309,13 @@ async fn walk_and_store(
     if let Some(why) = unavailable(root).await {
         return Err(PassStopped::RootGone(why));
     }
-    running.counts.removed = deps.store.finish_index_pass(pass).await?;
+    running.counts.removed = match scope {
+        WalkScope::WholeRoot => deps.store.finish_index_pass(pass).await?,
+        WalkScope::Under(paths) => {
+            let paths = Arc::unwrap_or_clone(paths).into_iter().collect();
+            deps.store.finish_index_pass_under(pass, paths).await?
+        }
+    };
     Ok(())
 }
 
@@ -317,11 +331,16 @@ async fn store_batches(
     Ok(())
 }
 
-/// Walk `root` on the calling thread, sending what it finds in batches of
-/// [`WALK_BATCH_FILES`] until the receiver is dropped.
-fn walk_in_batches(root: &IndexRoot, guards: &PathGuards, batches: &mpsc::Sender<Vec<Walked>>) {
+/// Walk `scope` of `root` on the calling thread, sending what it finds in batches
+/// of [`WALK_BATCH_FILES`] until the receiver is dropped.
+fn walk_in_batches(
+    root: &IndexRoot,
+    scope: &WalkScope,
+    guards: &PathGuards,
+    batches: &mpsc::Sender<Vec<Walked>>,
+) {
     let mut batch = Vec::with_capacity(WALK_BATCH_FILES);
-    root.walk(guards, |walked| {
+    root.walk(scope, guards, |walked| {
         batch.push(walked);
         if batch.len() < WALK_BATCH_FILES {
             return ControlFlow::Continue(());
@@ -387,7 +406,16 @@ mod tests {
         let guards = Arc::new(PathGuards::default());
         let (_stop, shutdown) = watch::channel(false);
         let index = DocumentIndex::default();
-        let pass = || index_root(&deps, &index, root.clone(), guards.clone(), &shutdown);
+        let pass = || {
+            index_root(
+                &deps,
+                &index,
+                root.clone(),
+                WalkScope::WholeRoot,
+                guards.clone(),
+                &shutdown,
+            )
+        };
 
         let present = pass().await;
         assert_eq!(present.end, PassEnd::Finished);

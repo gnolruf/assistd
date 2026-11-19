@@ -12,6 +12,10 @@ use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::sqlite::timestamp::now_millis;
 use crate::{ChunkId, DocumentId, FileStamp, IndexPass};
 
+/// The byte after `/`: every path inside a directory sorts between the directory's
+/// path followed by `/` and followed by this.
+const PAST_SEPARATOR: &[u8] = b"0";
+
 /// A `documents` row as one pass read it from disk.
 struct DocumentRow<'a> {
     pass: IndexPass,
@@ -286,6 +290,31 @@ pub(super) fn remove_unseen(conn: &Connection, pass: IndexPass) -> rusqlite::Res
     let removed = conn
         .prepare_cached("DELETE FROM documents WHERE root_id = ?1 AND seen_pass < ?2")?
         .execute(rusqlite::params![pass.root, pass.pass])?;
+    Ok(u64::try_from(removed).unwrap_or(u64::MAX))
+}
+
+/// Remove the documents of `pass`'s root at or under `path` that it did not see,
+/// returning how many. The `+` keeps the planner on the index over `path`.
+pub(super) fn remove_unseen_under(
+    conn: &Connection,
+    pass: IndexPass,
+    path: &Path,
+) -> rusqlite::Result<u64> {
+    let path = path.as_os_str().as_bytes();
+    let directory = path.strip_suffix(b"/").unwrap_or(path);
+    let removed = conn
+        .prepare_cached(
+            "DELETE FROM documents
+             WHERE (path = ?1 OR (path > ?2 AND path < ?3))
+               AND +root_id = ?4 AND seen_pass < ?5",
+        )?
+        .execute(rusqlite::params![
+            path,
+            [directory, b"/"].concat(),
+            [directory, PAST_SEPARATOR].concat(),
+            pass.root,
+            pass.pass
+        ])?;
     Ok(u64::try_from(removed).unwrap_or(u64::MAX))
 }
 

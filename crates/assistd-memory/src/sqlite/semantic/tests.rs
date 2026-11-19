@@ -449,6 +449,50 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
 }
 
 #[tokio::test]
+async fn a_pass_over_part_of_a_root_drops_only_the_unseen_documents_under_it() {
+    let (_handle, store, _temp) = fresh().await;
+    let root = Path::new("/notes");
+    let [plan, seen, moved_away, deleted, beside] = [
+        "plan.md",
+        "work/seen.md",
+        "work/old/moved.md",
+        "deleted.md",
+        "workshop.md",
+    ]
+    .map(|name| root.join(name));
+    let whole = store.begin_index_pass(root).await.unwrap();
+    for path in [&plan, &seen, &moved_away, &deleted, &beside] {
+        store
+            .index_document(whole, path.clone(), STAMP, one_page("text"))
+            .await
+            .unwrap();
+    }
+
+    let part = store.begin_index_pass(root).await.unwrap();
+    let changed = store
+        .changed_documents(part, vec![(seen.clone(), STAMP)])
+        .await
+        .unwrap();
+    assert!(changed.is_empty());
+    let removed = store
+        .finish_index_pass_under(part, vec![root.join("work"), deleted.clone()])
+        .await
+        .unwrap();
+
+    assert_eq!(removed, 2);
+    for (path, kept) in [
+        (plan, true),
+        (seen, true),
+        (beside, true),
+        (moved_away, false),
+        (deleted, false),
+    ] {
+        let stored = store.document_text(&path, 0, 0..4).await.unwrap();
+        assert_eq!(stored.is_some(), kept, "{}", path.display());
+    }
+}
+
+#[tokio::test]
 async fn a_document_chunk_keeps_its_vector_wherever_its_text_moves() {
     let (_handle, store, _temp) = fresh().await;
     let path = PathBuf::from("/notes/plan.md");

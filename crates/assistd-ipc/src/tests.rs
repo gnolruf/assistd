@@ -1106,13 +1106,14 @@ fn document_status_event_cases() -> Vec<(Event, &'static str)> {
                 status: DocumentRootStatus {
                     root: "/home/u/notes".into(),
                     unavailable: Some("it is empty".into()),
+                    unwatched: Some("no inotify watches are left".into()),
                     documents: 2,
                     chunks: 12,
                     unembedded_chunks: 5,
                     last_pass: Some(stopped_early),
                 },
             }),
-            r#"{"id":"r","type":"document_root","status":{"root":"/home/u/notes","unavailable":"it is empty","documents":2,"chunks":12,"unembedded_chunks":5,"last_pass":{"ended_at":"2026-11-05T14:00:00Z","end":{"outcome":"incomplete","reason":"the daemon is shutting down"},"counts":{"indexed":1,"unchanged":1,"removed":0,"skipped":[{"reason":"too_large","files":2},{"reason":"index_full","files":1}]}}}}"#,
+            r#"{"id":"r","type":"document_root","status":{"root":"/home/u/notes","unavailable":"it is empty","unwatched":"no inotify watches are left","documents":2,"chunks":12,"unembedded_chunks":5,"last_pass":{"ended_at":"2026-11-05T14:00:00Z","end":{"outcome":"incomplete","reason":"the daemon is shutting down"},"counts":{"indexed":1,"unchanged":1,"removed":0,"skipped":[{"reason":"too_large","files":2},{"reason":"index_full","files":1}]}}}}"#,
         ),
         (
             event(EventBody::DocumentActivity {
