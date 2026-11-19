@@ -312,7 +312,7 @@ async fn walk_and_store(
     running.counts.removed = match scope {
         WalkScope::WholeRoot => deps.store.finish_index_pass(pass).await?,
         WalkScope::Under(paths) => {
-            let paths = paths.iter().cloned().collect();
+            let paths = Arc::unwrap_or_clone(paths).into_iter().collect();
             deps.store.finish_index_pass_under(pass, paths).await?
         }
     };
@@ -406,13 +406,12 @@ mod tests {
         let guards = Arc::new(PathGuards::default());
         let (_stop, shutdown) = watch::channel(false);
         let index = DocumentIndex::default();
-        let whole = WalkScope::WholeRoot;
         let pass = || {
             index_root(
                 &deps,
                 &index,
                 root.clone(),
-                whole.clone(),
+                WalkScope::WholeRoot,
                 guards.clone(),
                 &shutdown,
             )

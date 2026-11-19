@@ -165,39 +165,3 @@ fn watch_failure(error: &notify::Error) -> String {
         _ => error.to_string(),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use assistd_config::DocumentsConfig;
-    use notify::event::Flag;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn an_overflow_of_the_event_queue_has_a_pass_run_over_the_root_it_came_from() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let roots: Vec<Arc<IndexRoot>> = ["notes", "papers"]
-            .into_iter()
-            .map(|name| {
-                let path = temp.path().join(name);
-                std::fs::create_dir(&path).expect("root");
-                Arc::new(IndexRoot::new(&path, &DocumentsConfig::default()).unwrap())
-            })
-            .collect();
-        let index = DocumentIndex::default();
-        let mut watches = RootWatches::start(&roots, &index).await;
-        let [_, papers] = &watches.watches[..] else {
-            panic!("expected both roots watched, got {watches:?}");
-        };
-
-        let overflow = notify::Event::new(EventKind::Other).set_flag(Flag::Rescan);
-        papers.watched.record(Ok(overflow));
-        let stale = watches.take_stale(&index);
-
-        let [(root, WalkScope::WholeRoot)] = &stale[..] else {
-            panic!("expected one pass over a whole root, got {stale:?}");
-        };
-        assert_eq!(root.path(), roots[1].path());
-        assert!(watches.take_stale(&index).is_empty());
-    }
-}

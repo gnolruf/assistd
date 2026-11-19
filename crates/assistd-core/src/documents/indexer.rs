@@ -127,7 +127,6 @@ impl DocumentIndex {
         });
     }
 
-    /// No pass runs any more, after one or more outside a round.
     fn end_watched_passes(&self) {
         self.progress
             .send_if_modified(|progress| progress.running.take().is_some());
@@ -210,8 +209,6 @@ impl IndexPasses {
         index.end_round();
     }
 
-    /// Run a pass over each scope in `stale`, which a root's watch reported. One over
-    /// a whole root is recorded as that root's last pass.
     async fn index_stale(
         &self,
         stale: Vec<(Arc<IndexRoot>, WalkScope)>,
@@ -247,7 +244,6 @@ impl IndexPasses {
     }
 }
 
-/// Run a pass over all of `root` and record it as the root's last.
 async fn index_whole_root(
     deps: &IndexDeps,
     index: &DocumentIndex,
@@ -311,7 +307,6 @@ fn log_pass(pass: &RootPass) {
     warn_if_index_full(pass);
 }
 
-/// Log what a pass over the changed paths of a root did.
 fn log_changes(pass: &RootPass) {
     let (root, counts) = (pass.root.display(), &pass.counts);
     let skipped: u64 = counts.skipped.values().sum();

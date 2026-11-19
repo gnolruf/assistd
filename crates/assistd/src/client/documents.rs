@@ -29,9 +29,8 @@ pub(crate) struct DocumentsArgs {
 #[derive(Subcommand)]
 pub(crate) enum DocumentsAction {
     /// Whether indexing and embedding run and how full the index is, then for each
-    /// indexed folder: whether it can be read, why its changes wait for a pass if it
-    /// is not watched, what is stored from it and still waiting for a vector, and what
-    /// the last pass over it did and skipped.
+    /// indexed folder: whether it can be read and is watched, what is stored from it and
+    /// still waiting for a vector, and what the last pass over it did and skipped.
     Status,
     /// Walk every indexed folder now, indexing changed files and dropping removed
     /// ones. Prints a progress line as files are handled, then what the pass over
