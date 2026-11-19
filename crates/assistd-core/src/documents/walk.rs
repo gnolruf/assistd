@@ -1,9 +1,11 @@
 //! Which files under an index root are indexed: the walk that leaves out hidden,
 //! ignored, excluded, oversized and sensitive ones, and follows no symlink.
 
+use std::collections::BTreeSet;
 use std::io;
-use std::ops::ControlFlow;
+use std::ops::{Bound, ControlFlow};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use assistd_config::DocumentsConfig;
 use assistd_memory::FileStamp;
@@ -23,6 +25,30 @@ pub(super) enum Walked {
     /// Part of the root could not be listed, so files the walk never reached may
     /// still be there; holds the error.
     Unlisted(String),
+}
+
+/// How much of a root one walk covers.
+#[derive(Debug, Clone)]
+pub(super) enum WalkScope {
+    WholeRoot,
+    /// Only what is at or under one of these paths.
+    Under(Arc<BTreeSet<PathBuf>>),
+}
+
+impl WalkScope {
+    /// Whether the walk visits `path`: it is in scope, or a directory on the way
+    /// to something that is.
+    fn reaches(&self, path: &Path) -> bool {
+        let Self::Under(paths) = self else {
+            return true;
+        };
+        let from_path_on = (Bound::Included(path), Bound::Unbounded);
+        path.ancestors().any(|ancestor| paths.contains(ancestor))
+            || paths
+                .range::<Path, _>(from_path_on)
+                .next()
+                .is_some_and(|next| next.starts_with(path))
+    }
 }
 
 /// One index root with the `documents.exclude` patterns and size limit its files
@@ -56,20 +82,23 @@ impl IndexRoot {
         self.max_file_bytes
     }
 
-    /// Hand `visit` what the walk makes of each entry under the root until it
-    /// breaks. Ignore files count from the root down, in or out of a git
+    /// Hand `visit` what the walk makes of each entry in `scope` under the root
+    /// until it breaks. Ignore files count from the root down, in or out of a git
     /// repository. Blocks on the filesystem.
     pub(super) fn walk(
         &self,
+        scope: &WalkScope,
         guards: &PathGuards,
         mut visit: impl FnMut(Walked) -> ControlFlow<()>,
     ) {
-        let excluded = self.excluded.clone();
+        let (excluded, scope) = (self.excluded.clone(), scope.clone());
         let entries = WalkBuilder::new(&self.path)
             .parents(false)
             .git_global(false)
             .require_git(false)
-            .filter_entry(move |entry| !is_excluded(&excluded, entry))
+            .filter_entry(move |entry| {
+                !is_excluded(&excluded, entry) && scope.reaches(entry.path())
+            })
             .build();
         for entry in entries {
             let walked = match entry {
@@ -201,10 +230,10 @@ mod tests {
             ..GuardRoots::default()
         });
 
-        let (mut candidates, mut skipped) = (Vec::new(), Vec::new());
-        IndexRoot::new(&root, &documents)
-            .expect("valid patterns")
-            .walk(&guards, |walked| {
+        let index_root = IndexRoot::new(&root, &documents).expect("valid patterns");
+        let walk = |scope: &WalkScope| {
+            let (mut candidates, mut skipped) = (Vec::new(), Vec::new());
+            index_root.walk(scope, &guards, |walked| {
                 match walked {
                     Walked::Candidate { path, .. } => candidates.push(path),
                     Walked::Skipped(cause) => skipped.push(cause),
@@ -212,13 +241,28 @@ mod tests {
                 }
                 ControlFlow::Continue(())
             });
-        candidates.sort();
-        skipped.sort();
+            candidates.sort();
+            skipped.sort();
+            (candidates, skipped)
+        };
 
+        let (candidates, skipped) = walk(&WalkScope::WholeRoot);
         assert_eq!(
             candidates,
             [root.join("plan.md"), root.join("work/deep.md")]
         );
         assert_eq!(skipped, [SkipCause::Sensitive, SkipCause::TooLarge]);
+
+        let changed = [
+            "work",
+            "ignored.md",
+            "drafts/idea.md",
+            "token.md",
+            "deleted.md",
+        ];
+        let changed = changed.into_iter().map(|name| root.join(name)).collect();
+        let (candidates, skipped) = walk(&WalkScope::Under(Arc::new(changed)));
+        assert_eq!(candidates, [root.join("work/deep.md")]);
+        assert_eq!(skipped, [SkipCause::Sensitive]);
     }
 }

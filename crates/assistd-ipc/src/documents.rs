@@ -98,6 +98,10 @@ pub struct DocumentRootStatus {
     /// Why its files cannot be listed now; `None` while they can.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
+    /// Why changes under it wait for the next pass instead of being indexed as they
+    /// happen; `None` unless its watch failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unwatched: Option<String>,
     /// Documents stored from it.
     pub documents: u64,
     /// Chunks those documents are cut into.

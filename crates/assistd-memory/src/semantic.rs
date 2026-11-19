@@ -274,8 +274,9 @@ impl FileStamp {
     }
 }
 
-/// One walk over an index root's files, from [`SemanticStore::begin_index_pass`] to
-/// [`SemanticStore::finish_index_pass`]. At most one pass per root runs at a time.
+/// One walk over an index root's files or over part of them, from
+/// [`SemanticStore::begin_index_pass`] to [`SemanticStore::finish_index_pass`] or
+/// [`SemanticStore::finish_index_pass_under`]. At most one pass per root runs at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexPass {
     pub(crate) root: i64,
@@ -369,6 +370,10 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     /// Remove every document of `pass`'s root that the pass did not see, returning
     /// how many.
     async fn finish_index_pass(&self, pass: IndexPass) -> Result<u64>;
+
+    /// Remove the documents at or under any of `paths` that `pass` did not see,
+    /// returning how many; for a pass that walked only those parts of its root.
+    async fn finish_index_pass_under(&self, pass: IndexPass, paths: Vec<PathBuf>) -> Result<u64>;
 
     /// Remove the document at `path` with its chunks and vectors; `false` when
     /// none was indexed.
@@ -472,6 +477,9 @@ impl SemanticStore for NoSemanticStore {
         Ok(Vec::new())
     }
     async fn finish_index_pass(&self, _pass: IndexPass) -> Result<u64> {
+        Ok(0)
+    }
+    async fn finish_index_pass_under(&self, _pass: IndexPass, _paths: Vec<PathBuf>) -> Result<u64> {
         Ok(0)
     }
     async fn remove_document(&self, _path: &Path) -> Result<bool> {

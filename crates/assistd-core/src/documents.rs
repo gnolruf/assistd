@@ -1,6 +1,6 @@
 //! Document indexing: the extraction worker's launch in a reader sandbox over the
-//! index roots, the passes that walk those roots into the index, and the gate on
-//! embedding what they store.
+//! index roots, the passes that walk those roots into the index, the watches that
+//! have changed files indexed between them, and the gate on embedding what they store.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,7 @@ pub(crate) mod embed_gate;
 mod indexer;
 mod pass;
 mod walk;
+mod watch;
 
 pub(crate) use walk::root_unavailable;
 

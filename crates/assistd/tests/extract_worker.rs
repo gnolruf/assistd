@@ -1,5 +1,5 @@
-//! The extraction worker in its sandbox: what it reads, what it cannot, and an index
-//! pass through it. Returns early when the bwrap sandbox cannot start.
+//! The extraction worker in its sandbox: what it reads, what it cannot, and the index
+//! passes and watch through it. Returns early when the bwrap sandbox cannot start.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +18,7 @@ const WORKER: &str = env!("CARGO_BIN_EXE_assistd");
 const WORKER_SUBCOMMAND: &str = "extract-worker";
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const STARTUP_LIMIT: Duration = Duration::from_secs(60);
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 fn bwrap_sandbox() -> Option<Arc<SandboxInfo>> {
     match probe_sandbox(
@@ -29,6 +30,27 @@ fn bwrap_sandbox() -> Option<Arc<SandboxInfo>> {
         Ok(ToolSandbox::Bwrap(sandbox)) => Some(sandbox),
         _ => None,
     }
+}
+
+/// Ask for a round of passes and wait for a pass that ended after `earlier`.
+async fn pass_after(index: &DocumentIndex, earlier: Option<&RootPass>) -> RootPass {
+    index.request_pass();
+    let ended = async {
+        loop {
+            match index.last_passes().pop() {
+                Some(last) if Some(&last) != earlier => return last,
+                _ => tokio::time::sleep(POLL_INTERVAL).await,
+            }
+        }
+    };
+    tokio::time::timeout(STARTUP_LIMIT, ended)
+        .await
+        .expect("the pass ends")
+}
+
+async fn is_stored(store: &SqliteSemanticStore, path: &Path) -> bool {
+    let first_byte = store.document_text(path, 0, 0..1).await;
+    first_byte.expect("the store answers").is_some()
 }
 
 #[tokio::test]
@@ -99,14 +121,15 @@ async fn the_worker_reads_files_under_its_roots_and_none_outside_them() {
 }
 
 #[tokio::test]
-async fn a_pass_indexes_changed_files_through_the_worker_and_drops_deleted_ones() {
+async fn passes_and_the_watch_between_them_index_changed_files_and_drop_deleted_ones() {
     let Some(sandbox) = bwrap_sandbox() else {
         return;
     };
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path().join("notes");
-    std::fs::create_dir(&root).expect("index root");
-    std::fs::write(root.join("plan.md"), "# Plan\n\nfirst draft\n").expect("document");
+    let plan = root.join("work/plan.md");
+    std::fs::create_dir_all(root.join("work")).expect("index root");
+    std::fs::write(&plan, "# Plan\n\nfirst draft\n").expect("document");
     std::fs::write(root.join("old.md"), "to be deleted\n").expect("document");
     std::fs::write(root.join("image.png"), b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").expect("binary");
     let documents = DocumentsConfig {
@@ -138,34 +161,17 @@ async fn a_pass_indexes_changed_files_through_the_worker_and_drops_deleted_ones(
         let index = Arc::clone(&index);
         tokio::spawn(async move { passes.run(deps, &index, shutdown).await })
     };
-    let pass_after = |earlier: Option<RootPass>| {
-        let index = Arc::clone(&index);
-        async move {
-            index.request_pass();
-            let ended = async {
-                loop {
-                    match index.last_passes().pop() {
-                        Some(last) if Some(&last) != earlier.as_ref() => return last,
-                        _ => tokio::time::sleep(Duration::from_millis(20)).await,
-                    }
-                }
-            };
-            tokio::time::timeout(STARTUP_LIMIT, ended)
-                .await
-                .expect("the pass ends")
-        }
-    };
 
-    let first = pass_after(None).await;
+    let first = pass_after(&index, None).await;
     assert_eq!(first.end, PassEnd::Finished);
     assert_eq!((first.counts.indexed, first.counts.unchanged), (2, 0));
     assert_eq!(first.counts.skipped.get(&SkipCause::Unsupported), Some(&1));
     assert_eq!(store.count_document_chunks().await.unwrap(), 2);
 
     std::fs::remove_file(root.join("old.md")).expect("deleted");
-    std::fs::write(root.join("plan.md"), "# Plan\n\nsecond draft, longer\n").expect("edited");
+    std::fs::write(&plan, "# Plan\n\nsecond draft, longer\n").expect("edited");
     std::fs::write(root.join("new.md"), "a new note\n").expect("added");
-    let second = pass_after(Some(first)).await;
+    let second = pass_after(&index, Some(&first)).await;
     assert_eq!(second.end, PassEnd::Finished);
     assert_eq!(
         (
@@ -175,7 +181,7 @@ async fn a_pass_indexes_changed_files_through_the_worker_and_drops_deleted_ones(
         ),
         (2, 0, 1)
     );
-    let third = pass_after(Some(second)).await;
+    let third = pass_after(&index, Some(&second)).await;
     assert_eq!(
         (
             third.counts.indexed,
@@ -184,6 +190,20 @@ async fn a_pass_indexes_changed_files_through_the_worker_and_drops_deleted_ones(
         ),
         (0, 2, 0)
     );
+
+    let written = root.join("written.md");
+    std::fs::write(&written, "written between passes\n").expect("added");
+    std::fs::rename(root.join("work"), temp.path().join("moved-away")).expect("moved");
+    let watched = async {
+        while !is_stored(&store, &written).await || is_stored(&store, &plan).await {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    };
+    tokio::time::timeout(STARTUP_LIMIT, watched)
+        .await
+        .expect("the watch has the changes indexed");
+    assert!(is_stored(&store, &root.join("new.md")).await);
+    assert_eq!(index.last_passes(), [third], "no pass over the whole root");
 
     stop.send_replace(true);
     runner.await.expect("passes stop");

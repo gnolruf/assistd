@@ -158,7 +158,8 @@ impl DocumentsService {
         let _ = tx.send(Event::new(id.clone(), index)).await;
         let last_passes = self.index.last_passes();
         for (root, unavailable) in self.roots_with_availability().await {
-            let status = root_status(&root, unavailable, &stored, &last_passes);
+            let unwatched = self.index.unwatched(&root);
+            let status = root_status(&root, unavailable, unwatched, &stored, &last_passes);
             let _ = tx
                 .send(Event::new(id.clone(), EventBody::DocumentRoot { status }))
                 .await;
@@ -207,6 +208,7 @@ impl DocumentsService {
                 break;
             }
             if now.rounds_ended + 1 == answered_at
+                && now.round_running
                 && let Some(pass) = now.running
             {
                 let body = EventBody::DocumentPassProgress {
@@ -266,6 +268,7 @@ impl DocumentsService {
 fn root_status(
     root: &Path,
     unavailable: Option<String>,
+    unwatched: Option<String>,
     stored: &[IndexRootCounts],
     last_passes: &[RootPass],
 ) -> DocumentRootStatus {
@@ -273,6 +276,7 @@ fn root_status(
     DocumentRootStatus {
         root: wire_path(root),
         unavailable,
+        unwatched,
         documents: stored.map_or(0, |counts| counts.documents),
         chunks: stored.map_or(0, |counts| counts.chunks),
         unembedded_chunks: stored.map_or(0, |counts| counts.unembedded_chunks),

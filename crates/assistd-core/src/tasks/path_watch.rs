@@ -157,7 +157,7 @@ fn watch_changes(
 }
 
 /// Whether `event` removes or moves away `root` itself, which ends a watch on it.
-fn removes(event: &notify::Event, root: &Path) -> bool {
+pub(crate) fn removes(event: &notify::Event, root: &Path) -> bool {
     matches!(
         event.kind,
         EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From))

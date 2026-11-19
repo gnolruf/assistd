@@ -118,6 +118,13 @@ impl SemanticStore for FixedHits {
     async fn finish_index_pass(&self, pass: IndexPass) -> assistd_memory::Result<u64> {
         NoSemanticStore.finish_index_pass(pass).await
     }
+    async fn finish_index_pass_under(
+        &self,
+        pass: IndexPass,
+        paths: Vec<PathBuf>,
+    ) -> assistd_memory::Result<u64> {
+        NoSemanticStore.finish_index_pass_under(pass, paths).await
+    }
     async fn remove_document(&self, path: &Path) -> assistd_memory::Result<bool> {
         NoSemanticStore.remove_document(path).await
     }

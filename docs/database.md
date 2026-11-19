@@ -287,8 +287,8 @@ resumed, saying which.
   starting a new one. Only a paragraph longer than that is cut into the
   same overlapping windows.
 - **`index_roots`**: the folders indexed for document search. Each
-  walk over a root is a pass and bumps `pass`; deleting a root deletes
-  its documents.
+  walk over a root, whole or held to the paths that changed under it,
+  is a pass and bumps `pass`; deleting a root deletes its documents.
 - **`documents`**: local files indexed for search, one row per path.
   A file whose `mtime_ns`, `size` and chunking match its row is not
   read again. One that is read and hashes to the stored `content_hash`,
@@ -299,8 +299,9 @@ resumed, saying which.
   front only that page, and the rest are replaced. `chunker` names
   the strategy that cut the row, so a new strategy cuts every stored
   document again on the next pass. Each row records the pass
-  that last saw it, and finishing a pass deletes the root's documents
-  it did not see. The rows are a rebuildable cache of files on disk,
+  that last saw it, and finishing a pass deletes the documents it did
+  not see: all of the root's, or for a pass over changed paths those at
+  or under them. The rows are a rebuildable cache of files on disk,
   so a reset of `memory.db` costs only a re-index.
 - **`document_pages`**: a document's text as it was indexed, one row
   per page. What a page is follows the file's format: a PDF's pages
