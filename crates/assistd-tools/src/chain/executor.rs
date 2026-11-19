@@ -206,7 +206,7 @@ async fn run_command(
     turn: &TurnContext,
     stdin: Option<Vec<u8>>,
 ) -> CommandOutput {
-    let name = words.first().map(|w| w.text.as_str()).unwrap_or_default();
+    let name = words.first().map_or_default(|w| w.text.as_str());
     if name.is_empty() {
         return CommandOutput::failed(
             2,

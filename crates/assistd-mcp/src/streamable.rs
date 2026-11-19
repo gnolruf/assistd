@@ -175,8 +175,7 @@ pub(crate) fn transport_failure(error: &DynamicTransportError) -> Option<McpErro
             scopes: insufficient
                 .required_scope
                 .as_deref()
-                .map(split_scopes)
-                .unwrap_or_default(),
+                .map_or_default(split_scopes),
         },
         StreamableHttpError::Auth(failure) => auth_failure(failure),
         StreamableHttpError::HttpStatus(status) => McpError::HttpStatus(status.status),

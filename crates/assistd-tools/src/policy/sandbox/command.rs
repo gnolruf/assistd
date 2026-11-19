@@ -88,10 +88,9 @@ impl<'info> Layout<'info> {
     /// and protections, then `extra_args` past the seccomp filter. Blocks on the filesystem.
     pub(super) fn host(info: &SandboxInfo, home: Option<String>, access: HomeAccess) -> Self {
         let home = SandboxHome::read(home);
-        let command_dirs = home
-            .as_ref()
-            .map(|home| home.locked_command_dirs(access, &info.host_path, &info.protected.dirs))
-            .unwrap_or_default();
+        let command_dirs = home.as_ref().map_or_default(|home| {
+            home.locked_command_dirs(access, &info.host_path, &info.protected.dirs)
+        });
         let writable: Vec<PathBuf> = home.iter().map(|home| PathBuf::from(&home.dir)).collect();
         let mut flags = os_strings(default_bwrap_flags_for(home.as_ref(), access));
         flags.extend(os_strings(command_dirs.rename_guard_flags()));

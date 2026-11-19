@@ -486,9 +486,7 @@ impl App {
         }
         self.close_agent_panel();
         self.output.pop_last_user_exchange();
-        let preview = last_user_text
-            .map(|t| t.chars().take(48).collect::<String>())
-            .unwrap_or_default();
+        let preview = last_user_text.map_or_default(|t| t.chars().take(48).collect::<String>());
         if preview.is_empty() {
             self.set_notice(&format!("undid {removed_messages} message(s)"));
         } else {

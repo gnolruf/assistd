@@ -91,12 +91,8 @@ impl ActivityTracker {
         let displayed = displayed_id.and_then(|id| self.turns.get(id));
         let displayed_in_flight = displayed_id.is_some_and(|id| self.in_flight.contains(id));
         ActivityView {
-            body: displayed
-                .map(|t| truncate_chars_from_end(&t.body, BODY_CHARS))
-                .unwrap_or_default(),
-            tool_calls: displayed
-                .map(|t| t.tool_calls.iter().cloned().collect())
-                .unwrap_or_default(),
+            body: displayed.map_or_default(|t| truncate_chars_from_end(&t.body, BODY_CHARS)),
+            tool_calls: displayed.map_or_default(|t| t.tool_calls.iter().cloned().collect()),
             error: displayed.and_then(|t| t.error.clone()),
             title: self.session_title.clone(),
             activity: self.activity(displayed, displayed_in_flight),

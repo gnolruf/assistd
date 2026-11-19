@@ -398,8 +398,7 @@ impl BranchService {
         for row in rows {
             let relay = relay_traces
                 .remove(&row.message_id)
-                .map(wire_relay_steps)
-                .unwrap_or_default();
+                .map_or_default(wire_relay_steps);
             let role = wire_role(row.message.role());
             let (reasoning, tool_name, tool_args, outcome) = match row.message.kind {
                 MessageKind::Tool {
@@ -423,7 +422,7 @@ impl BranchService {
                         seq: row.seq.0,
                         role,
                         content: row.message.content,
-                        reasoning: reasoning.map(|r| r.text).unwrap_or_default(),
+                        reasoning: reasoning.map_or_default(|r| r.text),
                         reasoning_ms,
                         tool_name,
                         tool_args,
@@ -587,10 +586,7 @@ fn history_entry(row: &HistoryRow) -> HistoryEntry {
         } => HistoryEntry {
             role: HistoryRole::Assistant,
             content,
-            reasoning: reasoning
-                .as_ref()
-                .map(|r| r.text.clone())
-                .unwrap_or_default(),
+            reasoning: reasoning.as_ref().map_or_default(|r| r.text.clone()),
             tool_calls: tool_calls.iter().map(tool_call_record).collect(),
             tool_call_id: None,
             tool_name: None,

@@ -312,8 +312,7 @@ pub struct McpServerNameError(pub String);
 pub struct ThemeColorError(pub String);
 
 fn at_line(line: Option<usize>) -> String {
-    line.map(|line| format!(" at line {line}"))
-        .unwrap_or_default()
+    line.map_or_default(|line| format!(" at line {line}"))
 }
 
 fn format_validation_errors(errors: &[ConfigIssue]) -> String {

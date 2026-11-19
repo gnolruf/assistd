@@ -228,8 +228,7 @@ impl SandboxInfo {
     pub(crate) fn path_guards(&self) -> PathGuards {
         let host_home = std::env::var("HOME").ok();
         let home_dirs = SandboxHome::read(host_home.clone())
-            .map(|home| home.existing_command_dirs(&[]))
-            .unwrap_or_default();
+            .map_or_default(|home| home.existing_command_dirs(&[]));
         let command_dirs = self
             .host_path
             .iter()

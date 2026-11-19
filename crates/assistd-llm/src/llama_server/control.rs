@@ -44,9 +44,7 @@ impl LlamaServerControl {
         api_key: Option<&ApiKey>,
         health: Option<Arc<dyn LlmHealthProbe>>,
     ) -> Result<Self, LlamaServerError> {
-        let headers = api_key
-            .map(ApiKey::authorization_headers)
-            .unwrap_or_default();
+        let headers = api_key.map_or_default(ApiKey::authorization_headers);
         let client = local_client_builder()
             .default_headers(headers.clone())
             .timeout(DEFAULT_TIMEOUT)

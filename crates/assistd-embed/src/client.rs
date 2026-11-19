@@ -68,11 +68,7 @@ impl LlamaEmbedder {
         server: Option<ChildServerStatus>,
     ) -> Result<Self, EmbedError> {
         let client = local_client_builder()
-            .default_headers(
-                api_key
-                    .map(ApiKey::authorization_headers)
-                    .unwrap_or_default(),
-            )
+            .default_headers(api_key.map_or_default(ApiKey::authorization_headers))
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(request_timeout)
             .build()

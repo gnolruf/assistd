@@ -193,8 +193,7 @@ pub(super) fn tooltip_for(tracker: &TrayTracker, now: DateTime<Utc>) -> Tooltip 
         Some(error) => error.to_string(),
         None => tracker
             .task_queue()
-            .map(|snapshot| task_lines(snapshot, now))
-            .unwrap_or_default()
+            .map_or_default(|snapshot| task_lines(snapshot, now))
             .into_iter()
             .chain(tracker.startup_summary())
             .collect::<Vec<_>>()

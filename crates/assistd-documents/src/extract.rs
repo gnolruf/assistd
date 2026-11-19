@@ -1,5 +1,5 @@
-//! Turns one file into text: the format its extension names, its decoding, and
-//! the limits on what is read and returned.
+//! Turns one file into text, or one of its pages into an image: the format its
+//! extension names, its decoding, and the limits on what is read and returned.
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
@@ -10,44 +10,47 @@ use assistd_utils::binary::{binary_format, sniff_binary};
 use assistd_utils::fs::open_regular;
 use encoding_rs::{Encoding, UTF_8};
 
-use crate::protocol::{Extraction, SkipReason};
+use crate::pdf;
+use crate::protocol::{Extraction, RenderedPage, SkipReason};
 
 const HTML_EXTENSIONS: [&str; 3] = ["html", "htm", "xhtml"];
+
+const PDF_EXTENSION: &str = "pdf";
 
 /// Columns an HTML file's text is wrapped to.
 const HTML_TEXT_WIDTH: usize = 100;
 
-/// How a file's decoded bytes become its text.
+/// How a file's bytes become its text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Format {
     /// Plain text, Markdown and source code, kept as they are.
     Text,
     Html,
+    Pdf,
 }
 
 impl Format {
     fn of(path: &Path) -> Self {
-        let is_html = path
-            .extension()
-            .and_then(OsStr::to_str)
-            .is_some_and(|extension| {
-                HTML_EXTENSIONS
-                    .iter()
-                    .any(|html| extension.eq_ignore_ascii_case(html))
-            });
-        if is_html { Self::Html } else { Self::Text }
+        let extension = path.extension().and_then(OsStr::to_str).unwrap_or_default();
+        if extension.eq_ignore_ascii_case(PDF_EXTENSION) {
+            Self::Pdf
+        } else if HTML_EXTENSIONS
+            .iter()
+            .any(|html| extension.eq_ignore_ascii_case(html))
+        {
+            Self::Html
+        } else {
+            Self::Text
+        }
     }
 
-    fn render(self, decoded: String) -> Result<String, SkipReason> {
+    fn extract(self, bytes: Vec<u8>) -> Result<Extraction, SkipReason> {
         match self {
-            Self::Text => Ok(decoded),
-            Self::Html => html2text::config::plain_no_decorate()
-                .allow_width_overflow()
-                .no_table_borders()
-                .string_from_read(decoded.as_bytes(), HTML_TEXT_WIDTH)
-                .map_err(|error| SkipReason::ExtractorFailed {
-                    message: error.to_string(),
-                }),
+            Self::Text => decode(&bytes).map(Extraction::of_text),
+            Self::Html => decode(&bytes)
+                .and_then(|html| html_text(&html))
+                .map(Extraction::of_text),
+            Self::Pdf => pdf::page_texts(bytes),
         }
     }
 }
@@ -55,12 +58,17 @@ impl Format {
 /// The text of the regular file at `path`, or why it has none; a file larger
 /// than `max_file_bytes` is not read. Blocks on the filesystem.
 pub(crate) fn extract_text(path: &Path, max_file_bytes: u64) -> Extraction {
-    let text = read_file(path, max_file_bytes)
-        .and_then(|bytes| decode(&bytes))
-        .and_then(|decoded| Format::of(path).render(decoded));
-    match text {
-        Ok(text) => Extraction::of_text(text),
-        Err(reason) => Extraction::Skipped { reason },
+    read_file(path, max_file_bytes)
+        .and_then(|bytes| Format::of(path).extract(bytes))
+        .unwrap_or_else(|reason| Extraction::Skipped { reason })
+}
+
+/// Page `page` of the PDF at `path`, counted from zero, as an image; a file
+/// larger than `max_file_bytes` is not read. Blocks on the filesystem.
+pub(crate) fn render_page(path: &Path, max_file_bytes: u64, page: u32) -> RenderedPage {
+    match read_file(path, max_file_bytes) {
+        Ok(bytes) => pdf::render_page(bytes, page),
+        Err(reason) => RenderedPage::Failed { reason },
     }
 }
 
@@ -81,6 +89,16 @@ fn read_file(path: &Path, max_file_bytes: u64) -> Result<Vec<u8>, SkipReason> {
         return Err(SkipReason::TooLarge);
     }
     Ok(bytes)
+}
+
+fn html_text(html: &str) -> Result<String, SkipReason> {
+    html2text::config::plain_no_decorate()
+        .allow_width_overflow()
+        .no_table_borders()
+        .string_from_read(html.as_bytes(), HTML_TEXT_WIDTH)
+        .map_err(|error| SkipReason::ExtractorFailed {
+            message: error.to_string(),
+        })
 }
 
 /// `bytes` as text in the encoding their byte-order mark names, or UTF-8 without
@@ -104,8 +122,12 @@ fn decode(bytes: &[u8]) -> Result<String, SkipReason> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sample_pdf::{EMPTY_PAGE, IMAGE_PAGE, pdf_of, text_page};
 
     const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
+    /// The first six bytes of a PNG in base64.
+    const PNG_MAGIC_BASE64: &str = "iVBORw0K";
 
     fn extraction_of(name: &str, contents: &[u8], max_file_bytes: u64) -> Extraction {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -163,6 +185,56 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn a_pdf_yields_each_pages_text_and_untranscribed_is_skipped_when_no_page_has_any() {
+        let scanned = extraction_of("scan.PDF", &pdf_of(&[IMAGE_PAGE, IMAGE_PAGE]), 4096);
+        assert_eq!(
+            scanned,
+            Extraction::Pages {
+                pages: vec![String::new(), String::new()],
+                truncated: false,
+            }
+        );
+        assert_eq!(
+            scanned.with_pages_joined(),
+            skipped(SkipReason::NoTextLayer)
+        );
+
+        let pages = [&text_page("Minutes"), IMAGE_PAGE, &text_page("Appendix")];
+        let mixed = extraction_of("minutes.pdf", &pdf_of(&pages), 4096);
+        let Extraction::Pages { pages, truncated } = &mixed else {
+            panic!("a PDF comes back as pages: {mixed:?}");
+        };
+        assert!(!truncated);
+        assert!(pages[0].contains("Minutes"), "{pages:?}");
+        assert_eq!(pages[1], "");
+        let Extraction::Text { text, .. } = mixed.with_pages_joined() else {
+            panic!("pages with text join into one text");
+        };
+        let (minutes, appendix) = text.split_once("\n\n").expect("a break between pages");
+        assert!(minutes.contains("Minutes"), "{text:?}");
+        assert!(appendix.contains("Appendix"), "{text:?}");
+    }
+
+    #[test]
+    fn a_pdf_page_is_rendered_to_a_png_unless_it_shows_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.pdf");
+        std::fs::write(&path, pdf_of(&[IMAGE_PAGE, EMPTY_PAGE])).expect("file");
+
+        let RenderedPage::Image { png_base64 } = render_page(&path, 4096, 0) else {
+            panic!("a page with marks is an image");
+        };
+        assert!(png_base64.starts_with(PNG_MAGIC_BASE64), "{png_base64}");
+        assert_eq!(render_page(&path, 4096, 1), RenderedPage::Blank);
+        assert_eq!(
+            render_page(&path, 16, 0),
+            RenderedPage::Failed {
+                reason: SkipReason::TooLarge
+            }
+        );
     }
 
     #[test]

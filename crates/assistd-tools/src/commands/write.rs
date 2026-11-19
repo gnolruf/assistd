@@ -236,12 +236,10 @@ impl Command for WriteCommand {
             .await
             .map_err(|failure| failure.error(raw_path))?;
         Ok(CommandOutput {
-            stderr: hidden_by
-                .map(|dir| {
-                    hidden_from_bash_note(raw_path.as_str(), &dir, &self.sandbox.sharing_hint())
-                        .into_bytes()
-                })
-                .unwrap_or_default(),
+            stderr: hidden_by.map_or_default(|dir| {
+                hidden_from_bash_note(raw_path.as_str(), &dir, &self.sandbox.sharing_hint())
+                    .into_bytes()
+            }),
             ..CommandOutput::default()
         })
     }

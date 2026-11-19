@@ -61,7 +61,7 @@ flowchart TB
 | `assistd-chat`   | The `assistd chat` terminal window and the `assistd settings` panel, a client that only reads and writes the socket. | `config`, `ipc`, `utils`                                                         |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
 | `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
-| `assistd-documents` | Document text extraction in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
+| `assistd-documents` | Document text extraction and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `utils`                                                         |
@@ -724,7 +724,8 @@ file at a time over line-delimited JSON on its stdin and stdout. A request
 names a file and the largest size to read; the reply is the file's text, cut
 at 4 MiB with a flag saying so, or a `SkipReason`: an unsupported type (a
 recognised binary format, with its MIME type), binary, too large, not
-decodable, unreadable, extractor failed, or timed out.
+decodable, needs a password, no text layer, unreadable, extractor failed, or
+timed out.
 
 Plain text, Markdown and source code are decoded with `encoding_rs`, as UTF-8
 or as the encoding their byte-order mark names, and kept as they are; text
@@ -732,6 +733,25 @@ that is not valid in that encoding is skipped rather than patched with
 replacement characters. A file `cat` would call binary is skipped. `.html`,
 `.htm` and `.xhtml` files are rendered to text with `html2text`, headings as
 Markdown headings so the chunker cuts at them.
+
+A `.pdf` file is read with `pdf_oxide`, in the worker like every other
+format, and answered page by page: each page converted to Markdown, and an
+empty string for a page whose conversion is empty, which is what a scanned
+page gives. The 4 MiB cap covers the pages together, and a file reports at
+most 20,000 of them. An encrypted PDF is opened with the empty password,
+which is all a file restricted only against printing or copying needs; one
+that needs a real password is skipped. `Extraction::with_pages_joined` is the
+reading for a daemon that transcribes nothing: the pages that have text
+joined by blank lines, and a file with none skipped as having no text layer
+instead of stored empty.
+
+A second request renders one page of a PDF for a model to transcribe: 150
+pixels per inch, or fewer when the longer edge would pass 2,048 pixels, as a
+PNG of at most 12 MiB in base64. A page that shows only its background is
+answered as blank and has no image: averaged over 8-pixel squares, its
+lightest and darkest parts are within an eighth of the range, which a
+scanner's noise stays inside and a lone page number does not. The worker has
+no network, so sending a page to a model is the daemon's job.
 
 The worker runs in `ReaderSandbox`, a bwrap profile that `assistd-tools`
 builds from the tool sandbox's programs: read-only `/usr`, the merged-`/usr`
@@ -750,7 +770,7 @@ without a sandbox (tools disabled, bwrap missing) or without `chrt` and
 The supervisor mirrors the voice worker's. The `Extractor` is `Starting`
 until the worker's first line says it is ready, and appears in `GetReadiness`
 as document indexing. A request has two minutes; a worker that misses that
-is killed, the file is skipped as timed out, and the worker restarts under
+is killed, the file is skipped (or the page failed) as timed out, and the worker restarts under
 `RestartPolicy` backoff, as it does when it dies. The daemon reads no line
 longer than the largest reply can be, so a compromised worker cannot grow
 the daemon's memory.
