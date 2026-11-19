@@ -1,9 +1,9 @@
 //! When index passes run: after each request, one root at a time, until shutdown.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
-use assistd_config::DocumentsConfig;
+use assistd_config::{AbsoluteDir, DocumentsConfig};
 use assistd_memory::SemanticStore;
 use assistd_tools::SandboxInfo;
 use assistd_tools::policy::on_blocking_pool;
@@ -107,7 +107,7 @@ impl IndexPasses {
 }
 
 /// Forget every stored index root that `roots` does not list, with its documents.
-pub async fn remove_dropped_roots(store: &dyn SemanticStore, roots: &[PathBuf]) {
+pub async fn remove_dropped_roots(store: &dyn SemanticStore, roots: &[AbsoluteDir]) {
     let stored = match store.index_roots().await {
         Ok(stored) => stored,
         Err(error) => {
@@ -115,7 +115,8 @@ pub async fn remove_dropped_roots(store: &dyn SemanticStore, roots: &[PathBuf]) 
             return;
         }
     };
-    for dropped in stored.iter().filter(|root| !roots.contains(root)) {
+    let is_listed = |stored: &Path| roots.iter().any(|root| root.as_path() == stored);
+    for dropped in stored.iter().filter(|stored| !is_listed(stored)) {
         match store.remove_index_root(dropped).await {
             Ok(documents) => info!(
                 target: "assistd::documents",

@@ -129,7 +129,6 @@ enum PassStopped {
     RootGone(String),
 }
 
-/// A pass between its begin and its finish.
 struct RunningPass<'a> {
     deps: &'a IndexDeps,
     pass: IndexPass,
@@ -142,8 +141,6 @@ struct RunningPass<'a> {
 }
 
 impl RunningPass<'_> {
-    /// Tally one batch of the walk, then extract and store its changed files while
-    /// the index has room.
     async fn store_batch(&mut self, batch: Vec<Walked>) -> Result<(), PassStopped> {
         if *self.shutdown.borrow() {
             return Err(PassStopped::Shutdown);
@@ -153,7 +150,9 @@ impl RunningPass<'_> {
             match walked {
                 Walked::Candidate { path, stamp } => files.push((path, stamp)),
                 Walked::Skipped(cause) => self.counts.skip(cause),
-                Walked::Unlisted(error) => self.unlisted = self.unlisted.take().or(Some(error)),
+                Walked::Unlisted(error) => {
+                    self.unlisted.get_or_insert(error);
+                }
             }
         }
         let walked = files.len() as u64;

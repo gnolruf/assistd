@@ -335,10 +335,6 @@ with the file in the page cache:
 Quantising moved no top-8 result in these runs and changed a
 similarity by at most 0.0005.
 
-An index pass stops storing documents once they are cut into 500,000
-chunks, which holds a document search to about 410 MB of vectors and
-100 ms.
-
 ## Storage
 
 - One read-write connection runs every write in order; three

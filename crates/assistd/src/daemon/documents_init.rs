@@ -2,7 +2,7 @@
 //! from the daemon's own binary, sandboxed over the index roots, its readiness is
 //! published whenever it changes, and passes over the roots feed it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use assistd_config::Config;
@@ -25,8 +25,6 @@ const WORKER_SUBCOMMAND: &str = "extract-worker";
 
 /// What document indexing starts with while `documents.enabled`.
 pub(super) struct DocumentsStartup {
-    /// `documents.roots`; a stored root not among them is removed.
-    roots: Vec<PathBuf>,
     /// The worker's command and the passes, or none when indexing is unavailable.
     indexing: Option<(WorkerCommand, IndexPasses)>,
 }
@@ -75,15 +73,6 @@ pub(super) fn prepare(
     config: &Config,
     sandbox: Result<&Arc<SandboxInfo>, &ToolsDisabled>,
 ) -> (Arc<Extractor>, Option<DocumentsStartup>) {
-    let startup = |indexing| DocumentsStartup {
-        roots: config
-            .documents
-            .roots
-            .iter()
-            .map(|root| root.as_path().to_path_buf())
-            .collect(),
-        indexing,
-    };
     let indexing = assistd_core::document_indexing(
         &config.documents,
         sandbox,
@@ -93,24 +82,32 @@ pub(super) fn prepare(
     match indexing {
         Ok(indexing) => (
             Arc::new(Extractor::starting()),
-            Some(startup(Some(indexing))),
+            Some(DocumentsStartup {
+                indexing: Some(indexing),
+            }),
         ),
-        Err(reason @ DocumentsUnavailable::Disabled) => {
-            info!("document indexing: {reason}");
-            (Arc::new(Extractor::unavailable(reason.to_string())), None)
-        }
         Err(reason) => {
-            warn!("document indexing is unavailable: {reason}");
+            let startup = match reason {
+                DocumentsUnavailable::Disabled => {
+                    info!("document indexing: {reason}");
+                    None
+                }
+                _ => {
+                    warn!("document indexing is unavailable: {reason}");
+                    Some(DocumentsStartup { indexing: None })
+                }
+            };
             (
                 Arc::new(Extractor::unavailable(reason.to_string())),
-                Some(startup(None)),
+                startup,
             )
         }
     }
 }
 
 async fn run(startup: DocumentsStartup, state: Arc<AppState>, shutdown: watch::Receiver<bool>) {
-    remove_dropped_roots(state.memory.semantic.as_ref(), &startup.roots).await;
+    let roots = &state.config.documents.roots;
+    remove_dropped_roots(state.memory.semantic.as_ref(), roots).await;
     let Some((worker, passes)) = startup.indexing else {
         return;
     };

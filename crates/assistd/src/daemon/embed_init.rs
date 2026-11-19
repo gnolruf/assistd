@@ -216,9 +216,8 @@ fn publish_readiness(state: &AppState) {
     );
 }
 
-/// Drop vectors from any other embedding space, then start the worker, mark the
-/// embedder ready and ask for a document index pass. When that fails the embedder
-/// stays unavailable.
+/// Drop vectors from any other embedding space, then start the worker and mark the
+/// embedder ready. When that fails the embedder stays unavailable.
 async fn adopt_space_then_serve(
     state: &AppState,
     embedder: Arc<dyn Embedder>,
