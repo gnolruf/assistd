@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use assistd_ipc::{ListenPhase, VoiceCaptureState};
 use async_trait::async_trait;
@@ -147,6 +148,14 @@ impl ContinuousListener for WorkerListener {
 
     fn set_replying(&self, replying: bool) {
         self.0.notify(ToWorker::SetReplying { replying });
+    }
+
+    fn await_answer(&self, wait: Duration) {
+        self.0.notify(ToWorker::AwaitAnswer { wait });
+    }
+
+    fn answer_settled(&self) {
+        self.0.notify(ToWorker::AnswerSettled);
     }
 
     async fn test_wake_word(&self, sink: mpsc::Sender<WakeTest>) -> Result<(), ListenError> {

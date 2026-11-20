@@ -23,7 +23,7 @@ use assistd_tools::commands::BashPolicyCfg;
 use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{
     Approval, ApprovalGate, ConfirmSource, ConfirmationGate, ConfirmationRequest, Egress,
-    OutputCap, PresentSpec, Quarantine, QuarantineError, Risk, RunTool, SandboxInfo, Tool,
+    OutputCap, PresentSpec, Quarantine, QuarantineError, Risk, RunTool, SandboxInfo, Summary, Tool,
     ToolError, ToolOutput, ToolRegistry, TurnContext, Unattended, YieldableLane,
 };
 use assistd_utils::path::expand_tilde_from_env;
@@ -376,6 +376,10 @@ impl RelayTool {
             tool: RELAY.to_string(),
             script: web_tasks.join("\n\n"),
             matched_pattern: WEB_AFTER_HOST_READ.to_string(),
+            summary: Summary::of("sending a task to a sub-agent on the web").because(
+                "Files or other data on this machine were read first, and the task could carry \
+                 them.",
+            ),
             always_allow: Vec::new(),
             risk: Risk::Elevated,
             unattended: Unattended::Never,

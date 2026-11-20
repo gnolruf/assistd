@@ -17,8 +17,8 @@ use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, U
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
     Action, Analysis, Approval, Class, Confirmation, ConfirmationGate, ConfirmationRequest, Effect,
-    PathGuards, Review, Risk, SandboxInfo, Unattended, admits_edit, guarded_review,
-    on_blocking_pool,
+    PathGuards, Review, Risk, SandboxInfo, Summary, Unattended, admits_edit, guarded_review,
+    on_blocking_pool, spoken_path,
 };
 
 /// Leading characters of the content shown when asking to confirm a write.
@@ -480,10 +480,24 @@ fn confirmation_request(
         tool: "write".to_string(),
         script,
         matched_pattern,
+        summary: write_summary(path, &text, confirmation),
         always_allow: Vec::new(),
         risk,
         unattended,
         source: ConfirmSource::Main,
+    }
+}
+
+/// A write of `text` to `path` that asks because of `confirmation`, in a sentence.
+fn write_summary(path: &Path, text: &str, confirmation: &Confirmation) -> Summary {
+    let lines = match text.lines().count() {
+        1 => "1 line".to_string(),
+        count => format!("{count} lines"),
+    };
+    let summary = Summary::of(format!("a write of {lines} to {}", spoken_path(path)));
+    match confirmation {
+        Confirmation::Sensitive(why) => summary.because(format!("It {why}.")),
+        Confirmation::Unvetted { .. } | Confirmation::Edit(_) => summary,
     }
 }
 

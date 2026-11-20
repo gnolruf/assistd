@@ -14,7 +14,7 @@ use assistd_embed::EmbedderHandle;
 use assistd_ipc::{Attachment, Event, EventBody, ImageAttachment, PlanMode};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent};
 use assistd_memory::{PersistedMessage, SemanticStore, SessionId};
-use assistd_tools::{ConfirmRouter, HostReads, ToolCatalog, TurnContext};
+use assistd_tools::{ConfirmRouter, HostReads, ToolCatalog, TurnContext, VoiceGate};
 use assistd_voice::VoiceManager;
 use assistd_wm::WindowManager;
 
@@ -33,6 +33,7 @@ use crate::recovery::{Component, spawn_supervised};
 use crate::transcript::{PersistTarget, SessionContext, TranscriptLog};
 use crate::turn_driver::{SpeechPipeline, TurnDriver, run_speech_worker};
 use crate::vision::VisionRevalidator;
+use crate::voice_gate::VoiceConfirmationGate;
 
 /// One prompt to run as a user turn.
 #[derive(Debug)]
@@ -70,8 +71,8 @@ pub enum TurnOrigin {
     /// Text from a client: the chat or another tool. The client answers
     /// the turn's prompts through this context.
     Typed(TurnContext),
-    /// A push-to-talk or continuous-listening transcription, which nobody can answer
-    /// prompts for.
+    /// A push-to-talk or continuous-listening transcription. The turn is headless: no client
+    /// shows its prompts, so they are asked out loud.
     Voice,
 }
 
@@ -80,11 +81,14 @@ impl TurnOrigin {
         matches!(self, Self::Voice)
     }
 
-    /// The context turn `id` runs in.
-    fn into_turn_context(self, id: &str) -> TurnContext {
+    /// The context turn `id` runs in, a headless turn's prompts going to `voice_gate`.
+    fn into_turn_context(self, id: &str, voice_gate: &Arc<VoiceConfirmationGate>) -> TurnContext {
         match self {
             Self::Typed(turn) => turn,
-            Self::Voice => TurnContext::answered_by(ConfirmRouter::for_voice_turn(id.to_string())),
+            Self::Voice => {
+                let gate = Arc::clone(voice_gate) as Arc<dyn VoiceGate>;
+                TurnContext::answered_by(ConfirmRouter::for_voice_turn(id.to_string(), gate))
+            }
         }
     }
 }
@@ -100,6 +104,7 @@ pub(super) struct TurnDeps {
     pub(super) planner: Arc<Planner>,
     pub(super) vision_revalidator: Option<Arc<VisionRevalidator>>,
     pub(super) voice: Arc<VoiceManager>,
+    pub(super) voice_gate: Arc<VoiceConfirmationGate>,
     pub(super) window_manager: Arc<dyn WindowManager>,
     pub(super) embedder: Arc<EmbedderHandle>,
     pub(super) semantic: Arc<dyn SemanticStore>,
@@ -176,7 +181,7 @@ impl TurnService {
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
         let turn = origin
-            .into_turn_context(&id)
+            .into_turn_context(&id, &self.deps.voice_gate)
             .reading_into(self.active_branch_host_reads().await);
         let agent_task =
             self.spawn_agent_task(turn, (text, attachments), plan, llm_tx, cancel.clone());

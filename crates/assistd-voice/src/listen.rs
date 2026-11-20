@@ -2,6 +2,7 @@
 //! once a keyword spotter hears the wake phrase, unlike one-shot [`crate::VoiceInput`] presses.
 
 use std::fmt;
+use std::time::Duration;
 
 use assistd_ipc::ListenPhase;
 use async_trait::async_trait;
@@ -56,6 +57,8 @@ pub enum Heard {
     /// The user is talking over the reply; their words follow as a
     /// [`Heard::Command`] once they finish.
     BargeIn,
+    /// What the user said to a question asked aloud; never empty.
+    Answer(String),
 }
 
 /// What a wake-word test reports from the mic.
@@ -105,6 +108,14 @@ pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
     /// barge-in is on, speech is checked for [`Heard::BargeIn`] instead of
     /// for the wake phrase.
     fn set_replying(&self, replying: bool);
+
+    /// Take what is said within `wait` of now as the [`Heard::Answer`] to a question just
+    /// asked aloud, wake phrase or not and unchecked for barge-in, until
+    /// [`Self::answer_settled`]. Ignored while listening is stopped.
+    fn await_answer(&self, wait: Duration);
+
+    /// Stop taking speech as an answer.
+    fn answer_settled(&self);
 
     /// Report into `sink` each start and end of speech the mic hears and whether each utterance
     /// held the wake phrase, until `sink` closes. Fails with [`ListenError::Listening`] while
@@ -168,6 +179,10 @@ impl ContinuousListener for NoContinuousListener {
     fn open_follow_up(&self) {}
 
     fn set_replying(&self, _replying: bool) {}
+
+    fn await_answer(&self, _wait: Duration) {}
+
+    fn answer_settled(&self) {}
 
     async fn test_wake_word(&self, _sink: mpsc::Sender<WakeTest>) -> Result<(), ListenError> {
         Err(ListenError::Disabled)

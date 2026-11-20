@@ -32,6 +32,7 @@ use crate::planner::Planner;
 use crate::presence::PresenceLlmHealthProbe;
 use crate::tasks::{TaskDeps, TaskError, TaskService};
 use crate::transcript::{SessionContext, TranscriptLog};
+use crate::voice_gate::VoiceConfirmationGate;
 
 pub(crate) mod branches;
 pub(crate) mod capabilities;
@@ -231,12 +232,11 @@ impl AppState {
             slot_stash: subsystems.slot_stash.clone(),
             voice: Arc::clone(&subsystems.voice),
         });
-        let voice = VoiceService::new(
-            Arc::clone(&config),
+        let voice_gate = Arc::new(VoiceConfirmationGate::new(
             Arc::clone(&subsystems.voice),
-            Arc::clone(&subsystems.presence),
-            Arc::clone(&admission),
-        );
+            Arc::clone(&subsystems.llm),
+        ));
+        let voice = voice_service(&config, &subsystems, &admission, &voice_gate);
         let branches = Arc::new(BranchService {
             session_ctx: Arc::clone(&session_ctx),
             transcripts: Arc::clone(&memory.transcripts),
@@ -256,6 +256,7 @@ impl AppState {
             planner,
             vision_revalidator: subsystems.vision_revalidator.clone(),
             voice: Arc::clone(&subsystems.voice),
+            voice_gate,
             window_manager: Arc::clone(&subsystems.window_manager),
             embedder: Arc::clone(&memory.embedder),
             semantic: Arc::clone(&memory.semantic),
@@ -518,6 +519,21 @@ fn planner(config: &Config, subsystems: &Subsystems, agents: AgentSpec) -> Plann
         Arc::clone(&subsystems.tools),
         agents,
         config.tools.allow_auto_mode,
+    )
+}
+
+fn voice_service(
+    config: &Arc<Config>,
+    subsystems: &Subsystems,
+    admission: &Arc<TurnAdmission>,
+    voice_gate: &Arc<VoiceConfirmationGate>,
+) -> VoiceService {
+    VoiceService::new(
+        Arc::clone(config),
+        Arc::clone(&subsystems.voice),
+        Arc::clone(&subsystems.presence),
+        Arc::clone(admission),
+        Arc::clone(voice_gate),
     )
 }
 

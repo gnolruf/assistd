@@ -14,7 +14,7 @@ use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, U
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
     Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest, JudgeContext,
-    JudgedClass, Risk, Unattended, on_blocking_pool,
+    JudgedClass, Risk, Summary, Unattended, on_blocking_pool,
 };
 
 mod desktop_entry;
@@ -136,6 +136,7 @@ impl WmCommand {
                 entry.name,
                 workspace_phrase(args.workspace.as_ref())
             ),
+            summary: launch_summary(&entry.name, has_targets),
             always_allow: if has_targets {
                 Vec::new()
             } else {
@@ -445,6 +446,17 @@ fn opened(launch: &PreparedLaunch, workspace: Option<&WorkspaceId>) -> CommandOu
         workspace_phrase(workspace)
     );
     CommandOutput::ok(line.into_bytes())
+}
+
+/// A launch of the app named `name`, in a sentence; `has_targets` when it is handed files,
+/// URLs or a working directory.
+fn launch_summary(name: &str, has_targets: bool) -> Summary {
+    let summary = Summary::of(format!("opening {name}"));
+    if has_targets {
+        summary.because("It is handed files, addresses or a folder to open.")
+    } else {
+        summary
+    }
 }
 
 fn workspace_phrase(workspace: Option<&WorkspaceId>) -> String {

@@ -1358,6 +1358,7 @@ mod tests {
                     tool: "bash".into(),
                     script: "rm -rf /tmp/x".into(),
                     matched_pattern: "rm -rf".into(),
+                    summary: assistd_tools::Summary::of("a shell command"),
                     always_allow: Vec::new(),
                     risk: assistd_tools::Risk::Elevated,
                     unattended: self.0.clone(),

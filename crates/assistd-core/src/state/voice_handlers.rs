@@ -19,6 +19,7 @@ use crate::admission::TurnAdmission;
 use crate::bus::EventSink;
 use crate::presence::PresenceManager;
 use crate::recovery::{Component, spawn_supervised};
+use crate::voice_gate::VoiceConfirmationGate;
 
 /// What a push-to-talk press hands to its release.
 #[derive(Debug)]
@@ -29,6 +30,8 @@ pub(super) struct PttCapture {
     cancel: CancellationToken,
     /// Listening was handed over for the press and resumes on release.
     resume_listening: bool,
+    /// The press answers a prompt asked out loud instead of starting a turn.
+    answers_prompt: bool,
 }
 
 /// A transcribed push-to-talk press, ready to run as a turn unless `cancel` fires first.
@@ -46,6 +49,7 @@ pub struct VoiceService {
     pub(super) voice: Arc<VoiceManager>,
     presence: Arc<PresenceManager>,
     admission: Arc<TurnAdmission>,
+    voice_gate: Arc<VoiceConfirmationGate>,
     /// The push-to-talk press awaiting its release.
     pub(super) ptt_capture: Mutex<Option<PttCapture>>,
     /// The open wake-word test session, which holds the mic.
@@ -58,12 +62,14 @@ impl VoiceService {
         voice: Arc<VoiceManager>,
         presence: Arc<PresenceManager>,
         admission: Arc<TurnAdmission>,
+        voice_gate: Arc<VoiceConfirmationGate>,
     ) -> Self {
         Self {
             config,
             voice,
             presence,
             admission,
+            voice_gate,
             ptt_capture: Mutex::new(None),
             mic_session: StdMutex::new(None),
         }
@@ -94,9 +100,14 @@ impl VoiceService {
         Ok(())
     }
 
-    /// Stop speech and open the mic for a press, unless a wake-word test holds the mic.
+    /// Stop speech and open the mic for a press, unless a wake-word test holds the mic. A
+    /// press over a prompt asked out loud stops the question alone and records its answer.
     async fn open_ptt_capture(&self) -> Result<PttCapture, DispatchError> {
-        self.voice.speech().interrupt().await;
+        if self.voice_gate.asking() {
+            self.voice.speech().hush().await;
+        } else {
+            self.voice.speech().interrupt().await;
+        }
         let capture = self.voice.capture().context("ptt_start failed")?;
         if self.mic_session_busy() {
             return Err(MicError::TestInProgress.into());
@@ -111,6 +122,7 @@ impl VoiceService {
             warmup: self.spawn_presence_warmup(),
             cancel: self.admission.turn_cancellation(),
             resume_listening,
+            answers_prompt: self.voice_gate.recording_answer(),
         })
     }
 
@@ -136,17 +148,23 @@ impl VoiceService {
             ))
             .await;
 
-        let (warmup, cancel, resume_listening) = match self.ptt_capture.lock().await.take() {
-            Some(PttCapture {
-                warmup,
-                cancel,
-                resume_listening,
-            }) => (Some(warmup), cancel, resume_listening),
-            None => (None, self.admission.turn_cancellation(), false),
-        };
+        let (warmup, cancel, resume_listening, answers_prompt) =
+            match self.ptt_capture.lock().await.take() {
+                Some(PttCapture {
+                    warmup,
+                    cancel,
+                    resume_listening,
+                    answers_prompt,
+                }) => (Some(warmup), cancel, resume_listening, answers_prompt),
+                None => (None, self.admission.turn_cancellation(), false, false),
+            };
         let transcription = self.transcribe_while_warming(warmup, &cancel).await;
         if resume_listening {
             self.resume_listening_after_ptt().await;
+        }
+        if answers_prompt {
+            let said = transcription.as_deref().unwrap_or_default();
+            self.answer_prompt(said.to_string());
         }
         debug!(
             target: "assistd::voice::latency",
@@ -187,7 +205,7 @@ impl VoiceService {
             ))
             .await;
 
-        if text.trim().is_empty() {
+        if answers_prompt || text.trim().is_empty() {
             let _ = tx.send(Event::new(id, EventBody::Done)).await;
             return Ok(None);
         }
@@ -200,6 +218,11 @@ impl VoiceService {
             plan: PlanMode::Off,
         };
         Ok(Some(HeardPrompt { query, cancel }))
+    }
+
+    /// Hand `said` to the prompt asked out loud that awaits an answer; `false` when none does.
+    pub fn answer_prompt(&self, said: String) -> bool {
+        self.voice_gate.answer(said)
     }
 
     async fn transcribe_while_warming(

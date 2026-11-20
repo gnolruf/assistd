@@ -83,6 +83,12 @@ impl VoiceOutputController {
         self.skip().await;
     }
 
+    /// Cancel queued audio within the epoch, so the running reply still
+    /// speaks its later sentences.
+    pub async fn hush(&self) {
+        self.cancel_queued().await;
+    }
+
     /// What a worker that started at `start_epoch` should do with its
     /// next sentence.
     pub fn should_speak(&self, start_epoch: u64) -> SpeakDecision {

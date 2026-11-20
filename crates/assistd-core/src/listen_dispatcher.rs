@@ -1,5 +1,6 @@
 //! Routes wake-word commands into the agent loop (waking a sleeping daemon), interrupts
-//! talked-over replies, opens follow-up windows, and publishes the listener's phase.
+//! talked-over replies, opens follow-up windows, hands spoken answers to the prompt that
+//! asked for them, and publishes the listener's phase.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -177,6 +178,11 @@ async fn forward_heard(
             state.voice.interrupt_turns().await;
         }
         Ok(Heard::BargeIn) => {}
+        Ok(Heard::Answer(said)) => {
+            if !state.voice.answer_prompt(said) {
+                debug!(target: "assistd::listen", "no prompt awaits an answer; dropped it");
+            }
+        }
         Err(RecvError::Lagged(n)) => {
             warn!(
                 target: "assistd::listen",

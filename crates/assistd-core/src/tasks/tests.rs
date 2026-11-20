@@ -16,7 +16,7 @@ use assistd_llm::{EchoBackend, ScriptedBackend, Step, ToolCall, TurnBackend};
 use assistd_memory::{HistoryScope, SessionId};
 use assistd_tools::{
     Approval, ConfirmationGate, ConfirmationRequest, IpcConfirmationGate, JudgeContext,
-    JudgedClass, Risk, ToolError, ToolOutput, ToolRegistry, TurnContext, Unattended,
+    JudgedClass, Risk, Summary, ToolError, ToolOutput, ToolRegistry, TurnContext, Unattended,
 };
 use assistd_utils::readiness::Readiness;
 use assistd_voice::VoiceManager;
@@ -216,6 +216,7 @@ impl assistd_tools::Tool for FetchTool {
             tool: "web".into(),
             script: format!("web fetch https://{host}"),
             matched_pattern: format!("fetches from {host}, which is not yet approved"),
+            summary: Summary::of("a fetch"),
             always_allow: vec![host.clone()],
             risk: Risk::Elevated,
             unattended: Unattended::WebHost(host),
@@ -255,6 +256,7 @@ impl assistd_tools::Tool for UnvettedScriptTool {
             tool: "bash".into(),
             script: "make inbox-digest".into(),
             matched_pattern: "`make` is not vetted".into(),
+            summary: Summary::of("a shell command"),
             always_allow: Vec::new(),
             risk: Risk::Elevated,
             unattended: Unattended::Judged(JudgeContext {

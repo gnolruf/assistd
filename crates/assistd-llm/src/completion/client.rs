@@ -141,6 +141,7 @@ impl LlamaClient {
             reasoning_budget_message: Some(REASONING_BUDGET_MESSAGE),
             chat_template_kwargs: self.template_kwargs(Thinking::Enabled),
             response_format: None,
+            grammar: None,
             id_slot: self.slot.lock().index(),
         }
     }
@@ -160,6 +161,13 @@ impl LlamaClient {
                 reasoning_effort,
             },
         )
+    }
+
+    fn sample_greedily_without_thinking<'a>(&'a self, payload: &mut wire::ChatRequest<'a>) {
+        payload.temperature = 0.0;
+        payload.reasoning_budget_tokens = None;
+        payload.reasoning_budget_message = None;
+        payload.chat_template_kwargs = self.template_kwargs(Thinking::Disabled);
     }
 
     /// Classify a failed request: a restart-coincident failure becomes
@@ -721,11 +729,12 @@ impl LlmBackend for LlamaClient {
                     payload.chat_template_kwargs = self.template_kwargs(*thinking);
                 }
                 OneShotReply::Json(schema) => {
-                    payload.temperature = 0.0;
-                    payload.reasoning_budget_tokens = None;
-                    payload.reasoning_budget_message = None;
-                    payload.chat_template_kwargs = self.template_kwargs(Thinking::Disabled);
+                    self.sample_greedily_without_thinking(&mut payload);
                     payload.response_format = Some(wire::ResponseFormat::json_schema(schema));
+                }
+                OneShotReply::OneOf(words) => {
+                    self.sample_greedily_without_thinking(&mut payload);
+                    payload.grammar = Some(one_word_grammar(words));
                 }
             }
             serde_json::to_vec(&payload).map_err(|e| LlmError::Client(LlamaClientError::Json(e)))?
@@ -889,6 +898,12 @@ impl ContinuationSummarizer<'_> {
             StreamOutcome::ServerRestart { .. } => Err(LlamaClientError::Restarted),
         }
     }
+}
+
+/// The GBNF grammar that admits exactly one of `words`.
+fn one_word_grammar(words: &[&str]) -> String {
+    let alternatives: Vec<String> = words.iter().map(|word| format!("\"{word}\"")).collect();
+    format!("root ::= {}", alternatives.join(" | "))
 }
 
 /// Offer `tools` on `payload`, leaving it tool-free when there are none.

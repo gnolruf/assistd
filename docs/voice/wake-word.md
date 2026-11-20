@@ -102,6 +102,16 @@ the listener had captured but not yet acted on is dropped, and the
 conversation ends: no follow-up window opens until you say the phrase
 again.
 
+**Confirmations.** A command given by voice runs without a screen, so
+when it needs your approval the daemon asks out loud: "Allow a fetch
+from example.com?" Answer after the question ends, within 10 seconds,
+without the wake phrase; a push-to-talk press also answers, and can cut
+the question short. Speech over the question is ignored. Only a clear
+yes approves, and only that one request: "always allow" is given in the
+chat. A no, an unclear answer or silence cancels the request, and after
+a question you did not answer the command's later requests are
+cancelled without being asked. Nothing is asked while speech is muted.
+
 **Sleep.** Listening keeps running while presence is `Sleeping`. A
 command wakes the model like any other query. The first reply is slower
 because the model has to load. If the GPU lacks room for the model

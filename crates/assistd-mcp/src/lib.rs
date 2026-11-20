@@ -11,8 +11,9 @@ use assistd_config::McpServerName;
 use assistd_ipc::Attachment;
 use assistd_ipc::attachment::MAX_IMAGE_BYTES;
 use assistd_tools::{
-    ApprovalGate, ConfirmSource, ConfirmationRequest, ImageMime, JudgeContext, JudgedClass, Risk,
-    Tool, ToolError, ToolOutput, TurnContext, Unattended, VisionGate,
+    ApprovalGate, ConfirmSource, ConfirmationRequest, ImageMime, JudgeContext, JudgedClass,
+    MCP_TOOL_NAME_PREFIX, Risk, Summary, Tool, ToolError, ToolOutput, TurnContext, Unattended,
+    VisionGate,
 };
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
@@ -72,6 +73,7 @@ impl McpToolAdapter {
                 tool: name.to_string(),
                 script: format!("{args:#}"),
                 matched_pattern: "calls an MCP tool that is not yet approved".to_string(),
+                summary: call_summary(name),
                 always_allow: vec![name.to_string()],
                 risk: Risk::Elevated,
                 unattended: Unattended::Judged(JudgeContext {
@@ -145,6 +147,17 @@ pub async fn adapt_client_as_tools(
 }
 
 /// The result of a call the user declined.
+/// A call of the tool registered as `registry_name`, in a sentence that names its server.
+fn call_summary(registry_name: &str) -> Summary {
+    let named = registry_name
+        .strip_prefix(MCP_TOOL_NAME_PREFIX)
+        .and_then(|name| name.split_once("__"));
+    Summary::of(match named {
+        Some((server, tool)) => format!("the {server} tool {tool}"),
+        None => format!("the tool {registry_name}"),
+    })
+}
+
 fn declined_output(tool_name: &str) -> ToolOutput {
     ToolOutput::failed(
         format!("[error] {tool_name}: call cancelled by user. Try: a different approach\n"),

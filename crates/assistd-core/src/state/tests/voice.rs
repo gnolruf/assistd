@@ -166,6 +166,8 @@ impl ContinuousListener for MockListener {
     }
     fn open_follow_up(&self) {}
     fn set_replying(&self, _replying: bool) {}
+    fn await_answer(&self, _wait: Duration) {}
+    fn answer_settled(&self) {}
     async fn test_wake_word(&self, sink: mpsc::Sender<WakeTest>) -> Result<(), ListenError> {
         assert!(!self.is_active(), "listening must pause while capturing");
         sink.closed().await;

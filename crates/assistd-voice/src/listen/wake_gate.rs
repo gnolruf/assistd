@@ -15,18 +15,22 @@ pub enum Admission {
     WakePhrase,
     /// An utterance inside a command window, taken whole as the command.
     Command,
+    /// An utterance inside the answer window: what the user said to a question asked aloud.
+    Answer,
 }
 
 /// Admits an utterance when the wake phrase was spotted in it, or when it
 /// began inside a command window: `command_timeout` after a bare phrase,
 /// or `follow_up` after a reply ended. The first utterance that began
-/// inside or after the window closes it.
+/// inside or after the window closes it. While a question asked aloud awaits
+/// its answer, every utterance that began inside the answer window is one.
 #[derive(Debug)]
 pub struct WakeGate {
     command_timeout: Duration,
     /// `None` when follow-ups are disabled.
     follow_up: Option<Duration>,
     window: Option<CommandWindow>,
+    answer_window: Option<CommandWindow>,
 }
 
 /// Speech that began between `opens` and `closes` is a command.
@@ -48,7 +52,22 @@ impl WakeGate {
             command_timeout,
             follow_up,
             window: None,
+            answer_window: None,
         }
+    }
+
+    /// Take speech that begins within `wait` of `asked`, when a question finished being
+    /// asked aloud, as its answer, until [`Self::settle_answer`].
+    pub fn await_answer(&mut self, asked: Instant, wait: Duration) {
+        self.answer_window = Some(CommandWindow {
+            opens: asked,
+            closes: asked + wait,
+        });
+    }
+
+    /// Stop taking speech as an answer.
+    pub fn settle_answer(&mut self) {
+        self.answer_window = None;
     }
 
     /// Open the follow-up window for a reply that ended at `reply_ended`,
@@ -66,23 +85,35 @@ impl WakeGate {
         }
     }
 
-    /// When the open command window closes, if one is open.
+    /// When the last of the open command and answer windows closes, if one is open.
     pub fn command_deadline(&self) -> Option<Instant> {
-        self.window.map(|window| window.closes)
+        self.windows().map(|window| window.closes).max()
     }
 
-    /// `Capturing` while a command window is open at `now`, else `Armed`.
+    /// `Capturing` while a command or answer window is open at `now`, else `Armed`.
     pub fn phase(&self, now: Instant) -> ListenPhase {
-        match self.window {
-            Some(window) if window.contains(now) => ListenPhase::Capturing,
-            _ => ListenPhase::Armed,
+        if self.windows().any(|window| window.contains(now)) {
+            ListenPhase::Capturing
+        } else {
+            ListenPhase::Armed
         }
     }
 
+    fn windows(&self) -> impl Iterator<Item = CommandWindow> {
+        self.window.into_iter().chain(self.answer_window)
+    }
+
     /// Gate an utterance that began at `started`, `spotted` when the wake
-    /// phrase is in it. A spotted phrase wins over an open window, and an
-    /// utterance that began before the window opened leaves it open.
+    /// phrase is in it. The answer window wins over everything and stays open; a
+    /// spotted phrase wins over an open command window, and an utterance that
+    /// began before that window opened leaves it open.
     pub fn admit(&mut self, spotted: bool, started: Instant) -> Admission {
+        if self
+            .answer_window
+            .is_some_and(|window| window.contains(started))
+        {
+            return Admission::Answer;
+        }
         let in_window = self
             .window
             .take_if(|window| window.opens <= started)
@@ -150,6 +181,36 @@ mod tests {
             gate.admit(true, ended),
             Admission::WakePhrase,
             "a spotted phrase wins over an open window"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn answer_window_takes_only_speech_begun_after_the_question_until_settled() {
+        const WAIT: Duration = Duration::from_secs(10);
+        let mut gate = WakeGate::new(Duration::from_secs(4), None);
+        let asked = Instant::now();
+        gate.await_answer(asked, WAIT);
+        assert_eq!(
+            gate.admit(false, asked - Duration::from_millis(1)),
+            Admission::Dropped,
+            "speech over the question is not an answer to it"
+        );
+        for spotted in [false, true] {
+            assert_eq!(
+                gate.admit(spotted, asked + Duration::from_secs(2)),
+                Admission::Answer,
+                "the window stays open until settled"
+            );
+        }
+        assert_eq!(
+            gate.admit(false, asked + WAIT + Duration::from_millis(1)),
+            Admission::Dropped
+        );
+
+        gate.settle_answer();
+        assert_eq!(
+            gate.admit(false, asked + Duration::from_secs(2)),
+            Admission::Dropped
         );
     }
 }
