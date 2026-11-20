@@ -410,10 +410,9 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         files: Vec<(PathBuf, FileStamp)>,
     ) -> Result<Vec<(PathBuf, FileStamp)>>;
 
-    /// Store `pages`, each page's text in file order, as the document at `path`, seen
-    /// by `pass`, dropping what was transcribed of it before. No chunk spans two pages.
-    /// A chunk whose text is unchanged keeps its vector on whatever page it now sits;
-    /// returns the new chunks, which have none.
+    /// Store `pages`, in file order, as the document at `path`, seen by `pass`, dropping
+    /// what was transcribed of it before. No chunk spans two pages, and one whose text is
+    /// unchanged keeps its vector wherever it sits; returns the new chunks, which have none.
     async fn index_document(
         &self,
         pass: IndexPass,
@@ -436,7 +435,6 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         reading: PageReading,
     ) -> Result<Vec<ChunkId>>;
 
-    /// How many pages wait for transcription, and how many it failed on.
     async fn count_transcriptions(&self) -> Result<TranscriptionCounts>;
 
     /// Have every page whose transcription failed wait again, returning how many.

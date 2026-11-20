@@ -304,7 +304,8 @@ resumed, saying which.
   A file whose `mtime_ns`, `size` and chunking match its row is not
   read again. One that is read and hashes to the stored `content_hash`,
   which covers its pages in order, only has its stamp refreshed, unless
-  it has rows in `page_transcriptions`.
+  it has rows in `page_transcriptions`: the same text layer says nothing
+  about whether the scans changed.
   Otherwise each chunk whose text is unchanged keeps its vector and
   takes the page and byte range that text now has, so an insertion
   re-embeds only the paragraphs it touched and a page added at the

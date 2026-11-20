@@ -196,10 +196,9 @@ impl PresenceManager {
         Ok(manager)
     }
 
-    /// Create a manager in `Sleeping` with no llama-server started. Every
-    /// server it starts accepts only `api_key`, saves slots only into
-    /// `slot_dir` and reads its models' presets from `presets`. Flipping
-    /// `daemon_shutdown` cancels any wake in flight.
+    /// Create a manager in `Sleeping` with no llama-server started. Every server it starts
+    /// accepts only `api_key`, saves slots only into `slot_dir` and reads its models'
+    /// presets from `presets`. Flipping `daemon_shutdown` cancels any wake in flight.
     pub fn new_sleeping(
         model: ModelConfig,
         timeouts: TimeoutsConfig,
@@ -823,7 +822,6 @@ impl PresenceManager {
             .await
     }
 
-    /// Ask the server to load `model` and wait until it has.
     async fn load_and_await(
         &self,
         model: &str,

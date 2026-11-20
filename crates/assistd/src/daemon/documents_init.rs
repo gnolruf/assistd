@@ -45,7 +45,6 @@ struct OcrModel {
 }
 
 impl OcrModel {
-    /// `None` when no page is transcribed: `documents.ocr.model` is unset.
     fn from_config(
         config: &Config,
         api_key: &ApiKey,

@@ -71,7 +71,6 @@ pub enum Transcription {
 }
 
 impl Transcription {
-    /// Classify a reply of `text` that ended for `finish_reason`.
     fn of_reply(text: &str, finish_reason: Option<&str>) -> Self {
         let text = text.trim();
         if finish_reason == Some(FINISHED_AT_TOKEN_CAP) {

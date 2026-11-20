@@ -358,7 +358,6 @@ pub(super) fn store_page_reading(
     cut_stored_pages(tx, *document_id)
 }
 
-/// How many pages wait for transcription, and how many it failed on.
 pub(super) fn count_transcriptions(conn: &Connection) -> rusqlite::Result<TranscriptionCounts> {
     conn.prepare_cached(
         "SELECT count(*) FILTER (WHERE state = ?1), count(*) FILTER (WHERE state = ?2)

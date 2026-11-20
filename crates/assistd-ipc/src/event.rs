@@ -275,7 +275,6 @@ pub enum EventBody {
         /// The root a pass is walking now.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         running_pass: Option<String>,
-        /// Where transcribing the pages that have no text stands.
         transcription: PageTranscriptionStatus,
     },
     /// One index root, in `documents.roots` order.

@@ -955,10 +955,6 @@ fails, or the loan is refused (no room on the GPU, a download or load that
 fails); the status keeps the reason, and the next run starts after five
 minutes or when the daemon next drowses.
 
-A file whose stamp changes is extracted again like any other, and every
-transcription of it is dropped with its waiting pages: the same text layer
-says nothing about whether the scans changed.
-
 The daemon broadcasts a `DocumentActivity` whenever the root being walked or
 the number of document chunks left to embed changes. It counts those chunks
 when a pass starts or ends and every five seconds while one runs or some

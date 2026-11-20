@@ -49,7 +49,6 @@ pub struct PageTranscription {
 }
 
 impl PageTranscription {
-    /// How the last run went, or that one runs now.
     pub fn last_run(&self) -> TranscriptionRun {
         self.last_run.lock().clone()
     }

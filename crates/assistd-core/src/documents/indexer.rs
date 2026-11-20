@@ -88,7 +88,6 @@ impl DocumentIndex {
         self.progress.subscribe()
     }
 
-    /// Where page transcription is woken, and how its last run went.
     pub fn transcription(&self) -> &PageTranscription {
         &self.transcription
     }
