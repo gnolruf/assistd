@@ -297,8 +297,10 @@ dependencies = [
  "html2text",
  "image",
  "num-traits",
+ "office_oxide",
  "parking_lot 0.13.0",
  "pdf_oxide",
+ "quick-xml",
  "rustix 1.1.6",
  "serde",
  "serde_json",
@@ -306,6 +308,8 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "url",
+ "zip",
 ]
 
 [[package]]

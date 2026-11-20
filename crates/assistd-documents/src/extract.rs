@@ -1,24 +1,31 @@
 //! Turns one file into text, or one of its pages into an image: the format its
-//! extension names, its decoding, and the limits on what is read and returned.
+//! extension names and the limit on what is read.
 
-use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::Path;
 
-use assistd_utils::binary::{binary_format, sniff_binary};
 use assistd_utils::fs::open_regular;
-use encoding_rs::{Encoding, UTF_8};
 
-use crate::pdf;
+use crate::office::{self, OfficeFormat};
 use crate::protocol::{Extraction, RenderedPage, SkipReason};
+use crate::text::{decode, html_text};
+use crate::{epub, opendocument, pdf};
 
-const HTML_EXTENSIONS: [&str; 3] = ["html", "htm", "xhtml"];
-
-const PDF_EXTENSION: &str = "pdf";
-
-/// Columns an HTML file's text is wrapped to.
-const HTML_TEXT_WIDTH: usize = 100;
+/// The format each extension names, whatever its case; any other is [`Format::Text`].
+const EXTENSION_FORMATS: [(&str, Format); 11] = [
+    ("html", Format::Html),
+    ("htm", Format::Html),
+    ("xhtml", Format::Html),
+    ("pdf", Format::Pdf),
+    ("docx", Format::Office(OfficeFormat::Docx)),
+    ("pptx", Format::Office(OfficeFormat::Pptx)),
+    ("xlsx", Format::Office(OfficeFormat::Xlsx)),
+    ("odt", Format::OpenDocument),
+    ("ods", Format::OpenDocument),
+    ("odp", Format::OpenDocument),
+    ("epub", Format::Epub),
+];
 
 /// How a file's bytes become its text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,21 +34,18 @@ enum Format {
     Text,
     Html,
     Pdf,
+    Office(OfficeFormat),
+    OpenDocument,
+    Epub,
 }
 
 impl Format {
     fn of(path: &Path) -> Self {
         let extension = path.extension().and_then(OsStr::to_str).unwrap_or_default();
-        if extension.eq_ignore_ascii_case(PDF_EXTENSION) {
-            Self::Pdf
-        } else if HTML_EXTENSIONS
+        EXTENSION_FORMATS
             .iter()
-            .any(|html| extension.eq_ignore_ascii_case(html))
-        {
-            Self::Html
-        } else {
-            Self::Text
-        }
+            .find(|(known, _)| extension.eq_ignore_ascii_case(known))
+            .map_or(Self::Text, |(_, format)| *format)
     }
 
     fn extract(self, bytes: Vec<u8>) -> Result<Extraction, SkipReason> {
@@ -51,6 +55,9 @@ impl Format {
                 .and_then(|html| html_text(&html))
                 .map(Extraction::of_one_page),
             Self::Pdf => pdf::page_texts(bytes),
+            Self::Office(format) => office::page_texts(bytes, format),
+            Self::OpenDocument => opendocument::page_texts(bytes),
+            Self::Epub => epub::page_texts(bytes),
         }
     }
 }
@@ -91,38 +98,103 @@ fn read_file(path: &Path, max_file_bytes: u64) -> Result<Vec<u8>, SkipReason> {
     Ok(bytes)
 }
 
-fn html_text(html: &str) -> Result<String, SkipReason> {
-    html2text::config::plain_no_decorate()
-        .allow_width_overflow()
-        .no_table_borders()
-        .string_from_read(html.as_bytes(), HTML_TEXT_WIDTH)
-        .map_err(|error| SkipReason::ExtractorFailed {
-            message: error.to_string(),
-        })
-}
-
-/// `bytes` as text in the encoding their byte-order mark names, or UTF-8 without
-/// one; bytes that look binary are refused.
-fn decode(bytes: &[u8]) -> Result<String, SkipReason> {
-    if let Some(mime) = binary_format(bytes) {
-        return Err(SkipReason::Unsupported {
-            mime: mime.to_owned(),
-        });
-    }
-    let (encoding, mark_len) = Encoding::for_bom(bytes).unwrap_or((UTF_8, 0));
-    if encoding == UTF_8 && sniff_binary(bytes).is_some() {
-        return Err(SkipReason::Binary);
-    }
-    encoding
-        .decode_without_bom_handling_and_without_replacement(&bytes[mark_len..])
-        .map(Cow::into_owned)
-        .ok_or(SkipReason::NotDecodable)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
+    use office_oxide::docx::write::DocxWriter;
+    use office_oxide::pptx::write::PptxWriter;
+    use office_oxide::xlsx::write::{CellData, XlsxWriter};
+
     use super::*;
+    use crate::archive::{MAX_ENTRIES, MAX_ENTRY_BYTES};
+    use crate::protocol::MAX_TEXT_BYTES;
+    use crate::sample_archive::archive_of;
     use crate::sample_pdf::{EMPTY_PAGE, IMAGE_PAGE, pdf_of, text_page};
+
+    const MEBIBYTE: u64 = 1024 * 1024;
+
+    const OPENDOCUMENT_MANIFEST: &str = r#"<manifest:manifest><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/></manifest:manifest>"#;
+
+    const ENCRYPTED_MANIFEST: &str = r#"<manifest:manifest><manifest:file-entry manifest:full-path="content.xml"><manifest:encryption-data manifest:checksum="x"/></manifest:file-entry></manifest:manifest>"#;
+
+    const TEXT_BODY: &str = r#"<office:text>
+        <text:tracked-changes><text:changed-region><text:deletion>
+          <text:p>Struck out.</text:p>
+        </text:deletion></text:changed-region></text:tracked-changes>
+        <text:h text:outline-level="2">Minutes</text:h>
+        <text:p>Present:<text:s text:c="2"/>Ann &amp; <text:span>Bo</text:span><text:note
+          ><text:note-citation>1</text:note-citation><text:note-body
+          ><text:p>By phone.</text:p></text:note-body></text:note>,
+          then<text:line-break/>Cy.</text:p>
+        <table:table>
+          <table:table-row>
+            <table:table-cell><text:p>Item</text:p></table:table-cell>
+            <table:table-cell><text:p>Owner</text:p></table:table-cell>
+          </table:table-row>
+          <table:table-row>
+            <table:table-cell><text:p>Budget</text:p><text:p>a|b</text:p></table:table-cell>
+            <table:table-cell><text:p>Ann</text:p></table:table-cell>
+          </table:table-row>
+        </table:table>
+      </office:text>"#;
+
+    const SPREADSHEET_BODY: &str = r#"<office:spreadsheet>
+        <table:table table:name="Costs &amp; totals">
+          <table:table-row>
+            <table:table-cell><text:p>Item</text:p></table:table-cell>
+            <table:table-cell table:number-columns-repeated="2"/>
+            <table:table-cell office:value="3"><text:p>3</text:p></table:table-cell>
+            <table:table-cell table:number-columns-repeated="16380"/>
+          </table:table-row>
+          <table:table-row table:number-rows-repeated="2">
+            <table:table-cell table:number-columns-repeated="2"><text:p>x</text:p></table:table-cell>
+          </table:table-row>
+          <table:table-row table:number-rows-repeated="1048573">
+            <table:table-cell table:number-columns-repeated="16384"/>
+          </table:table-row>
+        </table:table>
+        <table:table table:name="Unused">
+          <table:table-row table:number-rows-repeated="1048576">
+            <table:table-cell table:number-columns-repeated="16384"/>
+          </table:table-row>
+        </table:table>
+      </office:spreadsheet>"#;
+
+    const PRESENTATION_BODY: &str = r#"<office:presentation>
+        <draw:page draw:name="page1">
+          <draw:frame><draw:text-box><text:p>Plan</text:p></draw:text-box></draw:frame>
+          <draw:frame><draw:text-box><text:p>Ship it</text:p></draw:text-box></draw:frame>
+        </draw:page>
+        <draw:page draw:name="page2"><draw:frame><draw:image/></draw:frame></draw:page>
+        <draw:page draw:name="page3">
+          <draw:frame><draw:text-box><text:p>Questions</text:p></draw:text-box></draw:frame>
+        </draw:page>
+      </office:presentation>"#;
+
+    const REPEATED_PAST_ANY_LIMIT_BODY: &str = r#"<office:spreadsheet><table:table>
+        <table:table-row table:number-rows-repeated="1073741824">
+          <table:table-cell table:number-columns-repeated="16384"><text:p>again</text:p></table:table-cell>
+        </table:table-row>
+      </table:table></office:spreadsheet>"#;
+
+    const EPUB_CONTAINER: &str = r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+        <rootfiles><rootfile full-path="OEBPS/book.opf"/></rootfiles></container>"#;
+
+    const EPUB_PACKAGE: &str = r#"<package xmlns="http://www.idpf.org/2007/opf">
+        <manifest>
+          <item id="two" href="text/part%202.xhtml" media-type="application/xhtml+xml"/>
+          <item id="one" href="text/one.xhtml" media-type="application/xhtml+xml"/>
+          <item id="art" href="art.svg" media-type="image/svg+xml"/>
+          <item id="end" href="../end.xhtml" media-type="application/xhtml+xml"/>
+        </manifest>
+        <spine><itemref idref="art"/><itemref idref="one"/><itemref idref="two"/>
+          <itemref idref="end"/></spine>
+      </package>"#;
+
+    const EPUB_FIRST_CHAPTER: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+      <html xmlns="http://www.w3.org/1999/xhtml"><head><title/><script src="reader.js"/></head>
+      <body><h1>One</h1><p>First<br/>chapter.</p></body></html>"#;
 
     const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
 
@@ -137,14 +209,35 @@ mod tests {
     }
 
     fn text(text: &str) -> Extraction {
-        Extraction::Pages {
-            pages: vec![text.into()],
-            truncated: false,
-        }
+        pages(&[text])
     }
 
     fn skipped(reason: SkipReason) -> Extraction {
         Extraction::Skipped { reason }
+    }
+
+    fn pages(pages: &[&str]) -> Extraction {
+        Extraction::Pages {
+            pages: pages.iter().map(|page| (*page).to_owned()).collect(),
+            truncated: false,
+        }
+    }
+
+    fn opendocument_of(manifest: &str, body: &str) -> Vec<u8> {
+        let content = format!(
+            "<office:document-content><office:body>{body}</office:body></office:document-content>"
+        );
+        archive_of(&[
+            ("META-INF/manifest.xml", manifest.as_bytes()),
+            ("content.xml", content.as_bytes()),
+        ])
+    }
+
+    fn page_texts(extraction: &Extraction) -> &[String] {
+        match extraction {
+            Extraction::Pages { pages, .. } => pages,
+            Extraction::Skipped { reason } => panic!("the file has text: {reason}"),
+        }
     }
 
     #[test]
@@ -228,6 +321,155 @@ mod tests {
             RenderedPage::Failed {
                 reason: SkipReason::TooLarge
             }
+        );
+    }
+
+    #[test]
+    fn an_opendocument_file_yields_markdown_with_a_page_for_each_sheet_or_slide() {
+        let cases = [
+            (
+                "minutes.odt",
+                TEXT_BODY,
+                pages(&[
+                    "## Minutes\n\nPresent:  Ann & Bo, then\nCy.\n\nBy phone.\n\n\
+                    | Item | Owner |\n| --- | --- |\n| Budget a\\|b | Ann |\n",
+                ]),
+            ),
+            (
+                "costs.ODS",
+                SPREADSHEET_BODY,
+                pages(&[
+                    "## Costs & totals\n\n| Item |  |  | 3 |\n| --- | --- | --- | --- |\n\
+                     | x | x |\n| x | x |\n",
+                    "",
+                ]),
+            ),
+            (
+                "plan.odp",
+                PRESENTATION_BODY,
+                pages(&["Plan\n\nShip it\n", "", "Questions\n"]),
+            ),
+        ];
+        for (name, body, expected) in cases {
+            let file = opendocument_of(OPENDOCUMENT_MANIFEST, body);
+            assert_eq!(extraction_of(name, &file, MEBIBYTE), expected, "{name}");
+        }
+        let locked = opendocument_of(ENCRYPTED_MANIFEST, TEXT_BODY);
+        assert_eq!(
+            extraction_of("locked.odt", &locked, MEBIBYTE),
+            skipped(SkipReason::PasswordProtected)
+        );
+    }
+
+    #[test]
+    fn a_repeat_count_expands_a_spreadsheet_no_further_than_the_text_kept() {
+        let file = opendocument_of(OPENDOCUMENT_MANIFEST, REPEATED_PAST_ANY_LIMIT_BODY);
+        let Extraction::Pages { pages, truncated } = extraction_of("again.ods", &file, MEBIBYTE)
+        else {
+            panic!("the rows that fit are kept");
+        };
+        assert!(truncated);
+        assert_eq!(pages.iter().map(String::len).sum::<usize>(), MAX_TEXT_BYTES);
+    }
+
+    #[test]
+    fn an_epub_yields_its_chapters_in_spine_order_each_as_a_page() {
+        let chapter = |text: &str| format!("<html><body><p>{text}</p></body></html>");
+        let book = archive_of(&[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", EPUB_CONTAINER.as_bytes()),
+            ("OEBPS/book.opf", EPUB_PACKAGE.as_bytes()),
+            ("OEBPS/art.svg", b"<svg/>"),
+            ("OEBPS/text/part 2.xhtml", chapter("Second.").as_bytes()),
+            ("OEBPS/text/one.xhtml", EPUB_FIRST_CHAPTER.as_bytes()),
+            ("end.xhtml", chapter("Last.").as_bytes()),
+        ]);
+        assert_eq!(
+            extraction_of("book.epub", &book, MEBIBYTE),
+            pages(&["# One\n\nFirst\nchapter.\n", "Second.\n", "Last.\n"])
+        );
+    }
+
+    #[test]
+    fn an_office_file_yields_markdown_with_a_page_for_each_slide_or_sheet() {
+        let mut letter = Cursor::new(Vec::new());
+        DocxWriter::new()
+            .add_heading("Lease", 1)
+            .add_paragraph("Renewal terms.")
+            .write_to(&mut letter)
+            .expect("docx");
+        let letter = extraction_of("lease.DOCX", letter.get_ref(), MEBIBYTE);
+        let [text] = page_texts(&letter) else {
+            panic!("a DOCX is one page: {letter:?}");
+        };
+        assert!(text.contains("# Lease\n\nRenewal terms."), "{text}");
+
+        let mut deck = PptxWriter::new();
+        deck.add_slide().set_title("Plan").add_text("Ship it");
+        deck.add_slide().add_text("Questions");
+        let mut slides = Cursor::new(Vec::new());
+        deck.write_to(&mut slides).expect("pptx");
+        let slides = extraction_of("plan.pptx", slides.get_ref(), MEBIBYTE);
+        let [plan, questions] = page_texts(&slides) else {
+            panic!("a slide is a page: {slides:?}");
+        };
+        assert!(plan.contains("Plan") && plan.contains("Ship it"), "{plan}");
+        assert!(questions.contains("Questions"), "{questions}");
+
+        let mut workbook = XlsxWriter::new();
+        workbook.add_sheet("Costs").add_row(vec![
+            CellData::String("Rent".into()),
+            CellData::Number(900.0),
+        ]);
+        workbook.add_sheet("Unused");
+        let mut sheets = Cursor::new(Vec::new());
+        workbook.write_to(&mut sheets).expect("xlsx");
+        let sheets = extraction_of("costs.xlsx", sheets.get_ref(), MEBIBYTE);
+        let [costs, unused] = page_texts(&sheets) else {
+            panic!("a sheet is a page: {sheets:?}");
+        };
+        assert!(
+            costs.contains("## Costs") && costs.contains("| Rent | 900 |"),
+            "{costs}"
+        );
+        assert_eq!(unused, "");
+
+        assert_eq!(
+            extraction_of(
+                "locked.xlsx",
+                b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1....",
+                MEBIBYTE
+            ),
+            skipped(SkipReason::PasswordProtected)
+        );
+    }
+
+    #[test]
+    fn an_archive_past_a_decompression_limit_is_skipped_whatever_its_format() {
+        let names: Vec<String> = (0..=MAX_ENTRIES).map(|entry| entry.to_string()).collect();
+        let entries: Vec<(&str, &[u8])> =
+            names.iter().map(|name| (name.as_str(), &b""[..])).collect();
+        let crowded = archive_of(&entries);
+        for name in [
+            "a.docx", "a.pptx", "a.xlsx", "a.odt", "a.ods", "a.odp", "a.epub",
+        ] {
+            assert_eq!(
+                extraction_of(name, &crowded, MEBIBYTE),
+                skipped(SkipReason::TooLarge),
+                "{name}"
+            );
+        }
+
+        let filler = " ".repeat(usize::try_from(MAX_ENTRY_BYTES).expect("fits"));
+        let mut bomb = Cursor::new(Vec::new());
+        DocxWriter::new()
+            .add_paragraph(&filler)
+            .write_to(&mut bomb)
+            .expect("docx");
+        assert!(bomb.get_ref().len() < filler.len() / 100);
+        assert_eq!(
+            extraction_of("bomb.docx", bomb.get_ref(), MEBIBYTE),
+            skipped(SkipReason::TooLarge)
         );
     }
 

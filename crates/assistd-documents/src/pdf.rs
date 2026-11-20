@@ -42,7 +42,7 @@ pub(crate) fn page_texts(bytes: Vec<u8>) -> Result<Extraction, SkipReason> {
             .filter(|text| !text.trim().is_empty())
             .unwrap_or_default())
     });
-    Extraction::of_pages(texts).map_err(failed)
+    Extraction::try_of_pages(texts).map_err(failed)
 }
 
 /// Page `page` of the PDF in `bytes`, counted from zero, as a PNG, or blank
