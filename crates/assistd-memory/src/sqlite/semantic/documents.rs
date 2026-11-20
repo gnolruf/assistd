@@ -1,4 +1,5 @@
-//! Writes to the document index: passes over index roots, and each document's pages and chunks.
+//! Writes to the document index: passes over index roots, and each document's pages,
+//! chunks and keyword index.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -268,21 +269,7 @@ pub(super) fn store_document(
     write_changed_pages(tx, id, &stored.pages, pages)?;
     recut.apply(tx, id, longest_page(&stored.pages).max(longest_page(pages)))?;
     remove_pages_from(tx, id, pages.len())?;
-    let mut insert = tx.prepare_cached(
-        "INSERT INTO chunks (document_id, page, byte_start, byte_end)
-         VALUES (?1, ?2, ?3, ?4)
-         RETURNING id",
-    )?;
-    recut
-        .added
-        .iter()
-        .map(|cut| {
-            insert.query_row(
-                rusqlite::params![id, cut.page, cut.bytes.start, cut.bytes.end],
-                |r| r.get(0),
-            )
-        })
-        .collect()
+    add_chunks(tx, id, pages, &recut.added)
 }
 
 /// Remove the documents of `pass`'s root that it did not see, returning how many.
@@ -388,6 +375,33 @@ fn write_changed_pages(
         write.execute(rusqlite::params![document, page, content])?;
     }
     Ok(())
+}
+
+/// Store a chunk of `document` for each of `cuts` of its stored `pages`, with the
+/// words of its text for keyword search, returning the chunks.
+fn add_chunks(
+    tx: &Transaction<'_>,
+    document: DocumentId,
+    pages: &[String],
+    cuts: &[&PageCut],
+) -> rusqlite::Result<Vec<ChunkId>> {
+    let mut insert = tx.prepare_cached(
+        "INSERT INTO chunks (document_id, page, byte_start, byte_end)
+         VALUES (?1, ?2, ?3, ?4)
+         RETURNING id",
+    )?;
+    let mut index_words =
+        tx.prepare_cached("INSERT INTO document_chunk_fts (rowid, text) VALUES (?1, ?2)")?;
+    cuts.iter()
+        .map(|cut| {
+            let chunk: ChunkId = insert.query_row(
+                rusqlite::params![document, cut.page, cut.bytes.start, cut.bytes.end],
+                |r| r.get(0),
+            )?;
+            index_words.execute(rusqlite::params![chunk, cut.text_in(pages)])?;
+            Ok(chunk)
+        })
+        .collect()
 }
 
 /// Remove the pages of `document` at position `first` and after, with their chunks.

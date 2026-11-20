@@ -1,5 +1,5 @@
 //! SQLite-backed [`SemanticStore`] over one embeddings table each for message
-//! chunks, document chunks and memories.
+//! chunks, document chunks and memories, and a keyword index of document chunks.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -15,7 +15,7 @@ use rusqlite::types::FromSql;
 use rusqlite::{OptionalExtension, Params, Row, Transaction};
 
 use crate::{
-    AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, ChunkSource, ContextChunk, DocumentId,
+    AdjacentChunks, ChunkId, ChunkLocator, ChunkSource, ContextChunk, DocumentHit, DocumentId,
     DocumentText, Embedding, EmbeddingHit, EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass,
     IndexRootCounts, MemoryHit, MemoryId, MessageId, Result, SemanticStore, SessionId,
     SessionScope, UnindexedRows,
@@ -24,6 +24,7 @@ use crate::{
 use super::connection::SqliteHandle;
 use super::timestamp::timestamp_at;
 
+mod document_search;
 mod documents;
 
 /// Every message chunk vector, grouped by its message.
@@ -106,8 +107,8 @@ const MESSAGE_CHUNK_COLUMNS: &str = "
     CAST(substr(CAST(m.content AS BLOB), cc.byte_start + 1,
                 cc.byte_end - cc.byte_start) AS TEXT)";
 
-/// A document chunk row's columns, read by [`document_context_chunk`]: chunk id,
-/// document id, path, page, page count, byte range, index time, chunk text.
+/// A document chunk row's columns: chunk id, document id, path, page, page count,
+/// byte range, index time, chunk text.
 const DOCUMENT_CHUNK_COLUMNS: &str = "
     cc.id, d.id, d.path, cc.page,
     (SELECT count(*) FROM document_pages n WHERE n.document_id = d.id),
@@ -134,7 +135,7 @@ type ScoreBlob = fn(&[f32], &[u8]) -> Option<f32>;
 
 /// SQLite-backed [`SemanticStore`]: a linear scan of one source kind's vectors into a
 /// bounded top-K, then one batched lookup of the winners. Document vectors are stored
-/// quantised to one byte per dimension, so their similarities are approximate.
+/// quantised, so their similarities are approximate; documents rank by keyword as well.
 #[derive(Debug, Clone)]
 pub struct SqliteSemanticStore {
     handle: SqliteHandle,
@@ -153,27 +154,32 @@ impl SemanticStore for SqliteSemanticStore {
         &self,
         query_vector: Vec<f32>,
         top_k: usize,
-        scope: ChunkScope,
+        scope: SessionScope,
     ) -> Result<Vec<EmbeddingHit>> {
         if top_k == 0 || query_vector.is_empty() {
             return Ok(Vec::new());
         }
-        match scope {
-            ChunkScope::Messages(sessions) => {
-                self.handle
-                    .search("nearest_chunks", move |c| {
-                        nearest_message_chunks(c, &query_vector, top_k, sessions)
-                    })
-                    .await
-            }
-            ChunkScope::Documents => {
-                self.handle
-                    .search_documents("nearest_chunks", move |c| {
-                        nearest_document_chunks(c, &query_vector, top_k)
-                    })
-                    .await
-            }
+        self.handle
+            .search("nearest_chunks", move |c| {
+                nearest_message_chunks(c, &query_vector, top_k, scope)
+            })
+            .await
+    }
+
+    async fn search_documents(
+        &self,
+        query: String,
+        query_vector: Vec<f32>,
+        top_k: usize,
+    ) -> Result<Vec<DocumentHit>> {
+        if top_k == 0 {
+            return Ok(Vec::new());
         }
+        self.handle
+            .search_documents("search_documents", move |c| {
+                document_search::search(c, &query, &query_vector, top_k)
+            })
+            .await
     }
 
     async fn adjacent_chunks(&self, locator: &ChunkLocator) -> Result<AdjacentChunks> {
@@ -576,11 +582,16 @@ impl<Group: PartialEq, Id> TopK<Group, Id> {
         }
     }
 
-    /// The kept ids with their scores, best first.
-    fn into_ranked(mut self) -> Vec<(Id, f32)> {
+    /// The kept entries, best first.
+    fn into_best_first(mut self) -> Vec<Ranked<Group, Id>> {
         self.entries
             .sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
         self.entries
+    }
+
+    /// The kept ids with their scores, best first.
+    fn into_ranked(self) -> Vec<(Id, f32)> {
+        self.into_best_first()
             .into_iter()
             .map(|e| (e.id, e.similarity))
             .collect()
@@ -606,6 +617,18 @@ fn scan_top_k<Group: FromSql + Eq + Hash, Id: FromSql>(
     score: ScoreBlob,
     top_k: usize,
 ) -> rusqlite::Result<Vec<(Id, f32)>> {
+    Ok(scan_best::<Group, Id>(conn, sql, params, query, score, top_k)?.into_ranked())
+}
+
+/// Like [`scan_top_k`], keeping each winner's group.
+fn scan_best<Group: FromSql + Eq + Hash, Id: FromSql>(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: impl Params,
+    query: &[f32],
+    score: ScoreBlob,
+    top_k: usize,
+) -> rusqlite::Result<TopK<Group, Id>> {
     let mut stmt = conn.prepare_cached(sql)?;
     let mut best = TopK::new(top_k);
     let mut rows = stmt.query(params)?;
@@ -615,7 +638,7 @@ fn scan_top_k<Group: FromSql + Eq + Hash, Id: FromSql>(
             best.offer(row.get::<_, Group>(0)?, row.get(1)?, similarity);
         }
     }
-    Ok(best.into_ranked())
+    Ok(best)
 }
 
 /// The `top_k` messages in `sessions` with the best chunks against `query`, best first.
@@ -653,28 +676,6 @@ fn nearest_message_chunks(
     hydrate_in_rank_order(conn, &select, ranked, message_chunk_hit, set_similarity)
 }
 
-/// The `top_k` documents with the best chunks against `query`, best first.
-fn nearest_document_chunks(
-    conn: &rusqlite::Connection,
-    query: &[f32],
-    top_k: usize,
-) -> rusqlite::Result<Vec<EmbeddingHit>> {
-    let ranked = scan_top_k::<DocumentId, ChunkId>(
-        conn,
-        DOCUMENT_CHUNK_VECTORS,
-        [],
-        query,
-        score_against_quantised,
-        top_k,
-    )?;
-    let select = format!(
-        "SELECT {DOCUMENT_CHUNK_COLUMNS}
-         FROM chunks cc {DOCUMENT_CHUNK_OWNERS}
-         WHERE cc.id IN (SELECT value FROM json_each(?1))"
-    );
-    hydrate_in_rank_order(conn, &select, ranked, document_chunk_hit, set_similarity)
-}
-
 /// The clause restricting message chunk vectors to `scope` and the session it binds
 /// to `?1`; `None` when every message is in scope.
 fn scope_clause(scope: SessionScope) -> Option<(&'static str, SessionId)> {
@@ -704,9 +705,10 @@ where
     }
     let mut stmt = conn.prepare_cached(select)?;
     let mut hits = stmt
-        .query_map(rusqlite::params![json_id_array(&ranked)], |row| {
-            Ok((row.get::<_, Id>(0)?, to_hit(row)?))
-        })?
+        .query_map(
+            rusqlite::params![json_id_array(ranked.iter().map(|(id, _)| id))],
+            |row| Ok((row.get::<_, Id>(0)?, to_hit(row)?)),
+        )?
         .collect::<rusqlite::Result<HashMap<_, _>>>()?;
     Ok(ranked
         .into_iter()
@@ -796,10 +798,6 @@ fn message_chunk_hit(row: &Row<'_>) -> rusqlite::Result<EmbeddingHit> {
     message_context_chunk(row).map(unscored_hit)
 }
 
-fn document_chunk_hit(row: &Row<'_>) -> rusqlite::Result<EmbeddingHit> {
-    document_context_chunk(row).map(unscored_hit)
-}
-
 fn unscored_hit(chunk: ContextChunk) -> EmbeddingHit {
     EmbeddingHit {
         chunk_id: chunk.chunk_id,
@@ -878,9 +876,9 @@ fn memory_hit(row: &Row<'_>) -> rusqlite::Result<MemoryHit> {
     })
 }
 
-/// `ranked`'s ids as a JSON array of integers.
-fn json_id_array<Id: fmt::Display>(ranked: &[(Id, f32)]) -> String {
-    let ids: Vec<String> = ranked.iter().map(|(id, _)| id.to_string()).collect();
+/// `ids` as a JSON array of integers.
+fn json_id_array<Id: fmt::Display>(ids: impl IntoIterator<Item = Id>) -> String {
+    let ids: Vec<String> = ids.into_iter().map(|id| id.to_string()).collect();
     format!("[{}]", ids.join(","))
 }
 

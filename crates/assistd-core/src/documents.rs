@@ -26,8 +26,9 @@ pub use pass::{IndexDeps, MAX_DOCUMENT_CHUNKS, PassCounts, PassEnd, RootPass, Sk
 const PRIVATE_LIBRARY_DIR: &str = "lib/assistd";
 
 /// What the system prompt says of document search while `documents.enabled`.
-const SEARCH_NOTE: &str = "The user's indexed documents can be searched by meaning with the \
-     `run` command `docs search <words>`, and one that a hit names read with `docs read <path>`.";
+const SEARCH_NOTE: &str = "The user's indexed documents can be searched by meaning and by exact \
+     words with the `run` command `docs search <words>`, and one that a hit names read with \
+     `docs read <path>`.";
 
 /// Why no extraction worker runs, so no document is indexed.
 #[derive(Debug, thiserror::Error)]

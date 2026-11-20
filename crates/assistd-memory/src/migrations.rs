@@ -197,6 +197,16 @@ CREATE TABLE chunks (
         REFERENCES document_pages(document_id, page) ON DELETE CASCADE
 ) STRICT;
 
+-- The words of each document chunk, for keyword search, without its text. A row has
+-- its chunk's id; the write that cuts a chunk adds it, and the trigger removes it.
+CREATE VIRTUAL TABLE document_chunk_fts USING fts5(text, content='', contentless_delete=1);
+
+CREATE TRIGGER document_chunk_removed AFTER DELETE ON chunks
+WHEN old.document_id IS NOT NULL
+BEGIN
+    DELETE FROM document_chunk_fts WHERE rowid = old.id;
+END;
+
 -- In the three embedding tables a NULL vector marks a row the model could not embed,
 -- so it is not retried. Message chunk and memory vectors are little-endian `f32`s.
 CREATE TABLE message_chunk_embeddings (

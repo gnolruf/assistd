@@ -7,8 +7,7 @@ use std::time::Instant;
 
 use assistd_embed::{Embedder, EmbedderHandle};
 use assistd_memory::{
-    ChunkLocator, ChunkScope, EmbeddingHit, MemoryHit, SemanticStore, SessionId, SessionScope,
-    TranscriptStore,
+    ChunkLocator, EmbeddingHit, MemoryHit, SemanticStore, SessionId, SessionScope, TranscriptStore,
 };
 use async_trait::async_trait;
 use regex::Regex;
@@ -301,7 +300,7 @@ impl ReminisceTool {
         };
         let hits = self
             .semantic
-            .nearest_chunks(query_vec, request.limit, ChunkScope::Messages(scope))
+            .nearest_chunks(query_vec, request.limit, scope)
             .await?;
         tracing::info!(
             target: "assistd::embed",
@@ -545,9 +544,9 @@ mod tests {
 
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        AdjacentChunks, BranchId, BranchSummary, ChunkId, ChunkSource, DocumentText, Embedding,
-        EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass, IndexRootCounts, MemoryError,
-        MemoryId, MemoryStore, NoSemanticStore, PersistedMessage, Seq, SqliteHandle,
+        AdjacentChunks, BranchId, BranchSummary, ChunkId, ChunkSource, DocumentHit, DocumentText,
+        Embedding, EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass, IndexRootCounts,
+        MemoryError, MemoryId, MemoryStore, NoSemanticStore, PersistedMessage, Seq, SqliteHandle,
         SqliteSemanticStore, SqliteTranscriptStore, UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
@@ -591,7 +590,7 @@ mod tests {
     /// Records the scope `reminisce` searched.
     #[derive(Debug, Default)]
     struct ScopeSpy {
-        scope: parking_lot::Mutex<Option<ChunkScope>>,
+        scope: parking_lot::Mutex<Option<SessionScope>>,
     }
 
     #[async_trait]
@@ -600,9 +599,17 @@ mod tests {
             &self,
             _q: Vec<f32>,
             _k: usize,
-            scope: ChunkScope,
+            scope: SessionScope,
         ) -> Result<Vec<EmbeddingHit>, MemoryError> {
             *self.scope.lock() = Some(scope);
+            Ok(Vec::new())
+        }
+        async fn search_documents(
+            &self,
+            _query: String,
+            _q: Vec<f32>,
+            _k: usize,
+        ) -> Result<Vec<DocumentHit>, MemoryError> {
             Ok(Vec::new())
         }
         async fn adjacent_chunks(
@@ -723,9 +730,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             *spy.scope.lock(),
-            Some(ChunkScope::Messages(SessionScope::AllExceptInContext(
-                first
-            )))
+            Some(SessionScope::AllExceptInContext(first))
         );
 
         let second = SessionId::new();
@@ -733,9 +738,7 @@ mod tests {
         tool.invoke(&TurnContext::default(), query).await.unwrap();
         assert_eq!(
             *spy.scope.lock(),
-            Some(ChunkScope::Messages(SessionScope::AllExceptInContext(
-                second
-            ))),
+            Some(SessionScope::AllExceptInContext(second)),
             "the tool must follow a session switch, not pin its first session"
         );
     }

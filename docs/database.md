@@ -27,6 +27,7 @@ erDiagram
     relay_steps ||--o{ relay_entries : "did"
     chunks ||--o| message_chunk_embeddings : "embedded as"
     chunks ||--o| document_chunk_embeddings : "embedded as"
+    chunks ||--o| document_chunk_fts : "words indexed in"
     memories ||--o| memory_embeddings : "embedded as"
     tasks ||--o{ task_runs : "ran as"
     task_runs ||--o| sessions : "recorded in"
@@ -155,6 +156,10 @@ erDiagram
     document_chunk_embeddings {
         int chunk_id PK, FK
         blob vector "quantised; NULL when the model cannot embed the row"
+    }
+    document_chunk_fts {
+        int rowid PK, FK "the chunk's id"
+        text text "indexed for keyword search, not stored"
     }
     memory_embeddings {
         int memory_id PK, FK
@@ -325,6 +330,18 @@ resumed, saying which.
   value hasn't changed since it was read for embedding. A row with a
   `NULL` vector marks text the model rejected, so the worker does not
   retry it; `assistd memory reindex` clears those marks and tries again.
+- **`document_chunk_fts`**: an FTS5 index of the words of every document
+  chunk, for the keyword half of a document search. It is contentless:
+  a row carries its chunk's id and the index entries for the chunk's
+  text, and the text itself stays in `document_pages` alone. The write
+  that cuts a chunk adds its row, a trigger on `chunks` removes the row
+  with the chunk however the chunk goes, and a chunk that only moves
+  keeps it. FTS5 marks a removed row deleted and drops its entries as
+  it merges the index. Words are split at every character that is not a
+  letter or a digit and compared without case or accents, so
+  `read_regular_file` is indexed as `read`, `regular`, `file` in a row.
+  Message chunks are not indexed. On the index measured below it takes
+  25 MB beside 62 MB of page text and 124 MB of vectors.
 - **`embedding_meta`**: the one row naming what produced every stored
   vector: `embedding.model`, the vector dimension the server reported,
   `embedding.custom_args` and `embedding.document_prefix`. When the
@@ -338,7 +355,8 @@ resumed, saying which.
 Search (`recall`, `reminisce`, `docs search`) scans every vector of one source kind,
 messages or documents, on that kind's own read-only connection and keeps
 the top matches; there is no vector index. `reminisce` leaves out the
-current session's messages.
+current session's messages. `docs search` ranks by keyword as well, as
+[Document search](#document-search) describes.
 
 One scan of 768-dimension vectors, measured on a Ryzen 7 9800X3D
 with the file in the page cache:
@@ -351,6 +369,52 @@ with the file in the page cache:
 
 Quantising moved no top-8 result in these runs and changed a
 similarity by at most 0.0005.
+
+## Document search
+
+Embeddings match meaning and miss exact strings: an identifier, an error
+message, a name, an invoice number. So `docs search` ranks the documents
+twice and fuses the two rankings.
+
+- **By vector**: each document by its chunk nearest the query vector.
+- **By keyword**: each document by its chunk with the best BM25 score in
+  `document_chunk_fts`, among the chunks that hold any word of the query.
+  Each whitespace-separated word of the query is matched as a phrase of
+  its own tokens, so `INV-2024-0113` finds only that number and no
+  character of a query is read as FTS5 syntax.
+- **Fused**: the 30 best documents of each ranking are scored by
+  reciprocal rank fusion, the sum of `1 / (10 + rank)` over the rankings
+  that hold the document, which needs no common scale between cosine and
+  BM25. A document is shown through its chunk from the ranking that
+  places it higher. At equal score or rank the keyword ranking wins.
+
+A chunk needs no vector to be found by its words, so a document can be
+searched for an exact string as soon as it is indexed; such a hit has no
+similarity to report.
+
+Keywords are matched per chunk, not per page or per document: the chunk
+that matched is then the passage to show, and BM25 compares texts of one
+size. Measured on an index of 3,050 files in 151,597 chunks (this
+repository, Rust's books and error index, system documentation and a
+novel) embedded with EmbeddingGemma 2, over 69 queries. Each cell is the
+share of queries whose first relevant document came first, and within the
+first five:
+
+| Queries                                                    | Vectors only | Fused        |
+|------------------------------------------------------------|--------------|--------------|
+| 33 exact strings: identifiers, error messages, codes, names | 64%, 88%     | 94%, 100%    |
+| 12 questions that hold one exact string                    | 75%, 100%    | 100%, 100%   |
+| 24 paraphrases sharing no rare word with their answer      | 67%, 92%     | 75%, 92%     |
+
+For an exact string, one of the first five hits showed the passage holding
+it in 76% of queries by vector alone and in all of them fused. Matching
+keywords per page or per document instead put the right document first
+for 82% of the exact strings and showed the passage for 91%. With the
+fusion's usual constant of 60 in place of 10, nearly any document found
+by both rankings outranks the best of either, and the paraphrases' share
+within the first five fell to 83%. The keyword query took 10 ms at the
+median and 58 ms for a question made of common words, which most chunks
+match.
 
 ## Storage
 

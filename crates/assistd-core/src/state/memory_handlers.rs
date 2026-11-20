@@ -7,8 +7,8 @@ use tracing::warn;
 use assistd_embed::{BATCH_SIZE, Embedder, embed_rows};
 use assistd_ipc::{Event, EventBody, ReindexKind};
 use assistd_memory::{
-    ChunkLocator, ChunkScope, ChunkSource, EmbeddingTarget, MemoryError, MemoryId, SemanticStore,
-    SessionScope, UnindexedRows,
+    ChunkLocator, ChunkSource, EmbeddingTarget, MemoryError, MemoryId, SemanticStore, SessionScope,
+    UnindexedRows,
 };
 use assistd_tools::DEFAULT_SEARCH_LIMIT;
 
@@ -33,7 +33,7 @@ impl MemoryStack {
         let embedding = embedder.embed_query(&query).await.context("embed failed")?;
         let hits = self
             .semantic
-            .nearest_chunks(embedding, limit, ChunkScope::Messages(SessionScope::All))
+            .nearest_chunks(embedding, limit, SessionScope::All)
             .await
             .context("semantic search failed")?;
         for hit in hits {

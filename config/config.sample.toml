@@ -119,7 +119,7 @@
 # port = 8386  # on 127.0.0.1; must differ from model.port
 # gpu_layers = 0
 # ready_timeout_secs = 300
-# custom_args = "--threads 4 --ubatch-size 2048"  # same rules as model.custom_args
+# custom_args = "--threads 4"  # same rules as model.custom_args
 # top_k = 5  # at most 20
 # auto_inject = true  # once per new chat: matching memories and past-chat pointers
 # min_similarity = 0.70  # 0-1; recalled context below it is dropped; retune with the model
