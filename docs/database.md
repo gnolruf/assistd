@@ -390,6 +390,14 @@ with the file in the page cache:
 Quantising moved no top-8 result in these runs and changed a
 similarity by at most 0.0005.
 
+Since every search scans every document vector, the stored documents
+are held to 500,000 chunks (`MAX_DOCUMENT_CHUNKS`), where one scan reads
+about 410 MB in about 100 ms. The schema does not enforce the ceiling;
+the index pass does. It checks the count before each file it stores, so
+the file that crosses the ceiling is stored whole, and every file after
+it is skipped as `index full` until documents are removed. Message
+chunks have no ceiling.
+
 ## Document search
 
 Embeddings match meaning and miss exact strings: an identifier, an error

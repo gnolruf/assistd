@@ -2,8 +2,8 @@
 
 `assistd` is a Rust workspace split into fourteen library crates plus a
 binary. This page maps the crates, the external processes the daemon
-supervises, and the path a user query takes from keypress to spoken
-reply.
+supervises, the path a user query takes from keypress to spoken
+reply, and the path a file takes into the document index.
 
 ## System overview
 
@@ -36,6 +36,7 @@ flowchart TB
         embedsrv["embedding llama-server<br/>:8386 /v1/embeddings"]
         searxng["SearXNG<br/>:8387 /search"]
         mcpsrv["MCP servers<br/>(user-defined)"]
+        extract["extract-worker<br/>(sandboxed, no network)"]
     end
 
     clients -- "Unix socket · line-delimited JSON<br/>Request / Event" --> bin
@@ -51,6 +52,7 @@ flowchart TB
     embed --> embedsrv
     search --> searxng
     mcp --> mcpsrv
+    documents --> extract
 ```
 
 ## Crate map
@@ -82,7 +84,7 @@ and `core` supplies the model behind the tools' safety judge.
 
 The same binary also ships several client subcommands that speak the
 Unix-socket IPC: `chat`, `sleep` / `wake` / `drowse`,
-`ptt-start` / `ptt-stop`, `listen-*`, `voice-*`, `memory`, and `tray`. The tray subcommand is a long-lived
+`ptt-start` / `ptt-stop`, `listen-*`, `voice-*`, `memory`, `documents`, and `tray`. The tray subcommand is a long-lived
 [StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/)
 client (via the [`ksni`](https://crates.io/crates/ksni) crate): it
 holds a passive `RequestBody::Subscribe` connection, translates the
@@ -1340,3 +1342,57 @@ broadcast events such as session titles. A subscription opens with the
 current task queue, presence, listen phase and capture state and is sent
 every presence change after, so the chat's indicators follow the daemon
 without polling it.
+
+## Data flow: a file into the index
+
+A walk through `~/papers/lease.pdf`, saved into a folder that
+`documents.roots` lists, until the model quotes it. The
+[user guide](documents.md) covers the same ground from the outside.
+
+1. **Watch** ([`crates/assistd-core/src/documents/watch.rs`](../crates/assistd-core/src/documents/watch.rs)).
+   The `notify` watch on `~/papers` reports the path. The index loop
+   gathers changed paths for two seconds, then runs a pass held to
+   them. At daemon start and for `assistd documents reindex` the pass
+   covers the whole root instead; the rest is the same.
+
+2. **Walk** ([`crates/assistd-core/src/documents/walk.rs`](../crates/assistd-core/src/documents/walk.rs)).
+   The pass walks to the path, leaving out what is hidden, ignored,
+   excluded, oversized or a sensitive read. The store compares the
+   file's modification time and size with its row, and a file whose
+   stamp matches is not read
+   ([index passes](#document-index-passes-assistd-core)).
+
+3. **Extraction** ([`crates/assistd-documents/src/extract.rs`](../crates/assistd-documents/src/extract.rs)).
+   The daemon never parses the file. It sends the path to the
+   extraction worker, which runs in a reader sandbox that shows the
+   roots read-only and has no network, at idle CPU and IO priority. The
+   worker answers with the file's text page by page, or a `SkipReason`
+   the pass counts
+   ([extraction](#document-extraction-assistd-documents)).
+
+4. **Store** ([`crates/assistd-core/src/documents/pass.rs`](../crates/assistd-core/src/documents/pass.rs)).
+   One transaction writes the pages, cuts them into chunks and adds the
+   chunks' words to the keyword index; a chunk whose text is unchanged
+   keeps its vector. From here a search finds the file by its exact
+   words. A page with no text is recorded as waiting for
+   [page transcription](#page-transcription-assistd-core). The pass
+   then wakes the embedding worker.
+
+5. **Embed gate** ([`crates/assistd-core/src/documents/embed_gate.rs`](../crates/assistd-core/src/documents/embed_gate.rs)).
+   The embedding worker embeds pending message chunks and memories
+   first, then document chunks a batch at a time, each batch waiting on
+   the gate `assistd-core` publishes. The gate is shut while the
+   user's interaction is open, a task run holds a model lane, or the
+   daemon sleeps for another process's VRAM, unless `[documents]` lets
+   embedding through that state. Each vector is quantised into
+   `document_chunk_embeddings`
+   ([memory](#memory-assistd-memory--assistd-embed)).
+
+6. **Search** ([`crates/assistd-tools/src/commands/docs.rs`](../crates/assistd-tools/src/commands/docs.rs)).
+   In a later turn the model calls `run` with
+   `docs search lease renewal terms`. `DocsCommand` embeds the query,
+   and the store ranks the documents by vector and by keyword and fuses
+   the two ([how](database.md#document-search)). The hit names the
+   file, page and byte range; `docs read` prints the stored text from
+   there. Both print under a header marking the text as untrusted, and
+   both mark the turn as having read this machine.

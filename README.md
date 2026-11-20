@@ -24,7 +24,7 @@ window-manager bindings), and integrates with the running compositor for context
   (`[documents]`), `docs` searches them by meaning and by keyword and
   reads what it finds: text, HTML, PDFs, office files and e-books. Scanned
   PDF pages are read by an optional OCR model (`[documents.ocr]`) while
-  the daemon is drowsy.
+  the daemon is drowsy ([document search](docs/documents.md)).
   Alongside `run`, `remember` saves and looks up facts, and `reminisce`
   searches transcripts from earlier sessions.
 - **Voice in/out.** Push-to-talk and hands-free
@@ -125,7 +125,9 @@ are runnable as-is. Uncomment a key to set it, for example to:
 - change `[model] gpu_layers` if VRAM is tight, or pass extra server
   flags through `[model] custom_args`,
 - enable voice (`[voice] enabled = true`) or TTS
-  (`[voice.synthesis] enabled = true`).
+  (`[voice.synthesis] enabled = true`),
+- index folders for the model to search (`[documents]`, see
+  [document search](docs/documents.md)).
 
 `init-config` refuses to overwrite an existing file.
 
@@ -188,5 +190,5 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | `assistd voice-toggle`   | Toggle TTS playback.                                          |
 | `assistd voice-skip`     | Abort the current spoken response.                            |
 | `assistd memory …`       | Inspect or mutate persistent memory; see `memory --help`.     |
-| `assistd documents …`    | Show what is indexed (`status`), walk the indexed folders now (`reindex`), or `search` them. |
+| `assistd documents …`    | [Document search](docs/documents.md): show what is indexed (`status`), walk the indexed folders now (`reindex`), or `search` them. |
 | `assistd tray`           | System tray icon and desktop notifications.                   |
