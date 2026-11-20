@@ -186,14 +186,10 @@ fn print_pass_progress(root: &str, counts: &DocumentPassCounts, last_root: &mut 
 
 /// The lines `status` prints on the pages that have no text.
 fn describe_transcription(transcription: &PageTranscriptionStatus) -> String {
-    let stopped = transcription
-        .stopped
-        .as_ref()
-        .map(|why| {
-            let why = escape_controls_single_line(why);
-            format!("the last transcription run stopped early: {why}\n")
-        })
-        .unwrap_or_default();
+    let stopped = transcription.stopped.as_ref().map_or_default(|why| {
+        let why = escape_controls_single_line(why);
+        format!("the last transcription run stopped early: {why}\n")
+    });
     format!(
         "page transcription: {}\npages without text: {} waiting for transcription, {} failed\n\
          {stopped}",
@@ -211,14 +207,10 @@ fn describe_root(status: &DocumentRootStatus) -> String {
         None => "available".to_owned(),
         Some(reason) => format!("unavailable ({})", escape_controls_single_line(reason)),
     };
-    let unwatched = status
-        .unwatched
-        .as_ref()
-        .map(|reason| {
-            let reason = escape_controls_single_line(reason);
-            format!("  changes: wait for the next pass ({reason})\n")
-        })
-        .unwrap_or_default();
+    let unwatched = status.unwatched.as_ref().map_or_default(|reason| {
+        let reason = escape_controls_single_line(reason);
+        format!("  changes: wait for the next pass ({reason})\n")
+    });
     let last_pass = status
         .last_pass
         .as_ref()
@@ -227,8 +219,7 @@ fn describe_root(status: &DocumentRootStatus) -> String {
         .last_pass
         .as_ref()
         .and_then(|pass| describe_skipped(&pass.counts.skipped))
-        .map(|skipped| format!("  skipped: {skipped}\n"))
-        .unwrap_or_default();
+        .map_or_default(|skipped| format!("  skipped: {skipped}\n"));
     format!(
         "{}\n  folder: {folder}\n{unwatched}  stored: {} documents in {} chunks, {} waiting for a \
          vector\n  last pass: {last_pass}\n{skipped}",
