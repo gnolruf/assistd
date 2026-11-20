@@ -88,14 +88,19 @@ impl Extraction {
     /// `text` as the one page of a file whose format has no pages, cut to
     /// [`MAX_TEXT_BYTES`] at a character boundary.
     pub(crate) fn of_one_page(text: String) -> Self {
-        let Ok(extraction) = Self::of_pages([Ok::<_, Infallible>(text)]);
+        Self::of_pages([text])
+    }
+
+    /// [`Self::try_of_pages`] for texts that are already in hand.
+    pub(crate) fn of_pages(texts: impl IntoIterator<Item = String>) -> Self {
+        let Ok(extraction) = Self::try_of_pages(texts.into_iter().map(Ok::<_, Infallible>));
         extraction
     }
 
     /// The pages of `texts` up to [`MAX_PAGES`] pages and [`MAX_TEXT_BYTES`] in
     /// all, the page that crosses the limit cut at a character boundary and left
     /// out when nothing of it fits. Stops at the first error.
-    pub(crate) fn of_pages<E>(
+    pub(crate) fn try_of_pages<E>(
         texts: impl IntoIterator<Item = Result<String, E>>,
     ) -> Result<Self, E> {
         let mut texts = texts.into_iter();
@@ -130,7 +135,7 @@ impl Extraction {
         let Self::Pages { pages, truncated } = self else {
             return self;
         };
-        let Ok(mut capped) = Self::of_pages(pages.into_iter().map(Ok::<_, Infallible>));
+        let mut capped = Self::of_pages(pages);
         if let Self::Pages { truncated: cut, .. } = &mut capped {
             *cut |= truncated;
         }
@@ -179,7 +184,9 @@ pub enum SkipReason {
     Unsupported { mime: String },
     #[error("binary file")]
     Binary,
-    #[error("larger than the file-size limit")]
+    /// Larger than the file-size limit, or an archive that holds or expands to
+    /// more than the worker reads.
+    #[error("larger than a size limit")]
     TooLarge,
     #[error("not valid text in its encoding")]
     NotDecodable,
@@ -300,15 +307,13 @@ mod tests {
 
     #[test]
     fn the_longest_reply_fits_the_reply_line_however_it_escapes() {
-        let texts = (0..=MAX_PAGES).map(|_| Ok::<_, Infallible>("\u{1}".repeat(1024)));
-        let Ok(extraction) = Extraction::of_pages(texts);
+        let extraction = Extraction::of_pages((0..=MAX_PAGES).map(|_| "\u{1}".repeat(1024)));
         let Extraction::Pages { pages, truncated } = &extraction else {
             panic!("pages come back as pages");
         };
         assert!(*truncated);
         assert_eq!(pages.iter().map(String::len).sum::<usize>(), MAX_TEXT_BYTES);
-        let empty_pages = (0..=MAX_PAGES).map(|_| Ok::<_, Infallible>(String::new()));
-        let Ok(empty) = Extraction::of_pages(empty_pages);
+        let empty = Extraction::of_pages((0..=MAX_PAGES).map(|_| String::new()));
         let image = FromWorker::Rendered {
             id: u64::MAX,
             page: RenderedPage::Image {

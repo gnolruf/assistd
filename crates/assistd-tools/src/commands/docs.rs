@@ -57,12 +57,13 @@ const READ_USAGE: &str = "docs read [--page P] [--offset N] <path>";
 const READ_HELP: &str = "usage: docs read [--page P] [--offset N] <path>\n\
     \n\
     Print the text stored for the indexed document at <path>, written as a \
-    search hit gives it. For a PDF this is its extracted text, which `cat` \
-    cannot show. Quote a path that has spaces.\n\
+    search hit gives it. For a PDF, an office file or an e-book this is its \
+    extracted text, which `cat` cannot show. Quote a path that has spaces.\n\
     \n\
     Prints a header line, then the text from byte N of page P, running on \
     into the pages after it for as much as fits one result. A PDF's pages are \
-    numbered as in the file; any other document is one page. In a document \
+    numbered as in the file; a slide, a sheet or an e-book's chapter is a page \
+    too; any other document is one page. In a document \
     of more than one page, each page's text follows a line naming it, \
     `[page P of TOTAL]`, and a page with no text is that line alone. A note \
     on stderr gives what was shown and the date the document was indexed, \
@@ -244,7 +245,8 @@ impl DocsCommand {
              TSV: path, similarity, the page its best-matching passage is on, \
              the byte range of that passage within the page, the date the \
              document was indexed, and the passage. A PDF's pages are numbered \
-             as in the file; any other document is page 1 of 1. The passage is \
+             as in the file; a slide, a sheet or an e-book's chapter is a page \
+             too; any other document is page 1 of 1. The passage is \
              the document as of that date; the file may have changed since. \
              Read on from a hit with \
              `docs read --page <page> --offset <start> \"<path>\"`.\n\
@@ -364,7 +366,8 @@ impl Command for DocsCommand {
              print the text stored for an indexed document, as much as fits one result\n\
              \n\
              Indexed documents are the files in the folders the user chose to \
-             index, PDFs included, kept as plain text page by page. Search \
+             index, PDFs, office files and e-books included, kept as plain \
+             text page by page. Search \
              first, then `docs read` the best hit from the page and byte \
              offset it gives. Read a file that is not indexed with `cat`.\n\
              \n\

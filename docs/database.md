@@ -305,7 +305,9 @@ resumed, saying which.
   so a reset of `memory.db` costs only a re-index.
 - **`document_pages`**: a document's text as it was indexed, one row
   per page. What a page is follows the file's format: a PDF's pages
-  are its own, and a text, Markdown, source or HTML file is one page.
+  are its own, a presentation's slides, a spreadsheet's sheets and an
+  e-book's chapters are each a page, and a text, Markdown, source, HTML
+  or word-processor file is one page.
   `page` is the page's position in the file from 0, and a page without
   text, as a scanned PDF page is, has a row with empty `content`, so a
   page's number in the index is its number in the file.

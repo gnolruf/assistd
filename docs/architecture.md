@@ -61,7 +61,7 @@ flowchart TB
 | `assistd-chat`   | The `assistd chat` terminal window and the `assistd settings` panel, a client that only reads and writes the socket. | `config`, `ipc`, `utils`                                                         |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
 | `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, document index passes and the watches between them, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
-| `assistd-documents` | Document text extraction and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
+| `assistd-documents` | Document text extraction (text, HTML, PDF, office files, e-books) and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `utils`                                                         |
@@ -738,9 +738,9 @@ worker, the hidden `assistd extract-worker` subcommand, and asks it for one
 file at a time over line-delimited JSON on its stdin and stdout. A request
 names a file and the largest size to read; the reply is the file's text page
 by page, cut at 4 MiB with a flag saying so, or a `SkipReason`: an unsupported type (a
-recognised binary format, with its MIME type), binary, too large, not
-decodable, needs a password, no text layer, unreadable, extractor failed, or
-timed out.
+recognised binary format, with its MIME type), binary, too large (the file, or
+what an archive expands to), not decodable, needs a password, no text layer,
+unreadable, extractor failed, or timed out.
 
 Plain text, Markdown and source code are decoded with `encoding_rs`, as UTF-8
 or as the encoding their byte-order mark names, and kept as they are; text
@@ -758,6 +758,26 @@ most 20,000 of them. An encrypted PDF is opened with the empty password,
 which is all a file restricted only against printing or copying needs; one
 that needs a real password is skipped. A page keeps its position, text or
 not, so the index numbers pages as a viewer does.
+
+Office and e-book files are zip archives of XML, read in the worker without
+LibreOffice or pandoc. `.docx`, `.pptx` and `.xlsx` go through `office_oxide`:
+a DOCX is one page of Markdown, a PPTX a page for each slide and an XLSX a
+page for each sheet under its name, with cell values formatted as the
+workbook shows them. `.odt`, `.ods` and `.odp` are read from their
+`content.xml` with `quick-xml`: headings as Markdown headings, tables as
+Markdown tables, a footnote after its paragraph, tracked deletions and
+comments left out, a page for each sheet or slide. An `.epub` is a page for
+each chapter its spine lists, in that order, each rendered as an HTML file
+is. A sheet, slide or chapter with no text is an empty page. A file its
+application encrypted is skipped as needing a password. The legacy binary
+formats (`.doc`, `.xls`, `.ppt`) and RTF are not read.
+
+An archive is read under three limits, so one built to expand far past its
+size is skipped as too large instead of filling the worker's memory: 10,000
+entries, 64 MiB for any one entry once expanded, and 256 MiB for all the
+entries read from it. The sizes are counted as the bytes come out, whatever
+the archive declares. A row, cell or space an OpenDocument file repeats by a
+count is written out only as far as the text that is kept.
 
 A second request renders one page of a PDF for a model to transcribe: 150
 pixels per inch, or fewer when the longer edge would pass 2,048 pixels, as a
