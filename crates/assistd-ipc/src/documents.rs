@@ -1,5 +1,5 @@
 //! The document index on the wire: what a pass over an index root did, where each root
-//! stands, and what the index is doing now.
+//! stands, what the index is doing now, and where page transcription stands.
 
 use std::fmt;
 
@@ -111,6 +111,48 @@ pub struct DocumentRootStatus {
     /// The last pass over it since the daemon started; `None` before one has ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_pass: Option<DocumentPass>,
+}
+
+/// When the pages without text are transcribed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PageTranscriptionState {
+    /// Never: `documents.ocr.model` is unset.
+    NoModel,
+    /// Never on its own: `sleep.idle_to_drowsy_mins` is `0`, so the daemon does not drowse.
+    NeverDrowsy,
+    /// Whenever the daemon is drowsy.
+    WhileDrowsy,
+    /// Now.
+    Running,
+}
+
+impl fmt::Display for PageTranscriptionState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PageTranscriptionState::NoModel => "off (documents.ocr.model is unset)",
+            PageTranscriptionState::NeverDrowsy => {
+                "never runs: pages are read while the daemon is drowsy, and \
+                 sleep.idle_to_drowsy_mins = 0 keeps it from drowsing"
+            }
+            PageTranscriptionState::WhileDrowsy => "runs while the daemon is drowsy",
+            PageTranscriptionState::Running => "running",
+        })
+    }
+}
+
+/// Where transcribing the pages that have no text stands.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PageTranscriptionStatus {
+    pub state: PageTranscriptionState,
+    /// Pages waiting for the OCR model.
+    pub waiting_pages: u64,
+    /// Pages the model could not read; they are tried again when their file
+    /// changes or the daemon restarts.
+    pub failed_pages: u64,
+    /// Why the last run stopped with pages still waiting; `None` unless it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
 }
 
 /// What the document index is doing.

@@ -58,6 +58,7 @@ pub(super) struct IndexRoot {
     path: PathBuf,
     excluded: Gitignore,
     max_file_bytes: u64,
+    keeps_scans: bool,
 }
 
 impl IndexRoot {
@@ -71,6 +72,7 @@ impl IndexRoot {
             path: path.to_path_buf(),
             excluded: excluded.build()?,
             max_file_bytes: documents.max_file_bytes(),
+            keeps_scans: documents.ocr_model().is_some(),
         })
     }
 
@@ -80,6 +82,11 @@ impl IndexRoot {
 
     pub(super) fn max_file_bytes(&self) -> u64 {
         self.max_file_bytes
+    }
+
+    /// Whether a file with no text is stored when an OCR model can read its pages.
+    pub(super) fn keeps_scans(&self) -> bool {
+        self.keeps_scans
     }
 
     /// Hand `visit` what the walk makes of each entry in `scope` under the root

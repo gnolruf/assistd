@@ -26,7 +26,7 @@ pub use attachment::{Attachment, ImageAttachment, ImageMime};
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use documents::{
     DocumentActivity, DocumentPass, DocumentPassCounts, DocumentPassEnd, DocumentRootStatus,
-    DocumentSkipReason, SkippedFiles,
+    DocumentSkipReason, PageTranscriptionState, PageTranscriptionStatus, SkippedFiles,
 };
 pub use event::{Event, EventBody, EventKind, ReindexKind, Role, TurnStats};
 pub use mcp::{McpServerState, McpTransportKind, TokenRevocation};

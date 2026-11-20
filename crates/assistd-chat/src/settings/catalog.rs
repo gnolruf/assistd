@@ -146,6 +146,8 @@ pub(crate) const SECTIONS: &[Section] = &[
             setting("documents.embed_during_interaction"),
             setting("documents.embed_during_tasks"),
             setting("documents.embed_during_gpu_sleep"),
+            setting("documents.ocr.model"),
+            setting("documents.ocr.prompt"),
         ],
     ),
     feature(

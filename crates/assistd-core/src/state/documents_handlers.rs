@@ -13,9 +13,10 @@ use assistd_documents::Extractor;
 use assistd_embed::EmbedderHandle;
 use assistd_ipc::{
     DocumentActivity, DocumentPass, DocumentPassCounts, DocumentPassEnd, DocumentRootStatus,
-    DocumentSkipReason, Event, EventBody, SkippedFiles,
+    DocumentSkipReason, Event, EventBody, PageTranscriptionState, PageTranscriptionStatus,
+    SkippedFiles,
 };
-use assistd_memory::{DocumentHit, IndexRootCounts, SemanticStore};
+use assistd_memory::{DocumentHit, IndexRootCounts, MemoryError, SemanticStore};
 use assistd_tools::policy::on_blocking_pool;
 use assistd_utils::readiness::NotReady;
 
@@ -25,7 +26,7 @@ use super::{DispatchError, FailedStep};
 use crate::bus::{EventBus, EventSink};
 use crate::documents::{
     DocumentIndex, IndexProgress, MAX_DOCUMENT_CHUNKS, PassCounts, PassEnd, RootPass, SkipCause,
-    root_unavailable,
+    TranscriptionRun, root_unavailable,
 };
 
 const ACTIVITY_EVENT_ID: &str = "documents";
@@ -148,12 +149,17 @@ impl DocumentsService {
             .borrow()
             .running_root()
             .map(wire_path);
+        let transcription = self
+            .transcription_status()
+            .await
+            .context("document status failed")?;
         let index = EventBody::DocumentIndex {
             indexing: self.extractor.readiness().into(),
             embedding: self.embedder.readiness().into(),
             chunks: stored.iter().map(|counts| counts.chunks).sum(),
             chunk_limit: MAX_DOCUMENT_CHUNKS,
             running_pass,
+            transcription,
         };
         let _ = tx.send(Event::new(id.clone(), index)).await;
         let last_passes = self.index.last_passes();
@@ -166,6 +172,32 @@ impl DocumentsService {
         }
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
+    }
+
+    /// How many pages wait for the OCR model or failed, whether a run is under way
+    /// or can ever start, and why the last one stopped early.
+    async fn transcription_status(&self) -> Result<PageTranscriptionStatus, MemoryError> {
+        let counts = self.semantic.count_transcriptions().await?;
+        let last_run = self.index.transcription().last_run();
+        let state = if self.config.documents.ocr_model().is_none() {
+            PageTranscriptionState::NoModel
+        } else if last_run == TranscriptionRun::Running {
+            PageTranscriptionState::Running
+        } else if self.config.sleep.idle_to_drowsy_mins == 0 {
+            PageTranscriptionState::NeverDrowsy
+        } else {
+            PageTranscriptionState::WhileDrowsy
+        };
+        let stopped = match last_run {
+            TranscriptionRun::Stopped(why) => Some(why),
+            TranscriptionRun::Idle | TranscriptionRun::Running => None,
+        };
+        Ok(PageTranscriptionStatus {
+            state,
+            waiting_pages: counts.waiting,
+            failed_pages: counts.failed,
+            stopped,
+        })
     }
 
     /// Every `documents.roots` entry with why its files cannot be listed now, if they

@@ -545,9 +545,10 @@ mod tests {
     use assistd_embed::EmbedError;
     use assistd_memory::{
         AdjacentChunks, BranchId, BranchSummary, ChunkId, ChunkSource, DocumentHit, DocumentText,
-        Embedding, EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass, IndexRootCounts,
-        MemoryError, MemoryId, MemoryStore, NoSemanticStore, PersistedMessage, Seq, SqliteHandle,
-        SqliteSemanticStore, SqliteTranscriptStore, UnindexedRows,
+        Embedding, EmbeddingSpace, EmbeddingTarget, EmptyPages, FileStamp, IndexPass,
+        IndexRootCounts, MemoryError, MemoryId, MemoryStore, NoSemanticStore, PageReading,
+        PersistedMessage, Seq, SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore,
+        TranscriptionCounts, UnindexedRows, WaitingPage,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -671,10 +672,27 @@ mod tests {
             path: PathBuf,
             stamp: FileStamp,
             pages: Vec<String>,
+            empty_pages: EmptyPages,
         ) -> Result<Vec<ChunkId>, MemoryError> {
             NoSemanticStore
-                .index_document(pass, path, stamp, pages)
+                .index_document(pass, path, stamp, pages, empty_pages)
                 .await
+        }
+        async fn next_waiting_page(&self) -> Result<Option<WaitingPage>, MemoryError> {
+            NoSemanticStore.next_waiting_page().await
+        }
+        async fn store_page_reading(
+            &self,
+            page: WaitingPage,
+            reading: PageReading,
+        ) -> Result<Vec<ChunkId>, MemoryError> {
+            NoSemanticStore.store_page_reading(page, reading).await
+        }
+        async fn count_transcriptions(&self) -> Result<TranscriptionCounts, MemoryError> {
+            NoSemanticStore.count_transcriptions().await
+        }
+        async fn retry_failed_transcriptions(&self) -> Result<u64, MemoryError> {
+            NoSemanticStore.retry_failed_transcriptions().await
         }
         async fn finish_index_pass(&self, pass: IndexPass) -> Result<u64, MemoryError> {
             NoSemanticStore.finish_index_pass(pass).await

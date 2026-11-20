@@ -283,6 +283,41 @@ impl FileStamp {
     }
 }
 
+/// What a document's pages without text are stored as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmptyPages {
+    /// As they are: their file has no more to give.
+    Final,
+    /// As waiting for transcription: each is an image an OCR model may read.
+    AwaitTranscription,
+}
+
+/// A page waiting for transcription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitingPage {
+    pub document_id: DocumentId,
+    pub path: PathBuf,
+    /// The page's position in the file, counted from zero.
+    pub page: usize,
+    /// The stamp its file was indexed at.
+    pub stamp: FileStamp,
+}
+
+/// What transcribing a waiting page came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageReading {
+    /// The text read from the page; empty for a page that shows none.
+    Text(String),
+    Failed,
+}
+
+/// How many pages wait for transcription, and how many it failed on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TranscriptionCounts {
+    pub waiting: u64,
+    pub failed: u64,
+}
+
 /// One walk over an index root's files or over part of them, from
 /// [`SemanticStore::begin_index_pass`] to [`SemanticStore::finish_index_pass`] or
 /// [`SemanticStore::finish_index_pass_under`]. At most one pass per root runs at a time.
@@ -376,15 +411,36 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Vec<(PathBuf, FileStamp)>>;
 
     /// Store `pages`, each page's text in file order, as the document at `path`, seen
-    /// by `pass`. No chunk spans two pages. A chunk whose text is unchanged keeps its
-    /// vector on whatever page it now sits; returns the new chunks, which have none.
+    /// by `pass`, dropping what was transcribed of it before. No chunk spans two pages.
+    /// A chunk whose text is unchanged keeps its vector on whatever page it now sits;
+    /// returns the new chunks, which have none.
     async fn index_document(
         &self,
         pass: IndexPass,
         path: PathBuf,
         stamp: FileStamp,
         pages: Vec<String>,
+        empty_pages: EmptyPages,
     ) -> Result<Vec<ChunkId>>;
+
+    /// The first page waiting for transcription, by document and then position;
+    /// `None` when none waits.
+    async fn next_waiting_page(&self) -> Result<Option<WaitingPage>>;
+
+    /// Record `reading` of `page` with its text as the page's; ignored when the page
+    /// no longer waits or its file was indexed again. Once no page of the document
+    /// waits, its pages are cut again, and the new chunks, without vectors, returned.
+    async fn store_page_reading(
+        &self,
+        page: WaitingPage,
+        reading: PageReading,
+    ) -> Result<Vec<ChunkId>>;
+
+    /// How many pages wait for transcription, and how many it failed on.
+    async fn count_transcriptions(&self) -> Result<TranscriptionCounts>;
+
+    /// Have every page whose transcription failed wait again, returning how many.
+    async fn retry_failed_transcriptions(&self) -> Result<u64>;
 
     /// Remove every document of `pass`'s root that the pass did not see, returning
     /// how many.
@@ -500,8 +556,25 @@ impl SemanticStore for NoSemanticStore {
         _path: PathBuf,
         _stamp: FileStamp,
         _pages: Vec<String>,
+        _empty_pages: EmptyPages,
     ) -> Result<Vec<ChunkId>> {
         Ok(Vec::new())
+    }
+    async fn next_waiting_page(&self) -> Result<Option<WaitingPage>> {
+        Ok(None)
+    }
+    async fn store_page_reading(
+        &self,
+        _page: WaitingPage,
+        _reading: PageReading,
+    ) -> Result<Vec<ChunkId>> {
+        Ok(Vec::new())
+    }
+    async fn count_transcriptions(&self) -> Result<TranscriptionCounts> {
+        Ok(TranscriptionCounts::default())
+    }
+    async fn retry_failed_transcriptions(&self) -> Result<u64> {
+        Ok(0)
     }
     async fn finish_index_pass(&self, _pass: IndexPass) -> Result<u64> {
         Ok(0)

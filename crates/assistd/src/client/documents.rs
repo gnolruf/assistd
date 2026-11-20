@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use anyhow::Result;
 use assistd_ipc::{
     ComponentReadiness, DocumentPass, DocumentPassCounts, DocumentPassEnd, DocumentRootStatus,
-    EventBody, Request, RequestBody, SkippedFiles,
+    EventBody, PageTranscriptionStatus, Request, RequestBody, SkippedFiles,
 };
 use assistd_utils::terminal_text::escape_controls_single_line;
 use assistd_utils::text::{collapse_whitespace, similarity_percent};
@@ -74,6 +74,7 @@ async fn status() -> Result<()> {
                 chunks,
                 chunk_limit,
                 running_pass,
+                transcription,
             } => {
                 writeln!(out, "indexing: {}", describe_readiness(indexing))?;
                 writeln!(out, "embedding: {}", describe_readiness(embedding))?;
@@ -85,6 +86,7 @@ async fn status() -> Result<()> {
                     let root = escape_controls_single_line(root);
                     writeln!(out, "a pass is running over {root}")?;
                 }
+                write!(out, "{}", describe_transcription(transcription))?;
             }
             EventBody::DocumentRoot { status } => write!(out, "\n{}", describe_root(status))?,
             _ => {}
@@ -180,6 +182,23 @@ fn print_pass_progress(root: &str, counts: &DocumentPassCounts, last_root: &mut 
         counts.skipped_files(),
     );
     let _ = err.flush();
+}
+
+/// The lines `status` prints on the pages that have no text.
+fn describe_transcription(transcription: &PageTranscriptionStatus) -> String {
+    let stopped = transcription
+        .stopped
+        .as_ref()
+        .map(|why| {
+            let why = escape_controls_single_line(why);
+            format!("the last transcription run stopped early: {why}\n")
+        })
+        .unwrap_or_default();
+    format!(
+        "page transcription: {}\npages without text: {} waiting for transcription, {} failed\n\
+         {stopped}",
+        transcription.state, transcription.waiting_pages, transcription.failed_pages,
+    )
 }
 
 fn describe_readiness(readiness: &ComponentReadiness) -> String {

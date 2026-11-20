@@ -1,21 +1,34 @@
-//! Writes to the document index: passes over index roots, and each document's pages,
-//! chunks and keyword index.
+//! Writes to the document index: passes over index roots, each document's pages,
+//! chunks and keyword index, and the pages that wait for transcription.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::ops::Range;
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 
 use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::sqlite::timestamp::now_millis;
-use crate::{ChunkId, DocumentId, FileStamp, IndexPass};
+use crate::{
+    ChunkId, DocumentId, EmptyPages, FileStamp, IndexPass, PageReading, TranscriptionCounts,
+    WaitingPage,
+};
 
 /// The byte after `/`: every path inside a directory sorts between the directory's
 /// path followed by `/` and followed by this.
 const PAST_SEPARATOR: &[u8] = b"0";
+
+/// `page_transcriptions.state` of a page waiting for the OCR model.
+const WAITING: i64 = 0;
+
+/// `page_transcriptions.state` of a page the OCR model has read.
+const READ: i64 = 1;
+
+/// `page_transcriptions.state` of a page whose transcription failed.
+const FAILED: i64 = 2;
 
 /// A `documents` row as one pass read it from disk.
 struct DocumentRow<'a> {
@@ -28,13 +41,16 @@ struct DocumentRow<'a> {
 
 impl DocumentRow<'_> {
     /// Record the stamp and pass on the stored row when it already holds these pages
-    /// cut with this chunking, returning whether it does.
+    /// cut with this chunking, returning whether it does. A document with pages to
+    /// transcribe never does: its images may have changed under the same text.
     fn refresh_stamp_if_same_pages(&self, tx: &Transaction<'_>) -> rusqlite::Result<bool> {
         let refreshed = tx
             .prepare_cached(
                 "UPDATE documents SET root_id = ?1, seen_pass = ?2, mtime_ns = ?3, size = ?4
                  WHERE path = ?5 AND content_hash = ?6
-                   AND chunker = ?7 AND chunk_chars = ?8 AND overlap_chars = ?9",
+                   AND chunker = ?7 AND chunk_chars = ?8 AND overlap_chars = ?9
+                   AND NOT EXISTS (SELECT 1 FROM page_transcriptions t
+                                   WHERE t.document_id = documents.id)",
             )?
             .execute(rusqlite::params![
                 self.pass.root,
@@ -251,6 +267,7 @@ pub(super) fn store_document(
     path: &Path,
     stamp: FileStamp,
     pages: &[String],
+    empty_pages: EmptyPages,
 ) -> rusqlite::Result<Vec<ChunkId>> {
     let document = DocumentRow {
         pass,
@@ -269,7 +286,90 @@ pub(super) fn store_document(
     write_changed_pages(tx, id, &stored.pages, pages)?;
     recut.apply(tx, id, longest_page(&stored.pages).max(longest_page(pages)))?;
     remove_pages_from(tx, id, pages.len())?;
+    reset_transcriptions(tx, id, pages, empty_pages)?;
     add_chunks(tx, id, pages, &recut.added)
+}
+
+/// The first page waiting for transcription, by document and then position.
+pub(super) fn next_waiting_page(conn: &Connection) -> rusqlite::Result<Option<WaitingPage>> {
+    conn.prepare_cached(
+        "SELECT t.document_id, d.path, t.page, d.mtime_ns, d.size
+         FROM page_transcriptions t JOIN documents d ON d.id = t.document_id
+         WHERE t.state = ?1
+         ORDER BY t.document_id, t.page LIMIT 1",
+    )?
+    .query_row(rusqlite::params![WAITING], |r| {
+        Ok(WaitingPage {
+            document_id: r.get(0)?,
+            path: PathBuf::from(OsString::from_vec(r.get(1)?)),
+            page: r.get(2)?,
+            stamp: FileStamp {
+                mtime_ns: r.get(3)?,
+                size: r.get(4)?,
+            },
+        })
+    })
+    .optional()
+}
+
+/// Record `reading` of `waiting` when it still waits and its document still has its
+/// stamp, and cut the document's pages again once none of them waits. Returns the
+/// chunks added.
+pub(super) fn store_page_reading(
+    tx: &Transaction<'_>,
+    waiting: &WaitingPage,
+    reading: &PageReading,
+) -> rusqlite::Result<Vec<ChunkId>> {
+    let (state, text) = match reading {
+        PageReading::Text(text) => (READ, text.as_str()),
+        PageReading::Failed => (FAILED, ""),
+    };
+    let WaitingPage {
+        document_id,
+        page,
+        stamp,
+        ..
+    } = waiting;
+    let recorded = tx
+        .prepare_cached(
+            "UPDATE page_transcriptions SET state = ?3
+             WHERE document_id = ?1 AND page = ?2 AND state = ?4
+               AND EXISTS (SELECT 1 FROM documents d
+                           WHERE d.id = ?1 AND d.mtime_ns = ?5 AND d.size = ?6)",
+        )?
+        .execute(rusqlite::params![
+            document_id,
+            page,
+            state,
+            WAITING,
+            stamp.mtime_ns,
+            stamp.size
+        ])?;
+    if recorded == 0 {
+        return Ok(Vec::new());
+    }
+    tx.prepare_cached(
+        "UPDATE document_pages SET content = ?3 WHERE document_id = ?1 AND page = ?2",
+    )?
+    .execute(rusqlite::params![document_id, page, text])?;
+    if has_waiting_page(tx, *document_id)? {
+        return Ok(Vec::new());
+    }
+    cut_stored_pages(tx, *document_id)
+}
+
+/// How many pages wait for transcription, and how many it failed on.
+pub(super) fn count_transcriptions(conn: &Connection) -> rusqlite::Result<TranscriptionCounts> {
+    conn.prepare_cached(
+        "SELECT count(*) FILTER (WHERE state = ?1), count(*) FILTER (WHERE state = ?2)
+         FROM page_transcriptions",
+    )?
+    .query_row(rusqlite::params![WAITING, FAILED], |r| {
+        Ok(TranscriptionCounts {
+            waiting: r.get(0)?,
+            failed: r.get(1)?,
+        })
+    })
 }
 
 /// Remove the documents of `pass`'s root that it did not see, returning how many.
@@ -325,6 +425,60 @@ pub(super) fn remove_root(tx: &Transaction<'_>, root: &Path) -> rusqlite::Result
     tx.prepare_cached("DELETE FROM index_roots WHERE path = ?1")?
         .execute(rusqlite::params![root])?;
     Ok(u64::try_from(removed).unwrap_or(u64::MAX))
+}
+
+/// Have every page whose transcription failed wait again, returning how many.
+pub(super) fn retry_failed_transcriptions(conn: &Connection) -> rusqlite::Result<u64> {
+    let waiting = conn
+        .prepare_cached("UPDATE page_transcriptions SET state = ?1 WHERE state = ?2")?
+        .execute(rusqlite::params![WAITING, FAILED])?;
+    Ok(u64::try_from(waiting).unwrap_or(u64::MAX))
+}
+
+/// Forget what was transcribed of `document` and, when its empty pages are to be
+/// transcribed, record each of `pages` without text as waiting.
+fn reset_transcriptions(
+    tx: &Transaction<'_>,
+    document: DocumentId,
+    pages: &[String],
+    empty_pages: EmptyPages,
+) -> rusqlite::Result<()> {
+    tx.prepare_cached("DELETE FROM page_transcriptions WHERE document_id = ?1")?
+        .execute(rusqlite::params![document])?;
+    if empty_pages == EmptyPages::Final {
+        return Ok(());
+    }
+    let mut wait =
+        tx.prepare_cached("INSERT INTO page_transcriptions (document_id, page) VALUES (?1, ?2)")?;
+    let empty = pages
+        .iter()
+        .enumerate()
+        .filter(|(_, text)| text.trim().is_empty());
+    for (page, _) in empty {
+        wait.execute(rusqlite::params![document, page])?;
+    }
+    Ok(())
+}
+
+fn has_waiting_page(tx: &Transaction<'_>, document: DocumentId) -> rusqlite::Result<bool> {
+    tx.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM page_transcriptions
+                        WHERE document_id = ?1 AND state = ?2)",
+    )?
+    .query_row(rusqlite::params![document, WAITING], |r| r.get(0))
+}
+
+/// Cut the pages stored for `document` into chunks again, keeping each chunk whose
+/// text is unchanged, and record the pages' hash. Returns the chunks added.
+fn cut_stored_pages(tx: &Transaction<'_>, document: DocumentId) -> rusqlite::Result<Vec<ChunkId>> {
+    let stored = StoredPages::load(tx, document)?;
+    let pages = &stored.pages;
+    let cuts = page_cuts(pages, ChunkingConfig::DOCUMENTS);
+    let recut = stored.recut(pages, &cuts);
+    recut.apply(tx, document, longest_page(pages))?;
+    tx.prepare_cached("UPDATE documents SET content_hash = ?2 WHERE id = ?1")?
+        .execute(rusqlite::params![document, pages_hash(pages)])?;
+    add_chunks(tx, document, pages, &recut.added)
 }
 
 /// The chunks each of `pages` is cut into under `chunking`, in page order.

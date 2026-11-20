@@ -120,10 +120,27 @@ impl SemanticStore for FixedHits {
         path: PathBuf,
         stamp: FileStamp,
         pages: Vec<String>,
+        empty_pages: EmptyPages,
     ) -> assistd_memory::Result<Vec<ChunkId>> {
         NoSemanticStore
-            .index_document(pass, path, stamp, pages)
+            .index_document(pass, path, stamp, pages, empty_pages)
             .await
+    }
+    async fn next_waiting_page(&self) -> assistd_memory::Result<Option<WaitingPage>> {
+        NoSemanticStore.next_waiting_page().await
+    }
+    async fn store_page_reading(
+        &self,
+        page: WaitingPage,
+        reading: PageReading,
+    ) -> assistd_memory::Result<Vec<ChunkId>> {
+        NoSemanticStore.store_page_reading(page, reading).await
+    }
+    async fn count_transcriptions(&self) -> assistd_memory::Result<TranscriptionCounts> {
+        NoSemanticStore.count_transcriptions().await
+    }
+    async fn retry_failed_transcriptions(&self) -> assistd_memory::Result<u64> {
+        NoSemanticStore.retry_failed_transcriptions().await
     }
     async fn finish_index_pass(&self, pass: IndexPass) -> assistd_memory::Result<u64> {
         NoSemanticStore.finish_index_pass(pass).await

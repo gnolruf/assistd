@@ -18,6 +18,7 @@ mod supervisor;
 mod text;
 mod xml;
 
+pub use extract::renders_pages;
 pub use extractor::{Extractor, ExtractorError};
 pub use protocol::{
     Extraction, MAX_PAGE_IMAGE_BYTES, MAX_PAGES, MAX_TEXT_BYTES, RenderedPage, SkipReason,

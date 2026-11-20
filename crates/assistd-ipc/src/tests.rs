@@ -1098,8 +1098,14 @@ fn document_status_event_cases() -> Vec<(Event, &'static str)> {
                 chunks: 12,
                 chunk_limit: 500_000,
                 running_pass: Some("/home/u/notes".into()),
+                transcription: PageTranscriptionStatus {
+                    state: PageTranscriptionState::WhileDrowsy,
+                    waiting_pages: 40,
+                    failed_pages: 2,
+                    stopped: Some("not enough free VRAM".into()),
+                },
             }),
-            r#"{"id":"r","type":"document_index","indexing":{"state":"ready"},"embedding":{"state":"unavailable","reason":"server failed to start"},"chunks":12,"chunk_limit":500000,"running_pass":"/home/u/notes"}"#,
+            r#"{"id":"r","type":"document_index","indexing":{"state":"ready"},"embedding":{"state":"unavailable","reason":"server failed to start"},"chunks":12,"chunk_limit":500000,"running_pass":"/home/u/notes","transcription":{"state":"while_drowsy","waiting_pages":40,"failed_pages":2,"stopped":"not enough free VRAM"}}"#,
         ),
         (
             event(EventBody::DocumentRoot {

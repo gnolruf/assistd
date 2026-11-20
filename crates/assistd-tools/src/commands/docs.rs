@@ -628,7 +628,9 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use assistd_memory::{ChunkId, DocumentId, FileStamp, SqliteHandle, SqliteSemanticStore};
+    use assistd_memory::{
+        ChunkId, DocumentId, EmptyPages, FileStamp, SqliteHandle, SqliteSemanticStore,
+    };
     use assistd_utils::readiness::Readiness;
 
     use super::*;
@@ -662,7 +664,7 @@ mod tests {
         };
         let pages = pages.iter().copied().map(String::from).collect();
         store
-            .index_document(pass, PathBuf::from(path), stamp, pages)
+            .index_document(pass, PathBuf::from(path), stamp, pages, EmptyPages::Final)
             .await
             .unwrap();
         let embedder = EmbedderHandle::new(Readiness::Unavailable("disabled in config".into()));

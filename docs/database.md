@@ -23,6 +23,7 @@ erDiagram
     index_roots ||--o{ documents : "found under"
     documents ||--o{ document_pages : "made of"
     document_pages ||--o{ chunks : "split into"
+    document_pages ||--o| page_transcriptions : "read from its image as"
     messages ||--o{ relay_steps : "relayed by"
     relay_steps ||--o{ relay_entries : "did"
     chunks ||--o| message_chunk_embeddings : "embedded as"
@@ -140,6 +141,11 @@ erDiagram
         int document_id PK, FK
         int page PK "position in the file, from 0"
         text content "the page's text as indexed, empty when it has none"
+    }
+    page_transcriptions {
+        int document_id PK, FK
+        int page PK, FK
+        int state "0 waiting, 1 read, 2 failed"
     }
     chunks {
         int id PK
@@ -297,7 +303,8 @@ resumed, saying which.
 - **`documents`**: local files indexed for search, one row per path.
   A file whose `mtime_ns`, `size` and chunking match its row is not
   read again. One that is read and hashes to the stored `content_hash`,
-  which covers its pages in order, only has its stamp refreshed.
+  which covers its pages in order, only has its stamp refreshed, unless
+  it has rows in `page_transcriptions`.
   Otherwise each chunk whose text is unchanged keeps its vector and
   takes the page and byte range that text now has, so an insertion
   re-embeds only the paragraphs it touched and a page added at the
@@ -316,6 +323,18 @@ resumed, saying which.
   `page` is the page's position in the file from 0, and a page without
   text, as a scanned PDF page is, has a row with empty `content`, so a
   page's number in the index is its number in the file.
+- **`page_transcriptions`**: the PDF pages that had no text when their
+  file was read, each an image an OCR model can read. A row starts as
+  waiting. Reading the page stores what the model found, which may be
+  nothing, as the page's `document_pages.content` and marks the row
+  read; a page that cannot be rendered or whose reply is not its text
+  is marked failed and keeps empty content. Once none of a document's
+  rows is waiting its pages are cut into chunks again and
+  `content_hash` is taken over the pages as they now are. The rows stay
+  until the file's stamp changes: indexing it again writes the pages as
+  extracted, which drops the transcribed text with its chunks, and
+  starts every empty page waiting again. A daemon start sets the failed
+  rows back to waiting.
 - **`message_chunk_embeddings`** / **`document_chunk_embeddings`** /
   **`memory_embeddings`**: at most one vector per chunk or memory,
   L2-normalised by the embedder so a dot product is cosine similarity. A chunk's

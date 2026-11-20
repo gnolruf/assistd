@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use assistd_llm::SlotDir;
+use assistd_llm::{ModelPresets, SlotDir};
 use assistd_utils::child_server::ApiKey;
 use tempfile::TempDir;
 
@@ -41,6 +41,11 @@ impl FakeLlama {
     /// A slot directory inside this fake's tempdir.
     pub(crate) fn slot_dir(&self) -> SlotDir {
         SlotDir::new(self.dir.path().join("slots"))
+    }
+
+    /// A presets file inside this fake's tempdir, defining no OCR model.
+    pub(crate) fn presets(&self) -> ModelPresets {
+        ModelPresets::new(self.dir.path().join("presets.ini"), None)
     }
 
     /// Select the mode for subsequent spawns; running children are unaffected.

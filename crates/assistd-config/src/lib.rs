@@ -30,7 +30,7 @@ pub use chat::ChatConfig;
 pub use compositor::{Compositor, CompositorConfig, CompositorType};
 pub use custom_args::{CustomArgs, EmbeddingServer, ModelServer, ServerKind};
 pub use document::ConfigDocument;
-pub use documents::DocumentsConfig;
+pub use documents::{DocumentsConfig, DocumentsOcrConfig};
 pub use embedding::{EmbeddingConfig, EmbeddingModel};
 pub use errors::{
     AbsoluteDirError, BlankStringError, ConfigError, ConfigIssue, CustomArgsError,

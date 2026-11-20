@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Component, ComponentReadiness, ConfirmSource, DocumentActivity, DocumentPass,
     DocumentPassCounts, DocumentRootStatus, ListenPhase, McpServerState, McpTransportKind,
-    ModeRecommendation, Plan, PresenceState, RelayEvent, RelayStepRecord, StartupComponent,
-    StatusKind, StatusSeverity, TaskId, TaskName, TaskPrompt, TaskQueueSnapshot, TaskRunId,
-    TaskRunRecord, TaskRunState, TaskRunSummary, TaskSpec, TokenRevocation, ToolReport,
+    ModeRecommendation, PageTranscriptionStatus, Plan, PresenceState, RelayEvent, RelayStepRecord,
+    StartupComponent, StatusKind, StatusSeverity, TaskId, TaskName, TaskPrompt, TaskQueueSnapshot,
+    TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary, TaskSpec, TokenRevocation, ToolReport,
     VoiceCaptureState,
 };
 
@@ -275,6 +275,8 @@ pub enum EventBody {
         /// The root a pass is walking now.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         running_pass: Option<String>,
+        /// Where transcribing the pages that have no text stands.
+        transcription: PageTranscriptionStatus,
     },
     /// One index root, in `documents.roots` order.
     DocumentRoot { status: DocumentRootStatus },
