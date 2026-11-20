@@ -86,6 +86,8 @@ pub struct EmbeddingServer;
 
 impl ServerKind for EmbeddingServer {
     const MANAGED_FLAGS: &'static [&'static str] = &[
+        "-dev",
+        "--device",
         "-mm",
         "--mmproj",
         "-mmu",
@@ -246,6 +248,11 @@ mod tests {
         parse_for::<EmbeddingServer>("--pooling cls -c 8192 --ubatch-size 2048")
             .expect("pooling and tuning are allowed");
         parse("--no-mmproj").expect("the projector is the chat server's to choose");
+        assert!(matches!(
+            parse_for::<EmbeddingServer>("--device CUDA0"),
+            Err(CustomArgsError::Managed(_))
+        ));
+        parse("--device CUDA0").expect("the devices are the chat server's to choose");
         assert!(matches!(
             parse_for::<EmbeddingServer>("--slot-save-path /tmp/slots"),
             Err(CustomArgsError::Exposing(_))
