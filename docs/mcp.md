@@ -25,6 +25,11 @@ headers = { Authorization = "Bearer ..." }
 See the `[mcp]` section of
 [config.sample.toml](../config/config.sample.toml) for every key.
 
+The settings panel (`/settings` in the chat, or `assistd settings`)
+writes the same entries: on its Tools tab, turn MCP on and open
+`servers` to add, change or delete one in a form. Its other
+`[[mcp.servers]]` entries keep their comments.
+
 ## Checking on servers
 
 ```text

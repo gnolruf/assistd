@@ -9,6 +9,7 @@ use assistd_ipc::{
 use chrono::{Local, NaiveDateTime, TimeDelta, Timelike};
 use crossterm::event::{KeyCode, KeyEvent};
 
+use crate::selection::cycled;
 use crate::text_editor::{EditorShape, TextEditor};
 
 /// How an `At` time is typed and shown.
@@ -381,17 +382,6 @@ fn seconds(editor: &TextEditor, name: &str) -> Result<u32, String> {
         .trim()
         .parse()
         .map_err(|_| format!("{name} must be a whole number of seconds"))
-}
-
-/// The entry after or before `current` in `all`, wrapping; the first when it is not there.
-pub(super) fn cycled<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
-    let index = all.iter().position(|item| *item == current).unwrap_or(0);
-    let next = if forward {
-        (index + 1) % all.len()
-    } else {
-        (index + all.len() - 1) % all.len()
-    };
-    all[next]
 }
 
 #[cfg(test)]

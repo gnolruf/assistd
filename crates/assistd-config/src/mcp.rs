@@ -29,7 +29,7 @@ pub struct McpConfig {
 impl DescribeSettings for McpConfig {
     describe_fields! {
         enabled => ("enabled", "Connects the MCP servers listed below"),
-        servers => ("servers", "MCP servers to run or reach by URL; edit in config.toml"),
+        servers => ("servers", "MCP servers to run or reach by URL"),
     }
 }
 

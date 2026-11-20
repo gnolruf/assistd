@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use toml_edit::{DocumentMut, Item, Table};
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
 
 use crate::errors::{ConfigError, ConfigIssue};
 use crate::settings::{Consumer, consumers_of_changes, value_at};
@@ -97,13 +97,9 @@ impl ConfigDocument {
     /// Refused, leaving the document unchanged, when `key` is not in the
     /// schema or `value` does not fit it.
     pub fn set(&mut self, key: &str, value: &toml::Value) -> Result<(), ConfigError> {
-        let mut literal: toml_edit::Value = value
-            .to_string()
-            .parse()
-            .map_err(|source: toml_edit::TomlError| edit_error(key, source.message()))?;
+        let mut literal = literal(key, value)?;
         let mut document = self.document.clone();
-        let slot = slot_mut(document.as_item_mut(), key)
-            .ok_or_else(|| edit_error(key, "a parent key is not a table"))?;
+        let slot = slot_mut(document.as_item_mut(), key).ok_or_else(|| not_in_a_table(key))?;
         if let Some(existing) = slot.as_value() {
             *literal.decor_mut() = existing.decor().clone();
         }
@@ -114,9 +110,7 @@ impl ConfigDocument {
     /// Removes dotted `key` from the document, so its default applies.
     pub fn reset(&mut self, key: &str) -> Result<(), ConfigError> {
         let mut document = self.document.clone();
-        let (parents, leaf) = key
-            .rsplit_once('.')
-            .map_or((None, key), |(parents, leaf)| (Some(parents), leaf));
+        let (parents, leaf) = split_leaf(key);
         let parent = parents
             .into_iter()
             .flat_map(|parents| parents.split('.'))
@@ -125,6 +119,42 @@ impl ConfigDocument {
             });
         if let Some(table) = parent.and_then(Item::as_table_like_mut) {
             table.remove(leaf);
+        }
+        self.replace(document, key)
+    }
+
+    /// Puts `entry`, its keys in the order given, at `index` of the `[[key]]` tables at
+    /// dotted `key`, appending when `index` is their count; the other tables keep their
+    /// comments. Refused like [`Self::set`].
+    pub fn put_table(
+        &mut self,
+        key: &str,
+        index: usize,
+        entry: &[(String, toml::Value)],
+    ) -> Result<(), ConfigError> {
+        let mut table = Table::new();
+        for (name, value) in entry {
+            table.insert(name, Item::Value(literal(key, value)?));
+        }
+        let mut document = self.document.clone();
+        let tables = tables_mut(document.as_item_mut(), key).ok_or_else(|| not_in_a_table(key))?;
+        match tables.get_mut(index) {
+            Some(held) => {
+                *table.decor_mut() = held.decor().clone();
+                table.set_position(held.position());
+                *held = table;
+            }
+            None => tables.push(table),
+        }
+        self.replace(document, key)
+    }
+
+    /// Removes the table at `index` of the `[[key]]` tables at dotted `key`, if there is one.
+    pub fn remove_table(&mut self, key: &str, index: usize) -> Result<(), ConfigError> {
+        let mut document = self.document.clone();
+        let tables = tables_mut(document.as_item_mut(), key).ok_or_else(|| not_in_a_table(key))?;
+        if index < tables.len() {
+            tables.remove(index);
         }
         self.replace(document, key)
     }
@@ -189,6 +219,18 @@ fn edit_error(key: &str, reason: &str) -> ConfigError {
     }
 }
 
+fn not_in_a_table(key: &str) -> ConfigError {
+    edit_error(key, "a parent key is not a table")
+}
+
+/// `value` as the document writes it.
+fn literal(key: &str, value: &toml::Value) -> Result<toml_edit::Value, ConfigError> {
+    value
+        .to_string()
+        .parse()
+        .map_err(|source: toml_edit::TomlError| edit_error(key, source.message()))
+}
+
 /// The text of the file at `path`; empty when there is no file.
 fn read_text(path: &Path) -> Result<String, ConfigError> {
     match fs::read_to_string(path) {
@@ -208,12 +250,51 @@ fn slot_mut<'a>(root: &'a mut Item, key: &str) -> Option<&'a mut Item> {
         let vacant = if item.is_inline_table() {
             Item::Value(toml_edit::InlineTable::new().into())
         } else {
-            let mut table = Table::new();
-            table.set_implicit(true);
-            Item::Table(table)
+            Item::Table(implicit_table())
         };
         Some(item.as_table_like_mut()?.entry(segment).or_insert(vacant))
     })
+}
+
+/// The `[[key]]` tables at dotted `key`, made from an inline array there and from inline
+/// tables above it, and created when missing; `None` when a parent is a value.
+fn tables_mut<'a>(root: &'a mut Item, key: &str) -> Option<&'a mut ArrayOfTables> {
+    let (parents, leaf) = split_leaf(key);
+    let parent = parents
+        .into_iter()
+        .flat_map(|parents| parents.split('.'))
+        .try_fold(root, |item, segment| {
+            let table = item.as_table_like_mut()?;
+            if !table.get(segment).is_some_and(Item::is_table) {
+                let held = match table.remove(segment) {
+                    Some(held) => held.into_table().ok()?,
+                    None => implicit_table(),
+                };
+                table.insert(segment, Item::Table(held));
+            }
+            table.get_mut(segment)
+        })?;
+    let table = parent.as_table_like_mut()?;
+    if !table.get(leaf).is_some_and(Item::is_array_of_tables) {
+        let held = table
+            .remove(leaf)
+            .and_then(|held| held.into_array_of_tables().ok());
+        table.insert(leaf, Item::ArrayOfTables(held.unwrap_or_default()));
+    }
+    table.get_mut(leaf)?.as_array_of_tables_mut()
+}
+
+/// Dotted `key` as its parents' path, if it has parents, and its last segment.
+fn split_leaf(key: &str) -> (Option<&str>, &str) {
+    key.rsplit_once('.')
+        .map_or((None, key), |(parents, leaf)| (Some(parents), leaf))
+}
+
+/// A table that is written only once it holds a key.
+fn implicit_table() -> Table {
+    let mut table = Table::new();
+    table.set_implicit(true);
+    table
 }
 
 /// Writes `contents` beside the file `path` resolves to, then renames it into
@@ -241,6 +322,11 @@ mod tests {
         [model]\n\
         name = \"owner/repo:Q4_K_M\"  # owner/repo:quant\n\
         port = 8385\n";
+
+    const SERVERS: &str = "[mcp]\nenabled = true\n\n\
+        # local files\n[[mcp.servers]]\nname = \"files\"  # the label\ncommand = \"npx\"\n\n\
+        # hosted\n[[mcp.servers]]\nname = \"remote\"\nurl = \"https://mcp.example.com/mcp\"\n\n\
+        [memory]\nenabled = false\n";
 
     #[test]
     fn edits_keep_comments_and_refuse_values_the_schema_rejects() {
@@ -336,5 +422,59 @@ mod tests {
             BTreeSet::from([Consumer::Daemon])
         );
         assert!(!fs::read_to_string(&path).unwrap().contains("[memory]"));
+    }
+
+    #[test]
+    fn tables_are_written_as_blocks_and_the_ones_left_alone_keep_their_comments() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(&path, SERVERS).unwrap();
+        let mut document = ConfigDocument::open(&path).unwrap();
+        let entry = |pairs: &[(&str, toml::Value)]| -> Vec<(String, toml::Value)> {
+            pairs
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.clone()))
+                .collect()
+        };
+        let headers = toml::Table::from_iter([("X-Key".to_string(), toml::Value::from("k"))]);
+
+        let remote = entry(&[
+            ("name", "remote".into()),
+            ("url", "https://mcp.example.com/v2".into()),
+            ("headers", headers.into()),
+        ]);
+        document.put_table("mcp.servers", 1, &remote).unwrap();
+        let local = entry(&[
+            ("name", "local".into()),
+            ("command", "server".into()),
+            ("args", toml::Value::Array(vec!["--stdio".into()])),
+        ]);
+        document.put_table("mcp.servers", 2, &local).unwrap();
+        let both = entry(&[
+            ("name", "both".into()),
+            ("command", "server".into()),
+            ("url", "https://mcp.example.com/mcp".into()),
+        ]);
+        assert!(document.put_table("mcp.servers", 3, &both).is_err());
+
+        assert_eq!(
+            document.document.to_string(),
+            "[mcp]\nenabled = true\n\n\
+             # local files\n[[mcp.servers]]\nname = \"files\"  # the label\ncommand = \"npx\"\n\n\
+             # hosted\n[[mcp.servers]]\nname = \"remote\"\nurl = \"https://mcp.example.com/v2\"\n\
+             headers = { X-Key = \"k\" }\n\n\
+             [[mcp.servers]]\nname = \"local\"\ncommand = \"server\"\nargs = [\"--stdio\"]\n\n\
+             [memory]\nenabled = false\n"
+        );
+
+        document.remove_table("mcp.servers", 0).unwrap();
+        let names: Vec<&str> = document
+            .config()
+            .mcp
+            .servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect();
+        assert_eq!(names, ["remote", "local"]);
     }
 }

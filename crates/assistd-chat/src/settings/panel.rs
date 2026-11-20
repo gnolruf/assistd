@@ -15,6 +15,7 @@ use super::super::theme::Theme;
 use super::catalog::{SECTIONS, Setting, Tab};
 use super::color_picker::{ColorPicker, PickerAction};
 use super::list_editor::{ListAction, ListEditor};
+use super::server_list::{ServerList, ServerListAction};
 use super::theme_list::{ThemeList, ThemeListAction};
 
 const THEME_KEY: &str = "chat.theme";
@@ -57,6 +58,8 @@ pub(crate) enum PanelMode {
     Edit(TextEditor),
     /// Editing a list setting's entries.
     List(ListEditor),
+    /// Adding, changing or deleting MCP servers.
+    Servers(ServerList),
     /// Picking a theme color, with the theme as it would look once applied.
     Color {
         picker: ColorPicker,
@@ -221,6 +224,10 @@ impl SettingsPanel {
             }
             PanelMode::List(_) => {
                 self.on_list_key(ev);
+                ControlFlow::Continue(())
+            }
+            PanelMode::Servers(_) => {
+                self.on_servers_key(ev);
                 ControlFlow::Continue(())
             }
             PanelMode::Color { .. } => {
@@ -464,6 +471,47 @@ impl SettingsPanel {
         }
     }
 
+    fn on_servers_key(&mut self, ev: KeyEvent) {
+        let Some(setting) = self.selected_setting() else {
+            return;
+        };
+        let servers = self.list_entries(setting.key).to_vec();
+        let PanelMode::Servers(list) = &mut self.mode else {
+            return;
+        };
+        match list.on_key(ev, &servers) {
+            ServerListAction::Pending => {}
+            ServerListAction::Close => {
+                self.mode = PanelMode::Browse;
+                self.feedback = None;
+            }
+            ServerListAction::Store { index, server } => {
+                self.change_servers(|document| document.put_table(setting.key, index, &server));
+            }
+            ServerListAction::Delete(index) => {
+                self.change_servers(|document| document.remove_table(setting.key, index));
+            }
+            ServerListAction::Refused(reason) => self.feedback = Some(Feedback::Error(reason)),
+        }
+    }
+
+    /// Makes `edit` to the servers, closing the open form, or reports why it was
+    /// refused and leaves the form open.
+    fn change_servers(
+        &mut self,
+        edit: impl FnOnce(&mut ConfigDocument) -> Result<(), ConfigError>,
+    ) {
+        match self.change(edit) {
+            Ok(()) => {
+                if let PanelMode::Servers(list) = &mut self.mode {
+                    list.close_form();
+                }
+                self.feedback = None;
+            }
+            Err(reason) => self.feedback = Some(Feedback::Error(reason)),
+        }
+    }
+
     fn on_confirm_close_key(&mut self, ev: KeyEvent) -> ControlFlow<()> {
         match ev.code {
             KeyCode::Char('s') => {
@@ -601,12 +649,9 @@ impl SettingsPanel {
         };
         match setting.kind() {
             SettingKind::Toggle | SettingKind::Choice(_) => self.cycle_selected(true),
-            SettingKind::External => {
-                self.feedback = Some(Feedback::Note(format!(
-                    "edit {} in {}",
-                    setting.key,
-                    self.document.path().display()
-                )));
+            SettingKind::McpServers => {
+                self.mode = PanelMode::Servers(ServerList::new());
+                self.feedback = None;
             }
             SettingKind::List(item) => {
                 self.mode = PanelMode::List(ListEditor::new(item));
@@ -876,7 +921,7 @@ fn parse_input(kind: SettingKind, text: &str) -> Result<toml::Value, String> {
         | SettingKind::Text
         | SettingKind::Prose
         | SettingKind::List(_)
-        | SettingKind::External
+        | SettingKind::McpServers
         | SettingKind::Color
         | SettingKind::Themes => Ok(toml::Value::String(text.to_string())),
     }
@@ -885,8 +930,9 @@ fn parse_input(kind: SettingKind, text: &str) -> Result<toml::Value, String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
-    use assistd_config::Config;
+    use assistd_config::{Config, McpTransport};
     use crossterm::event::KeyModifiers;
 
     use super::*;
@@ -959,6 +1005,66 @@ mod tests {
                 .file_value("chat.theme")
                 .is_none_or(|table| { table.as_table().is_some_and(toml::Table::is_empty) })
         );
+    }
+
+    #[test]
+    fn servers_are_added_refused_and_deleted_through_the_form() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(&path, "[mcp]\nenabled = true\n").unwrap();
+        let mut panel =
+            SettingsPanel::new(ConfigDocument::open(&path).unwrap(), PanelHost::Standalone);
+        while panel.tab() != Tab::Tools {
+            press(&mut panel, KeyCode::Tab);
+        }
+        while panel.selected_setting().map(|setting| setting.key) != Some("mcp.servers") {
+            press(&mut panel, KeyCode::Down);
+        }
+        press(&mut panel, KeyCode::Enter);
+
+        press(&mut panel, KeyCode::Enter);
+        typed(&mut panel, "files");
+        press(&mut panel, KeyCode::Down);
+        press(&mut panel, KeyCode::Down);
+        typed(&mut panel, "npx");
+        for entry in ["-y", "TOKEN=a=b"] {
+            press(&mut panel, KeyCode::Down);
+            press(&mut panel, KeyCode::Enter);
+            press(&mut panel, KeyCode::Enter);
+            typed(&mut panel, entry);
+            press(&mut panel, KeyCode::Enter);
+            press(&mut panel, KeyCode::Esc);
+        }
+        press(&mut panel, KeyCode::Down);
+        press(&mut panel, KeyCode::Enter);
+        assert!(panel.save());
+        let saved = Config::load(&path).unwrap();
+        let [server] = saved.mcp.servers.as_slice() else {
+            panic!("one server must be saved: {:?}", saved.mcp.servers);
+        };
+        let McpTransport::Stdio(stdio) = &server.transport else {
+            panic!("{} must be a stdio server", server.name);
+        };
+        assert_eq!(server.name.as_str(), "files");
+        assert_eq!(stdio.command, PathBuf::from("npx"));
+        assert_eq!(stdio.args, ["-y"]);
+        assert_eq!(stdio.env.get("TOKEN").map(String::as_str), Some("a=b"));
+
+        press(&mut panel, KeyCode::Char('a'));
+        typed(&mut panel, "files");
+        press(&mut panel, KeyCode::Down);
+        press(&mut panel, KeyCode::Right);
+        press(&mut panel, KeyCode::Down);
+        typed(&mut panel, "https://mcp.example.com/mcp");
+        press(&mut panel, KeyCode::Enter);
+        assert!(matches!(panel.feedback(), Some(Feedback::Error(_))));
+        assert_eq!(panel.document().config().mcp.servers.len(), 1);
+        press(&mut panel, KeyCode::Esc);
+
+        press(&mut panel, KeyCode::Up);
+        press(&mut panel, KeyCode::Char('d'));
+        press(&mut panel, KeyCode::Char('y'));
+        assert!(panel.document().config().mcp.servers.is_empty());
     }
 
     #[test]
