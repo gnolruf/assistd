@@ -703,7 +703,6 @@ fn wire_spelling_helpers_agree_with_serde() {
         Component::Mcp,
         Component::Voice,
         Component::Memory,
-        Component::Wm,
         Component::Embed,
         Component::Documents,
         Component::Daemon,
@@ -713,7 +712,7 @@ fn wire_spelling_helpers_agree_with_serde() {
     ] {
         check(v, v.as_str());
     }
-    for v in [Role::System, Role::User, Role::Assistant, Role::Tool] {
+    for v in [Role::User, Role::Assistant, Role::Tool] {
         check(v, v.as_str());
     }
     for v in [ReindexKind::Chunks, ReindexKind::Memories] {

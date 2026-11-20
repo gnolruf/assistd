@@ -40,18 +40,9 @@ impl VoiceOutputController {
     /// A controller whose output is still starting, muted unless
     /// `initially_enabled`, at epoch zero.
     pub fn new(initially_enabled: bool) -> Arc<Self> {
-        Self::with_output(Readiness::Starting, initially_enabled)
-    }
-
-    /// A controller over `output`, already up.
-    pub fn ready(output: Arc<dyn VoiceOutput>, initially_enabled: bool) -> Arc<Self> {
-        Self::with_output(Readiness::Ready(output), initially_enabled)
-    }
-
-    fn with_output(output: Readiness<Arc<dyn VoiceOutput>>, initially_enabled: bool) -> Arc<Self> {
         let (speaking_tx, _) = watch::channel(false);
         Arc::new(Self {
-            output: ReadinessCell::new(output),
+            output: ReadinessCell::starting(),
             enabled: AtomicBool::new(initially_enabled),
             skip_epoch: AtomicU64::new(0),
             active_speakers: AtomicUsize::new(0),
@@ -206,10 +197,16 @@ mod tests {
         }
     }
 
+    fn ready_controller(output: Arc<RecordingOutput>, enabled: bool) -> Arc<VoiceOutputController> {
+        let ctrl = VoiceOutputController::new(enabled);
+        ctrl.set_output(Readiness::Ready(output));
+        ctrl
+    }
+
     #[tokio::test]
     async fn muting_cancels_once_and_silences_the_running_reply() {
         let inner = Arc::new(RecordingOutput::default());
-        let ctrl = VoiceOutputController::ready(inner.clone(), true);
+        let ctrl = ready_controller(inner.clone(), true);
         let start = ctrl.current_epoch();
         ctrl.set_enabled(false).await;
         assert!(!ctrl.enabled());
@@ -229,7 +226,7 @@ mod tests {
             (false, false, false, SpeakDecision::DropSilent),
             (false, false, true, SpeakDecision::DropForSkip),
         ] {
-            let ctrl = VoiceOutputController::ready(Arc::new(RecordingOutput::default()), enabled);
+            let ctrl = ready_controller(Arc::new(RecordingOutput::default()), enabled);
             if skip_before_start {
                 ctrl.skip().await;
             }
@@ -247,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn speaking_is_raised_while_any_guard_is_alive() {
-        let ctrl = VoiceOutputController::ready(Arc::new(RecordingOutput::default()), true);
+        let ctrl = ready_controller(Arc::new(RecordingOutput::default()), true);
         let mut speaking = ctrl.subscribe_speaking();
         assert!(!ctrl.is_speaking());
         assert!(!*speaking.borrow_and_update());

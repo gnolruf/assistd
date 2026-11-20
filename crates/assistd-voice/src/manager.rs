@@ -43,19 +43,6 @@ impl VoiceManager {
         })
     }
 
-    /// Capture and speech already up.
-    pub fn ready(
-        capture: VoiceCapture,
-        output: Arc<dyn VoiceOutput>,
-        speech_enabled: bool,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            capture: ReadinessCell::new(Readiness::Ready(capture)),
-            speech: VoiceOutputController::ready(output, speech_enabled),
-            readiness_changed: watch::channel(()).0,
-        })
-    }
-
     /// Record how far capture's startup has got.
     pub fn set_capture(&self, capture: Readiness<VoiceCapture>) {
         self.capture.set(capture);

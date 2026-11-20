@@ -47,9 +47,6 @@ pub enum PresenceError {
     #[error("failed to construct llama-server control client: {0}")]
     Control(#[source] LlamaServerError),
 
-    #[error("initial cold-start wake failed: {0}")]
-    InitialWake(#[source] Box<PresenceError>),
-
     #[error("cannot drowse from Sleeping: call wake() first")]
     DrowseFromSleeping,
 
@@ -177,25 +174,6 @@ pub struct PresenceManager {
 }
 
 impl PresenceManager {
-    /// Create a manager and cold-start it to `Active`. Flipping
-    /// `daemon_shutdown` cancels an in-flight wake.
-    pub async fn new_active(
-        model: ModelConfig,
-        timeouts: TimeoutsConfig,
-        api_key: ApiKey,
-        slot_dir: SlotDir,
-        presets: ModelPresets,
-        daemon_shutdown: watch::Receiver<bool>,
-    ) -> Result<Arc<Self>, PresenceError> {
-        let manager =
-            Self::new_sleeping(model, timeouts, api_key, slot_dir, presets, daemon_shutdown)?;
-        manager
-            .wake()
-            .await
-            .map_err(|e| PresenceError::InitialWake(Box::new(e)))?;
-        Ok(manager)
-    }
-
     /// Create a manager in `Sleeping` with no llama-server started. Every server it starts
     /// accepts only `api_key`, saves slots only into `slot_dir` and reads its models'
     /// presets from `presets`. Flipping `daemon_shutdown` cancels any wake in flight.

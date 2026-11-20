@@ -132,10 +132,20 @@ impl StateParts {
             self.backend,
             stub_presence(self.presence),
             self.tools,
-            VoiceManager::ready(capture, self.speech, true),
+            ready_voice(capture, self.speech),
         );
         TestState::unsaved(self.config, subsystems).await
     }
+}
+
+fn ready_voice(
+    capture: VoiceCapture,
+    speech: Arc<dyn assistd_voice::VoiceOutput>,
+) -> Arc<VoiceManager> {
+    let voice = VoiceManager::new(true);
+    voice.set_capture(Readiness::Ready(capture));
+    voice.set_speech(Readiness::Ready(speech));
+    voice
 }
 
 async fn default_state() -> TestState {
@@ -152,7 +162,7 @@ fn stub_subsystems() -> Subsystems {
         parts.backend,
         stub_presence(parts.presence),
         parts.tools,
-        VoiceManager::ready(capture, parts.speech, true),
+        ready_voice(capture, parts.speech),
     )
 }
 

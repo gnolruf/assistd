@@ -56,9 +56,8 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
-    # whisper-rs / whisper-rs-sys ship under the Unlicense (public-domain
-    # dedication). OSI-approved and FSF Free/Libre compatible with our
-    # Apache-2.0 downstream.
+    # ksni (the tray) ships under the Unlicense, a public-domain dedication:
+    # OSI-approved and compatible with our Apache-2.0 downstream.
     "Unlicense",
 ]
 
@@ -144,8 +143,8 @@ skip = [
     # ratatui-core 0.1 sits on hashbrown 0.16; zbus's toml_edit pulls
     # hashbrown 0.17 transitively.
     { name = "hashbrown", version = "0.16" },
-    # ratatui-image 10 still depends directly on rand 0.8; the
-    # quantette → icy_sixel path it also pulls is on rand 0.9.
+    # ratatui-image and oauth2 still depend directly on rand 0.8; the
+    # quantette → icy_sixel path ratatui-image also pulls is on rand 0.9.
     { name = "rand", version = "0.8" },
     { name = "rand_core", version = "0.6" },
     # The workspace is on base64 0.23; reqwest's hyper-util is still on

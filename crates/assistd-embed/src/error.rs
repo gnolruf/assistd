@@ -9,9 +9,6 @@ use thiserror::Error;
 /// Failures producing an embedding vector.
 #[derive(Debug, Error)]
 pub enum EmbedError {
-    #[error("embedder disabled")]
-    Disabled,
-
     /// The embedder is still starting or failed to start.
     #[error("embedding is {0}")]
     Unavailable(NotReady),

@@ -57,16 +57,12 @@ async fn run_monitor(
 ) {
     let mut tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut sub = presence.subscribe();
 
     loop {
         tokio::select! {
             _ = tick.tick() => {
                 let action = decide(presence.state(), presence.idle_duration(), &cfg);
                 apply(action, &presence).await;
-            }
-            _ = sub.changed() => {
-                let _ = *sub.borrow_and_update();
             }
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
