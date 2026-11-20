@@ -193,7 +193,6 @@ impl Embedder for LlamaEmbedder {
     }
 }
 
-/// The error for a response of `status` that is not a success, given its `body`.
 fn refusal(status: reqwest::StatusCode, body: &str) -> EmbedError {
     let body: String = body.chars().take(ERROR_BODY_CHARS).collect();
     if body.contains(INPUT_TOO_LARGE) {

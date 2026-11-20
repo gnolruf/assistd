@@ -31,7 +31,6 @@ pub struct DocumentHit {
     pub path: PathBuf,
     /// The page the chunk is on, counted from zero.
     pub page: usize,
-    /// Pages in the document.
     pub page_count: usize,
     /// The bytes of the page's text the chunk covers.
     pub bytes: Range<usize>,

@@ -27,7 +27,6 @@ const RANK_OFFSET: f32 = 10.0;
 const VECTOR_COLUMN: usize = 9;
 
 /// A document as one ranking places it: through the chunk that ranks best there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Candidate {
     document: DocumentId,
     chunk: ChunkId,
