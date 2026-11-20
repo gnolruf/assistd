@@ -36,8 +36,8 @@ pub struct EmbeddingConfig {
     /// Port the server binds on `127.0.0.1`. Must differ from `model.port`
     /// when enabled.
     pub port: NonZeroU16,
-    /// `-ngl` count. `0` keeps it on CPU, where it never contends with the
-    /// agent's model for VRAM.
+    /// `-ngl` count. `0` also passes `--device none`, keeping it on CPU, where it
+    /// never contends with the agent's model for the GPU; above `0` it uses every device.
     pub gpu_layers: u32,
     /// Last-ditch cap, in seconds, on becoming healthy; the wait never trips
     /// while the model is still downloading or loading.
