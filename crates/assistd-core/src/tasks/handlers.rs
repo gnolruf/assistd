@@ -10,6 +10,7 @@ use assistd_ipc::{
     Event, EventBody, MAX_LISTED_RUNS, PermissionMode, TaskId, TaskRequest, TaskSpec, TaskTrigger,
 };
 use assistd_memory::TaskRecord;
+use assistd_tools::Answer;
 
 use super::event_triggers::{check_chain, resolve_watched_paths};
 use super::fire_times::{check_triggers, next_fire, upcoming_fires};
@@ -43,9 +44,10 @@ impl TaskService {
                 confirm_id,
                 allow,
                 always,
+                message,
             } => {
-                let approval = super::confirms::approval(allow, always);
-                self.handle_task_confirm(id, run, confirm_id, approval, tx)
+                let answer = Answer::from_wire(allow, always, message.as_deref());
+                self.handle_task_confirm(id, run, confirm_id, answer, tx)
                     .await
             }
             TaskRequest::Runs { task } => self.handle_task_runs(id, task, tx).await,

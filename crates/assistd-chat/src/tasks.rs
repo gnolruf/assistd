@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
-use super::app::ConfirmChoice;
+use super::app::ConfirmAnswer;
 use super::selection::Selection;
 
 mod editor;
@@ -211,15 +211,15 @@ impl TasksPanel {
         }
     }
 
-    /// Answer confirmation `confirm_id` of paused run `run` with `choice`.
+    /// Answer confirmation `confirm_id` of paused run `run` with `answer`.
     pub(super) fn answer_paused(
         &mut self,
         run: TaskRunId,
         confirm_id: String,
-        choice: ConfirmChoice,
+        answer: ConfirmAnswer,
     ) {
         self.outbox.send(PendingOp::Confirm, |id| {
-            task_confirm(id, run, confirm_id, choice)
+            task_confirm(id, run, confirm_id, answer)
         });
     }
 
@@ -648,20 +648,22 @@ impl TasksPanel {
     }
 }
 
-/// The `TaskConfirm` answering confirmation `confirm_id` of paused run `run` with `choice`.
+/// The `TaskConfirm` answering confirmation `confirm_id` of paused run `run` with `answer`.
 pub(super) fn task_confirm(
     id: String,
     run: TaskRunId,
     confirm_id: String,
-    choice: ConfirmChoice,
+    answer: ConfirmAnswer,
 ) -> Request {
+    let (allow, always, message) = answer.into_wire();
     Request::new(
         id,
         RequestBody::Task(TaskRequest::Confirm {
             run,
             confirm_id,
-            allow: choice != ConfirmChoice::Deny,
-            always: choice == ConfirmChoice::Always,
+            allow,
+            always,
+            message,
         }),
     )
 }

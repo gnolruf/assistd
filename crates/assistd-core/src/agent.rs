@@ -44,6 +44,9 @@ const TRUNCATION_RETRY_LIMIT: u32 = 2;
 /// Ends the reply kept for a turn cut off before the model finished.
 const INTERRUPTED_MARKER: &str = "[interrupted]";
 
+/// Leads what the user said when declining a prompt, in the declined call's result.
+const DECLINED_WITH_MESSAGE: &str = "The user declined and said: ";
+
 /// Events one model step may have waiting for the turn.
 const STEP_EVENT_BUFFER: usize = 32;
 
@@ -108,6 +111,7 @@ impl Agent {
         let mut turn = Turn {
             context: context
                 .clone()
+                .for_agent()
                 .observed_by(Arc::new(TurnRelayObserver(tx.clone()))),
             tx,
             cancel,
@@ -371,6 +375,7 @@ impl Agent {
             );
             cancelled_tool_result(call, "cancelled during dispatch")
         });
+        let result = quoting_decline_messages(result, turn.context.take_decline_messages());
         let cancelled_mid_dispatch = turn.cancel.is_cancelled();
         (
             send_tool_result(turn, call, result).await,
@@ -700,6 +705,18 @@ async fn send_tool_result(turn: &Turn, call: &ToolCall, result: ToolOutput) -> T
         })
         .await;
     payload
+}
+
+/// `result` followed by what the user said when declining the call's prompts.
+fn quoting_decline_messages(mut result: ToolOutput, messages: Vec<String>) -> ToolOutput {
+    for message in messages {
+        if !result.output.ends_with('\n') {
+            result.output.push('\n');
+        }
+        result.output.push_str(DECLINED_WITH_MESSAGE);
+        result.output.push_str(&message);
+    }
+    result
 }
 
 fn cancelled_tool_result(call: &ToolCall, reason: &str) -> ToolOutput {

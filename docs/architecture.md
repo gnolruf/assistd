@@ -673,15 +673,23 @@ the question ending (`Heard::Answer`, from the listener's answer window, with
 no wake phrase needed and barge-in checks off), or a push-to-talk press, which
 also cuts the question short. Speech over the question is ignored. The chat
 model reads the answer in a one-shot request that holds nothing of the history,
-with thinking off and the reply held by grammar to `Confirm` or `Deny`
-(`OneShotReply::OneOf`). Confirm approves that prompt once; nothing is approved
-for good by voice. Deny, an answer that cannot be read, a failed or late
+with thinking off and the reply held by grammar to `Confirm`, `Deny` or
+`Instruct` (`OneShotReply::OneOf`). Confirm approves that prompt once; nothing
+is approved for good by voice. Instruct, an answer that asks for something else
+or adds a condition ("yes, but leave the old builds"), cancels the call and
+hands the agent what was said. Deny, an answer that cannot be read, a failed or late
 reading, muted or unavailable speech and silence all cancel the call, and after
 a question nobody answered the turn's later prompts are denied without being
 asked.
 
 A query connection starts in manual mode, where every prompt goes to the
-client. A client can switch modes with a mid-stream `RequestBody::SetPermissionMode`
+client. Besides allowing once, allowing for good where that is offered, and
+denying, a prompt can be answered with a message for the agent
+(`Answer::Message`, the `message` of a `ConfirmResponse` or `TaskConfirm`, the
+chat's last choice). A message always denies the command, whatever else the
+answer says. `TurnContext::ask` keeps it for the agent whose tool call raised
+the prompt, a relay sub-agent's own included, and that agent's loop appends it
+to the call's result as "The user declined and said: …". A client can switch modes with a mid-stream `RequestBody::SetPermissionMode`
 (the TUI's Shift+Tab). Read-only `bash` scripts run in every mode, scripts that
 would destroy the home directory, a personal folder or a work tree are refused
 in every mode, and those touching a sensitive path, or handing the home directory

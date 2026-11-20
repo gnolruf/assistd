@@ -587,6 +587,10 @@ pub enum TaskRequest {
         /// hosts, emitting the updated `Task` before `Done`; errors when it has none.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         always: bool,
+        /// Words for the agent whose command this is, shown in the command's result. A
+        /// message that is not blank denies the command whatever `allow` says.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     /// Explore task prompt `prompt` on a backend of its own and rewrite it as a brief for
     /// an unattended run under `mode` and `allowed_hosts`, or with `feedback` revise the last

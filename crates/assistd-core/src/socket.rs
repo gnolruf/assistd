@@ -23,7 +23,7 @@ use tracing::{Instrument, debug, error, info, warn};
 
 use assistd_ipc::socket::{SocketDirError, ensure_private_socket_dir, open_private_lock_file};
 use assistd_ipc::{Event, EventBody, Hello, Request, RequestBody};
-use assistd_tools::{Approval, CONFIRM_TIMEOUT, ConfirmRouter, TurnContext};
+use assistd_tools::{Answer, CONFIRM_TIMEOUT, ConfirmRouter, TurnContext};
 use assistd_utils::time::saturating_millis;
 
 use crate::bus::EventSink;
@@ -663,9 +663,10 @@ fn route_mid_stream_line(line: &str, router: &ConfirmRouter) {
             confirm_id,
             allow,
             always,
+            message,
         } => {
-            let approval = Approval::from_answer(allow, always);
-            if let Err(e) = router.route_response(&confirm_id, approval) {
+            let answer = Answer::from_wire(allow, always, message.as_deref());
+            if let Err(e) = router.route_response(&confirm_id, answer) {
                 warn!(confirm_id = %confirm_id, reason = %e, "unmatched ConfirmResponse");
             }
         }
@@ -1366,7 +1367,7 @@ mod tests {
                 },
             )
             .await;
-            let approved = approved != Approval::Deny;
+            let approved = approved != assistd_tools::Approval::Deny;
             Ok(assistd_tools::ToolOutput::text(
                 if approved { "approved" } else { "denied" },
                 Duration::ZERO,

@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use assistd_ipc::{Event, EventBody, HostName, PausedPrompt, TaskId, TaskRunId};
 use assistd_memory::TaskRecord;
-use assistd_tools::{Approval, ConfirmationRequest, PromptParking, Unattended};
+use assistd_tools::{Answer, Approval, ConfirmationRequest, PromptParking, Unattended};
 
 use super::run_lane::RunLane;
 use super::{FailedStep, TaskError, TaskService};
@@ -48,13 +48,13 @@ impl TaskConfirms {
         }
     }
 
-    /// Answer confirmation `confirm_id`, which `run` must wait on, with `approval`; an
+    /// Answer confirmation `confirm_id`, which `run` must wait on, with `answer`; an
     /// [`Approval::Always`] returns the host it allows, and is refused when none is offered.
     fn answer(
         &self,
         run: TaskRunId,
         confirm_id: &str,
-        approval: Approval,
+        answer: Answer,
     ) -> Result<Option<AllowedHost>, TaskConfirmError> {
         let mut pending = self.pending.lock();
         let Entry::Occupied(waiting) = pending.entry(run) else {
@@ -64,7 +64,7 @@ impl TaskConfirms {
         if confirm.confirm_id != confirm_id {
             return Err(TaskConfirmError::NotWaiting(run, confirm_id.to_string()));
         }
-        let allowed = match (approval, &confirm.host) {
+        let allowed = match (answer.approval(), &confirm.host) {
             (Approval::Always, Some(host)) => Some(AllowedHost {
                 task: confirm.task,
                 host: host.clone(),
@@ -74,7 +74,7 @@ impl TaskConfirms {
             }
             (Approval::Once | Approval::Deny, _) => None,
         };
-        let _ = waiting.remove().answer.send(approval);
+        let _ = waiting.remove().answer.send(answer);
         Ok(allowed)
     }
 }
@@ -86,7 +86,7 @@ struct PendingConfirm {
     task: TaskId,
     /// The web host an "always" answer allows for the task.
     host: Option<HostName>,
-    answer: oneshot::Sender<Approval>,
+    answer: oneshot::Sender<Answer>,
 }
 
 /// A web host an "always" answer allows for the runs of `task`.
@@ -122,7 +122,7 @@ pub(super) struct TaskRunParking {
 
 #[async_trait]
 impl PromptParking for TaskRunParking {
-    async fn park(&self, req: ConfirmationRequest) -> Approval {
+    async fn park(&self, req: ConfirmationRequest) -> Answer {
         let (answer, answered) = oneshot::channel();
         let confirm_id = uuid::Uuid::new_v4().to_string();
         let host = match &req.unattended {
@@ -148,15 +148,15 @@ impl PromptParking for TaskRunParking {
             source: req.source,
         };
         self.pause(prompt).await;
-        let approval = tokio::select! {
+        let answer = tokio::select! {
             biased;
-            () = lane.cancel.cancelled() => return Approval::Deny,
-            answer = answered => answer.unwrap_or(Approval::Deny),
+            () = lane.cancel.cancelled() => return Approval::Deny.into(),
+            answer = answered => answer.unwrap_or(Approval::Deny.into()),
         };
         if self.resume().await {
-            approval
+            answer
         } else {
-            Approval::Deny
+            Approval::Deny.into()
         }
     }
 }
@@ -214,10 +214,10 @@ impl TaskService {
         id: String,
         run: TaskRunId,
         confirm_id: String,
-        approval: Approval,
+        answer: Answer,
         tx: EventSink,
     ) -> Result<(), TaskError> {
-        let Some(allowed) = self.confirms.answer(run, &confirm_id, approval)? else {
+        let Some(allowed) = self.confirms.answer(run, &confirm_id, answer)? else {
             let _ = tx.send(Event::new(id, EventBody::Done)).await;
             return Ok(());
         };
@@ -237,14 +237,5 @@ impl TaskService {
         }
         record.spec.allowed_hosts.push(allowed.host);
         Ok(self.deps.store.save(Some(record.id), record.spec).await?)
-    }
-}
-
-/// The approval a `TaskConfirm`'s `allow` and `always` give; `always` alone denies.
-pub(super) fn approval(allow: bool, always: bool) -> Approval {
-    match (allow, always) {
-        (false, _) => Approval::Deny,
-        (true, false) => Approval::Once,
-        (true, true) => Approval::Always,
     }
 }

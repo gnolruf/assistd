@@ -5,7 +5,7 @@ use assistd_ipc::{Event, TaskQueueSnapshot, TaskRunId};
 use crossterm::event::KeyEvent;
 use uuid::Uuid;
 
-use super::{AnswerTo, App, ConfirmChoice, Panel, WireStream};
+use super::{AnswerTo, App, ConfirmAnswer, Panel, WireStream};
 use crate::tasks::{PanelAction, TasksPanel, paused_prompts, task_confirm, waits_on};
 
 impl App {
@@ -80,20 +80,20 @@ impl App {
         self.task_queue = Some(snapshot);
     }
 
-    /// Send `choice` for confirmation `confirm_id` of paused run `run`, through the panel
+    /// Send `answer` for confirmation `confirm_id` of paused run `run`, through the panel
     /// when it is open so its outcome shows there.
     pub(super) fn answer_task_run(
         &mut self,
         run: TaskRunId,
         confirm_id: String,
-        choice: ConfirmChoice,
+        answer: ConfirmAnswer,
     ) {
         if let Some(Panel::Tasks(panel)) = self.panel.as_mut() {
-            panel.answer_paused(run, confirm_id, choice);
+            panel.answer_paused(run, confirm_id, answer);
             self.send_tasks_requests();
             return;
         }
-        let req = task_confirm(Uuid::new_v4().to_string(), run, confirm_id, choice);
+        let req = task_confirm(Uuid::new_v4().to_string(), run, confirm_id, answer);
         self.spawn_one_shot(req, WireStream::Status, "task confirm");
     }
 

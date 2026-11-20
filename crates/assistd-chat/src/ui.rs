@@ -45,6 +45,7 @@ const CONFIRM_BORDER_ROWS: usize = 2;
 /// Transcript rows kept above the confirmation prompt however tall it is.
 const TRANSCRIPT_MIN_ROWS: usize = 3;
 const SCRIPT_INDENT: &str = "  ";
+const MESSAGE_PLACEHOLDER: &str = "No, and tell the agent (type what to do instead)";
 /// Rows of a relay's task a confirmation prompt shows before cutting it.
 const RELAY_TASK_ROWS: usize = 3;
 /// Rows of a thumbnail slot taken by its filename caption.
@@ -523,6 +524,8 @@ fn choice_rows(prompt: &ConfirmationPrompt, width: usize, theme: &Theme) -> Vec<
                 ConfirmChoice::Once => "Yes".to_string(),
                 ConfirmChoice::Always => always_label(prompt),
                 ConfirmChoice::Deny => "No (Esc)".to_string(),
+                ConfirmChoice::Tell if prompt.message.is_empty() => MESSAGE_PLACEHOLDER.to_string(),
+                ConfirmChoice::Tell => format!("No, and tell the agent: {}▏", prompt.message),
             };
             let (pointer, style) = if index == prompt.selected.index() {
                 ("❯", theme.title_style())

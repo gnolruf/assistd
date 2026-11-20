@@ -141,14 +141,39 @@ pub enum Approval {
     Always,
 }
 
-impl Approval {
-    /// The approval an IPC client's answer stands for.
-    pub fn from_answer(allow: bool, always: bool) -> Self {
-        match (allow, always) {
-            (false, _) => Self::Deny,
-            (true, false) => Self::Once,
-            (true, true) => Self::Always,
+/// What a prompt was answered with: one of its choices, or a refusal with words for the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    Choice(Approval),
+    /// Deny, and tell the agent whose command it was this, in the user's own words.
+    Message(String),
+}
+
+impl Answer {
+    /// The answer an IPC client's fields stand for. A `message` that is not blank denies
+    /// whatever `allow` says, and `always` alone denies.
+    pub fn from_wire(allow: bool, always: bool, message: Option<&str>) -> Self {
+        let message = message.map(str::trim).filter(|message| !message.is_empty());
+        match (message, allow, always) {
+            (Some(message), _, _) => Self::Message(message.to_string()),
+            (None, false, _) => Self::Choice(Approval::Deny),
+            (None, true, false) => Self::Choice(Approval::Once),
+            (None, true, true) => Self::Choice(Approval::Always),
         }
+    }
+
+    /// Whether the command may run, and for how long that holds.
+    pub fn approval(&self) -> Approval {
+        match self {
+            Self::Choice(approval) => *approval,
+            Self::Message(_) => Approval::Deny,
+        }
+    }
+}
+
+impl From<Approval> for Answer {
+    fn from(approval: Approval) -> Self {
+        Self::Choice(approval)
     }
 }
 
@@ -165,14 +190,16 @@ pub trait ConfirmationGate: fmt::Debug + Send + Sync + 'static {
 pub trait PromptParking: fmt::Debug + Send + Sync + 'static {
     /// Pause the run on `req` and resume it once answered; [`Approval::Always`] on a web
     /// fetch also allows its host for the rest of the run. Every failure is [`Approval::Deny`].
-    async fn park(&self, req: ConfirmationRequest) -> Approval;
+    async fn park(&self, req: ConfirmationRequest) -> Answer;
 }
 
 /// The user's answer to a prompt asked out loud.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpokenAnswer {
     Confirm,
     Deny,
+    /// Neither a plain yes nor a plain no: what was said, for the agent.
+    Message(String),
     /// The question could not be asked, or nothing was said to it.
     Unanswered,
 }
@@ -206,7 +233,7 @@ struct VoiceAsks {
 
 impl VoiceAsks {
     /// Approve `req` once when the user says so; an answer never approves anything for good.
-    async fn ask(&self, req: &ConfirmationRequest) -> Approval {
+    async fn ask(&self, req: &ConfirmationRequest) -> Answer {
         let mut unanswered = self.unanswered.lock().await;
         if *unanswered {
             warn!(
@@ -214,7 +241,7 @@ impl VoiceAsks {
                 tool = %req.tool,
                 "command denied: an earlier spoken prompt of this turn went unanswered"
             );
-            return Approval::Deny;
+            return Approval::Deny.into();
         }
         let answer = self.gate.ask_aloud(req).await;
         info!(
@@ -226,8 +253,9 @@ impl VoiceAsks {
         );
         *unanswered = answer == SpokenAnswer::Unanswered;
         match answer {
-            SpokenAnswer::Confirm => Approval::Once,
-            SpokenAnswer::Deny | SpokenAnswer::Unanswered => Approval::Deny,
+            SpokenAnswer::Confirm => Approval::Once.into(),
+            SpokenAnswer::Deny | SpokenAnswer::Unanswered => Approval::Deny.into(),
+            SpokenAnswer::Message(said) => Answer::Message(said),
         }
     }
 }
@@ -243,7 +271,7 @@ struct TaskRunAsks {
 struct PendingPrompts {
     /// The client can no longer answer; every later ask is denied.
     closed: bool,
-    prompts: HashMap<String, oneshot::Sender<Approval>>,
+    prompts: HashMap<String, oneshot::Sender<Answer>>,
     reviews: HashMap<String, oneshot::Sender<PlanVerdict>>,
 }
 
@@ -476,14 +504,14 @@ impl ConfirmRouter {
     /// Approve `req` once when the mode lets it run unasked; otherwise prompt the client and
     /// await the answer, for a task run settle it by the task's hosts or park it, or for a
     /// headless turn ask it out loud. Every failure is [`Approval::Deny`].
-    pub async fn ask(&self, mut req: ConfirmationRequest) -> Approval {
+    pub(crate) async fn ask(&self, mut req: ConfirmationRequest) -> Answer {
         self.label(&mut req.source);
         if self.planning() {
-            return refuse_while_planning(&self.refused_while_planning, &req);
+            return refuse_while_planning(&self.refused_while_planning, &req).into();
         }
         let mode = *self.mode.lock();
         if self.approves_unasked(mode, &mut req).await {
-            return Approval::Once;
+            return Approval::Once.into();
         }
         match &self.answerer {
             Answerer::TaskRun(run) => self.ask_for_task_run(run, req).await,
@@ -515,7 +543,7 @@ impl ConfirmRouter {
     /// Approve `req` once when it fetches from a host the task allows; otherwise park it. An
     /// answer holds for this prompt alone, except that "always" allows its host for the rest
     /// of the run.
-    async fn ask_for_task_run(&self, run: &TaskRunAsks, req: ConfirmationRequest) -> Approval {
+    async fn ask_for_task_run(&self, run: &TaskRunAsks, req: ConfirmationRequest) -> Answer {
         let host = match &req.unattended {
             Unattended::WebHost(host) => HostName::try_from(host.clone()).ok(),
             _ => None,
@@ -530,20 +558,18 @@ impl ConfirmRouter {
                 host = %host,
                 "approved: the task allows this host"
             );
-            return Approval::Once;
+            return Approval::Once.into();
         }
-        let approval = {
+        let answer = {
             let _parked = ParkedFlag::raise(&self.parked);
             run.parking.park(req).await
         };
-        if approval == Approval::Always
-            && let Some(host) = host
-        {
-            run.allowed_hosts.lock().push(host);
-        }
-        match approval {
-            Approval::Deny => Approval::Deny,
-            Approval::Once | Approval::Always => Approval::Once,
+        match answer {
+            Answer::Choice(Approval::Always) => {
+                run.allowed_hosts.lock().extend(host);
+                Approval::Once.into()
+            }
+            answer => answer,
         }
     }
 
@@ -590,9 +616,9 @@ impl ConfirmRouter {
         }
     }
 
-    async fn ask_client(&self, req: ConfirmationRequest) -> Approval {
+    async fn ask_client(&self, req: ConfirmationRequest) -> Answer {
         let Some((prompt, answer)) = self.register(&req) else {
-            return Approval::Deny;
+            return Approval::Deny.into();
         };
         let event = Event::new(
             self.request_id.clone(),
@@ -611,7 +637,7 @@ impl ConfirmRouter {
                 tool = %req.tool,
                 "command denied: client disconnected before confirm"
             );
-            return Approval::Deny;
+            return Approval::Deny.into();
         }
         self.await_answer(&req, answer).await
     }
@@ -621,7 +647,7 @@ impl ConfirmRouter {
     fn register(
         &self,
         req: &ConfirmationRequest,
-    ) -> Option<(PendingPrompt<'_>, oneshot::Receiver<Approval>)> {
+    ) -> Option<(PendingPrompt<'_>, oneshot::Receiver<Answer>)> {
         let mut pending = self.pending.lock();
         if pending.closed {
             warn!(
@@ -656,17 +682,17 @@ impl ConfirmRouter {
     async fn await_answer(
         &self,
         req: &ConfirmationRequest,
-        answer: oneshot::Receiver<Approval>,
-    ) -> Approval {
+        answer: oneshot::Receiver<Answer>,
+    ) -> Answer {
         match tokio::time::timeout(self.timeout, answer).await {
-            Ok(Ok(approval)) => approval,
+            Ok(Ok(answer)) => answer,
             Ok(Err(_)) => {
                 warn!(
                     target: "assistd::policy",
                     tool = %req.tool,
                     "command denied: confirmation channel dropped"
                 );
-                Approval::Deny
+                Approval::Deny.into()
             }
             Err(_) => {
                 warn!(
@@ -675,25 +701,21 @@ impl ConfirmRouter {
                     timeout_secs = self.timeout.as_secs(),
                     "command denied: no answer before timeout"
                 );
-                Approval::Deny
+                Approval::Deny.into()
             }
         }
     }
 
     /// Deliver a client's answer to the matching pending prompt.
     /// Fails with [`NoPendingConfirm`] when no prompt with that id is in flight.
-    pub fn route_response(
-        &self,
-        confirm_id: &str,
-        approval: Approval,
-    ) -> Result<(), NoPendingConfirm> {
+    pub fn route_response(&self, confirm_id: &str, answer: Answer) -> Result<(), NoPendingConfirm> {
         let tx = self
             .pending
             .lock()
             .prompts
             .remove(confirm_id)
             .ok_or(NoPendingConfirm)?;
-        let _ = tx.send(approval);
+        let _ = tx.send(answer);
         Ok(())
     }
 
@@ -706,7 +728,7 @@ impl ConfirmRouter {
             std::mem::take(&mut pending.prompts)
         };
         for (_, tx) in drained {
-            let _ = tx.send(Approval::Deny);
+            let _ = tx.send(Approval::Deny.into());
         }
     }
 }
@@ -792,26 +814,14 @@ fn refuse_while_planning(refused: &AtomicUsize, req: &ConfirmationRequest) -> Ap
     Approval::Deny
 }
 
-/// Gate that round-trips prompts through the turn's [`ConfirmRouter`],
-/// denying when it has none.
+/// Gate that asks whoever answers the turn's prompts, denying when nobody does.
 #[derive(Debug, Default)]
 pub struct IpcConfirmationGate;
 
 #[async_trait]
 impl ConfirmationGate for IpcConfirmationGate {
     async fn confirm(&self, turn: &TurnContext, req: ConfirmationRequest) -> Approval {
-        match turn.router() {
-            Some(router) => router.ask(req).await,
-            None => {
-                warn!(
-                    target: "assistd::policy",
-                    tool = %req.tool,
-                    pattern = %req.matched_pattern,
-                    "command denied: no IPC client attached to ask"
-                );
-                Approval::Deny
-            }
-        }
+        turn.ask(req).await
     }
 }
 
@@ -890,7 +900,7 @@ mod tests {
                     } else {
                         Approval::Once
                     };
-                    assert_eq!(approval, expected, "{case}");
+                    assert_eq!(approval, expected.into(), "{case}");
                 }
             }
         }
@@ -902,10 +912,10 @@ mod tests {
         let router = ConfirmRouter::new("r".into(), tx, Duration::from_millis(50), None);
         let ask = router.ask(sample_request());
         let (approval, confirm_id) = tokio::join!(ask, recv_confirm_id(&mut rx));
-        assert_eq!(approval, Approval::Deny);
+        assert_eq!(approval, Approval::Deny.into());
         assert_eq!(router.pending.lock().prompts.len(), 0);
         router
-            .route_response(&confirm_id, Approval::Once)
+            .route_response(&confirm_id, Approval::Once.into())
             .expect_err("a timed-out prompt is no longer routable");
     }
 
@@ -921,7 +931,7 @@ mod tests {
         in_flight.await.expect_err("ask was aborted");
         assert_eq!(router.pending.lock().prompts.len(), 0);
         router
-            .route_response(&confirm_id, Approval::Once)
+            .route_response(&confirm_id, Approval::Once.into())
             .expect_err("a cancelled prompt is no longer routable");
     }
 
@@ -934,10 +944,10 @@ mod tests {
         recv_confirm_id(&mut rx).await;
 
         router.close();
-        assert_eq!(in_flight.await.expect("ask task"), Approval::Deny);
+        assert_eq!(in_flight.await.expect("ask task"), Approval::Deny.into());
         assert_eq!(router.pending.lock().prompts.len(), 0);
 
-        assert_eq!(router.ask(sample_request()).await, Approval::Deny);
+        assert_eq!(router.ask(sample_request()).await, Approval::Deny.into());
         rx.try_recv()
             .expect_err("a closed router must not put prompts on the wire");
     }
@@ -955,7 +965,7 @@ mod tests {
             }
         }
 
-        assert_eq!(router.ask(sample_request()).await, Approval::Deny);
+        assert_eq!(router.ask(sample_request()).await, Approval::Deny.into());
         assert_eq!(router.pending.lock().prompts.len(), MAX_PENDING_CONFIRMS);
         rx.try_recv()
             .expect_err("a denied ask must not put a prompt on the wire");
@@ -970,7 +980,7 @@ mod tests {
             tokio::spawn(async move { IpcConfirmationGate.confirm(&turn, sample_request()).await });
         let confirm_id = recv_confirm_id(&mut rx).await;
         router
-            .route_response(&confirm_id, Approval::Always)
+            .route_response(&confirm_id, Approval::Always.into())
             .expect("routed");
         assert_eq!(answer.await.expect("spawned gate"), Approval::Always);
 
@@ -982,6 +992,30 @@ mod tests {
             .expect_err("a gate with no router must not reach the wire");
     }
 
+    #[tokio::test]
+    async fn a_message_denies_and_is_kept_for_the_agent_whose_prompt_it_answered() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60), None);
+        let main = TurnContext::answered_by(Arc::clone(&router));
+        let sub_agent = main.clone().for_agent();
+        let asker = sub_agent.clone();
+        let asked =
+            tokio::spawn(
+                async move { IpcConfirmationGate.confirm(&asker, sample_request()).await },
+            );
+        let confirm_id = recv_confirm_id(&mut rx).await;
+        let answer = Answer::from_wire(true, true, Some(" yes, but in /tmp "));
+        router.route_response(&confirm_id, answer).expect("routed");
+
+        assert_eq!(asked.await.expect("spawned gate"), Approval::Deny);
+        assert!(main.take_decline_messages().is_empty());
+        assert_eq!(sub_agent.take_decline_messages(), ["yes, but in /tmp"]);
+        assert_eq!(
+            Answer::from_wire(true, false, Some("  ")),
+            Approval::Once.into()
+        );
+    }
+
     /// Records every prompt parked on it and answers each with `answer`.
     #[derive(Debug)]
     struct RecordingParking {
@@ -991,9 +1025,9 @@ mod tests {
 
     #[async_trait]
     impl PromptParking for RecordingParking {
-        async fn park(&self, req: ConfirmationRequest) -> Approval {
+        async fn park(&self, req: ConfirmationRequest) -> Answer {
             self.parked.lock().push(req.script);
-            self.answer
+            self.answer.into()
         }
     }
 
@@ -1023,7 +1057,7 @@ mod tests {
                 Arc::clone(&parking) as Arc<dyn PromptParking>,
             );
             for req in [host("Allowed.example"), host("other.example"), edit.clone()] {
-                assert_eq!(router.ask(req).await, Approval::Once, "{mode:?}");
+                assert_eq!(router.ask(req).await, Approval::Once.into(), "{mode:?}");
             }
             let mut expected = vec!["fetch other.example".to_string()];
             if edit_parked {
