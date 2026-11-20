@@ -168,7 +168,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "assistd-chat"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "assistd-config",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-cli"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "assistd-chat",
@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-config"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assistd-utils",
  "dirs",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assistd-config",
  "assistd-documents",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-documents"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assistd-utils",
  "base64 0.23.1",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-embed"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assistd-config",
  "assistd-memory",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-ipc"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assistd-ipc",
  "assistd-utils",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-llm"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assistd-config",
  "assistd-ipc",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-mcp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assistd-config",
  "assistd-ipc",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-memory"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assistd-ipc",
  "async-trait",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-search"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assistd-config",
  "assistd-utils",
@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-tools"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assistd-config",
  "assistd-embed",
@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-utils"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "infer",
  "parking_lot 0.13.0",
@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-voice"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assistd-config",
  "assistd-ipc",
@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-wm"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assistd-config",
  "assistd-utils",
