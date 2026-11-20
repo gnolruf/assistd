@@ -182,6 +182,10 @@ pub enum RequestBody {
         /// With `allow`, permanently allowlist the prompt's `always_allow` programs.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         always: bool,
+        /// Words for the agent whose command this is, shown in the command's result. A
+        /// message that is not blank denies the command whatever `allow` says.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     /// Switch how the rest of the turn's prompts on the same connection are answered: under
     /// `mode`, or with `plan` refused while the turn plans; honored only after a `Query`.

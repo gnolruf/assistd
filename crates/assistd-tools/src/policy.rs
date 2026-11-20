@@ -30,7 +30,7 @@ pub use approvals::{
     APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ApprovalGate, Approvals,
 };
 pub use confirm::{
-    Approval, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate, ConfirmationRequest,
+    Answer, Approval, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate, ConfirmationRequest,
     IpcConfirmationGate, JudgeContext, JudgedClass, MAX_PENDING_CONFIRMS, NoPendingConfirm,
     NoPendingReview, PromptParking, Risk, SpokenAnswer, Summary, Unattended, VoiceGate,
 };

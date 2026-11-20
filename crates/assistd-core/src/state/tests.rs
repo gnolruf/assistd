@@ -272,6 +272,7 @@ async fn presence_requests_emit_expected_events() {
                     confirm_id: "x".into(),
                     allow: true,
                     always: false,
+                    message: None,
                 },
             ),
             vec![error(
@@ -892,7 +893,7 @@ async fn act_runs(plan: PlanMode, answer: Approval, steps: &[(&str, serde_json::
                     router.route_verdict(&review_id, accept).unwrap();
                 }
                 EventBody::ConfirmRequest { confirm_id, .. } => {
-                    router.route_response(&confirm_id, answer).unwrap();
+                    router.route_response(&confirm_id, answer.into()).unwrap();
                 }
                 EventBody::Done => break,
                 _ => {}

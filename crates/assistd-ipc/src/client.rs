@@ -443,6 +443,7 @@ mod tests {
                         confirm_id,
                         allow: true,
                         always: false,
+                        message: None,
                     },
                 ))
                 .await

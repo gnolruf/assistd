@@ -367,8 +367,15 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
-/// The `(allow, always)` of the next answer on the writer.
+/// The `(allow, always)` of the next answer on the writer, which must carry no message.
 async fn confirm_answer(writer_rx: &mut mpsc::Receiver<Request>) -> (bool, bool) {
+    let (allow, always, message) = confirm_response(writer_rx).await;
+    assert_eq!(message, None);
+    (allow, always)
+}
+
+/// The `(allow, always, message)` of the next answer on the writer.
+async fn confirm_response(writer_rx: &mut mpsc::Receiver<Request>) -> (bool, bool, Option<String>) {
     match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
         Ok(Some(Request {
             body:
@@ -376,14 +383,38 @@ async fn confirm_answer(writer_rx: &mut mpsc::Receiver<Request>) -> (bool, bool)
                     confirm_id,
                     allow,
                     always,
+                    message,
                 },
             ..
         })) => {
             assert_eq!(confirm_id, "c1");
-            (allow, always)
+            (allow, always, message)
         }
         other => panic!("expected a ConfirmResponse, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn a_typed_message_denies_the_prompt_and_is_sent_only_from_its_own_row() {
+    let (mut app, _rx, mut writer_rx) = app_with_prompt(Vec::new());
+    for ev in "y 1".chars().map(typed).chain([key(KeyCode::Enter)]) {
+        app.on_key(ev);
+    }
+    assert_eq!(
+        confirm_response(&mut writer_rx).await,
+        (false, false, Some("y 1".to_string()))
+    );
+
+    let (mut app, _rx, mut writer_rx) = app_with_prompt(Vec::new());
+    for ev in [
+        typed('o'),
+        key(KeyCode::Up),
+        key(KeyCode::Up),
+        key(KeyCode::Enter),
+    ] {
+        app.on_key(ev);
+    }
+    assert_eq!(confirm_answer(&mut writer_rx).await, (true, false));
 }
 
 #[tokio::test]

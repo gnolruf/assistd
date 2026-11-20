@@ -6,7 +6,7 @@ use assistd_ipc::{PausedPrompt, Request, RequestBody, TaskRunId};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
-use super::{AnswerTo, App, ConfirmChoice, ConfirmationPrompt, ConfirmationRequest};
+use super::{AnswerTo, App, ConfirmAnswer, ConfirmChoice, ConfirmationPrompt, ConfirmationRequest};
 
 /// Script rows one PgUp/PgDn moves an expanded prompt.
 const PROMPT_SCROLL_STEP: usize = 10;
@@ -46,7 +46,7 @@ impl App {
             .as_ref()
             .is_some_and(|prompt| prompt.answer_to == AnswerTo::Reply)
         {
-            self.send_confirm_response(&confirm_id, ConfirmChoice::Deny);
+            self.send_confirm_response(&confirm_id, ConfirmAnswer::DENY);
             return;
         }
         self.confirmation = Some(ConfirmationPrompt::new(confirm_id, request));
@@ -82,13 +82,20 @@ impl App {
         let Some(prompt) = self.confirmation.take() else {
             return;
         };
+        let answer = prompt.answer(choice);
+        if let ConfirmAnswer::Deny {
+            message: Some(message),
+        } = &answer
+        {
+            self.output.push_info(&format!("Told the agent: {message}"));
+        }
         match prompt.answer_to {
-            AnswerTo::Reply => self.send_confirm_response(&prompt.confirm_id, choice),
-            AnswerTo::TaskRun(run) => self.answer_task_run(run, prompt.confirm_id, choice),
+            AnswerTo::Reply => self.send_confirm_response(&prompt.confirm_id, answer),
+            AnswerTo::TaskRun(run) => self.answer_task_run(run, prompt.confirm_id, answer),
         }
     }
 
-    fn send_confirm_response(&mut self, confirm_id: &str, choice: ConfirmChoice) {
+    fn send_confirm_response(&mut self, confirm_id: &str, answer: ConfirmAnswer) {
         let Some(writer) = self
             .active_reply
             .as_ref()
@@ -100,12 +107,14 @@ impl App {
             );
             return;
         };
+        let (allow, always, message) = answer.into_wire();
         let req = Request::new(
             Uuid::new_v4().to_string(),
             RequestBody::ConfirmResponse {
                 confirm_id: confirm_id.to_string(),
-                allow: choice != ConfirmChoice::Deny,
-                always: choice == ConfirmChoice::Always,
+                allow,
+                always,
+                message,
             },
         );
         self.tasks.spawn(async move {
@@ -115,20 +124,33 @@ impl App {
         });
     }
 
-    /// Arrows move the selection, Enter or a choice's number answers, Esc
-    /// or Ctrl+C denies, and Tab and PgUp/PgDn expand and scroll the script.
+    /// Arrows move the selection, Enter or a choice's number answers, typing writes a
+    /// message for the agent on the last row, Esc or Ctrl+C denies without one, and Tab and
+    /// PgUp/PgDn expand and scroll the script.
     pub(super) fn on_confirmation_key(&mut self, ev: KeyEvent) {
         let Some(prompt) = self.confirmation.as_mut() else {
             return;
         };
         let choices = prompt.choices();
+        let on_message_row = prompt.selected.index() + 1 == choices.len();
         let answer = match ev.code {
             KeyCode::Esc => Some(ConfirmChoice::Deny),
             KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(ConfirmChoice::Deny)
             }
             KeyCode::Enter => choices.get(prompt.selected.index()).copied(),
-            KeyCode::Char(digit) => numbered_choice(choices, digit),
+            KeyCode::Backspace if on_message_row => {
+                prompt.message.pop();
+                None
+            }
+            KeyCode::Char(digit) if prompt.message.is_empty() && digit.is_ascii_digit() => {
+                numbered_choice(choices, digit)
+            }
+            KeyCode::Char(typed) => {
+                prompt.select_message_row();
+                prompt.message.push(typed);
+                None
+            }
             KeyCode::Up => {
                 prompt.selected.previous();
                 None

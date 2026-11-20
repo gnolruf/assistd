@@ -370,6 +370,7 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
                 confirm_id: prompt.confirm_id.clone(),
                 allow: true,
                 always: false,
+                message: None,
             }),
         ),
     )
@@ -421,6 +422,7 @@ async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_aski
                 confirm_id: prompt.confirm_id.clone(),
                 allow: true,
                 always: true,
+                message: None,
             }),
         ),
     )
@@ -508,6 +510,7 @@ async fn a_lagged_subscriber_is_resent_the_queue_with_the_prompt_of_a_paused_run
                 confirm_id: prompt.confirm_id,
                 allow: false,
                 always: false,
+                message: None,
             }),
         ),
     )

@@ -171,6 +171,7 @@ fn session_request_cases() -> Vec<(Request, &'static str)> {
                 confirm_id: "c-abc".into(),
                 allow: true,
                 always: false,
+                message: None,
             }),
             r#"{"id":"r","type":"confirm_response","confirm_id":"c-abc","allow":true}"#,
         ),
@@ -179,8 +180,18 @@ fn session_request_cases() -> Vec<(Request, &'static str)> {
                 confirm_id: "c-abc".into(),
                 allow: true,
                 always: true,
+                message: None,
             }),
             r#"{"id":"r","type":"confirm_response","confirm_id":"c-abc","allow":true,"always":true}"#,
+        ),
+        (
+            request(RequestBody::ConfirmResponse {
+                confirm_id: "c-abc".into(),
+                allow: false,
+                always: false,
+                message: Some("use the other folder".into()),
+            }),
+            r#"{"id":"r","type":"confirm_response","confirm_id":"c-abc","allow":false,"message":"use the other folder"}"#,
         ),
         (
             request(RequestBody::Fork {
@@ -926,6 +937,7 @@ fn task_confirm_request_cases() -> Vec<(Request, &'static str)> {
                 confirm_id: "c".into(),
                 allow: true,
                 always: false,
+                message: None,
             })),
             r#"{"id":"r","type":"task","action":"confirm","run":9,"confirm_id":"c","allow":true}"#,
         ),
@@ -935,8 +947,19 @@ fn task_confirm_request_cases() -> Vec<(Request, &'static str)> {
                 confirm_id: "c".into(),
                 allow: true,
                 always: true,
+                message: None,
             })),
             r#"{"id":"r","type":"task","action":"confirm","run":9,"confirm_id":"c","allow":true,"always":true}"#,
+        ),
+        (
+            request(RequestBody::Task(TaskRequest::Confirm {
+                run: TaskRunId(9),
+                confirm_id: "c".into(),
+                allow: false,
+                always: false,
+                message: Some("skip that host".into()),
+            })),
+            r#"{"id":"r","type":"task","action":"confirm","run":9,"confirm_id":"c","allow":false,"message":"skip that host"}"#,
         ),
         (
             request(RequestBody::Task(TaskRequest::Runs { task: TaskId(4) })),

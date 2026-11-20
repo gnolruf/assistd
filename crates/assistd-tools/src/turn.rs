@@ -5,11 +5,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use tokio::sync::watch;
+use tracing::warn;
 
 use assistd_ipc::RelayEvent;
 
-use crate::policy::ConfirmRouter;
+use crate::policy::{Answer, Approval, ConfirmRouter, ConfirmationRequest};
 
 /// Is shown what a relay running inside a tool call does.
 #[async_trait]
@@ -51,12 +53,18 @@ impl HostReads {
     }
 }
 
+/// What the user said in place of approving an agent's prompts, kept until that agent is
+/// told. Clones share the messages.
+#[derive(Debug, Clone, Default)]
+struct DeclineMessages(Arc<Mutex<Vec<String>>>);
+
 /// The turn a tool call belongs to: who answers its prompts, who watches its relays, the lane
 /// it may have to give up, and what its history has read from this machine. The default belongs
 /// to no turn: prompts are denied, nobody watches, it holds no lane, and its history is new.
 #[derive(Debug, Clone)]
 pub struct TurnContext {
     router: Option<Arc<ConfirmRouter>>,
+    decline_messages: DeclineMessages,
     relay_observer: Option<Arc<dyn RelayObserver>>,
     lane: Option<Arc<dyn YieldableLane>>,
     /// `None` in a quarantine, whose reads are not recorded.
@@ -67,6 +75,7 @@ impl Default for TurnContext {
     fn default() -> Self {
         Self {
             router: None,
+            decline_messages: DeclineMessages::default(),
             relay_observer: None,
             lane: None,
             host_reads: Some(HostReads::default()),
@@ -109,6 +118,40 @@ impl TurnContext {
             host_reads: None,
             ..self.clone()
         }
+    }
+
+    /// The same turn for one agent's loop, which alone is told what the user says when
+    /// declining the prompts its tool calls raise.
+    pub fn for_agent(mut self) -> Self {
+        self.decline_messages = DeclineMessages::default();
+        self
+    }
+
+    /// Ask whoever answers the turn's prompts, keeping a message given instead of an
+    /// approval for [`take_decline_messages`](Self::take_decline_messages). Denied when
+    /// nobody answers.
+    pub async fn ask(&self, req: ConfirmationRequest) -> Approval {
+        let Some(router) = &self.router else {
+            warn!(
+                target: "assistd::policy",
+                tool = %req.tool,
+                pattern = %req.matched_pattern,
+                "command denied: no IPC client attached to ask"
+            );
+            return Approval::Deny;
+        };
+        match router.ask(req).await {
+            Answer::Choice(approval) => approval,
+            Answer::Message(message) => {
+                self.decline_messages.0.lock().push(message);
+                Approval::Deny
+            }
+        }
+    }
+
+    /// What the user said when declining prompts since the last call, oldest first.
+    pub fn take_decline_messages(&self) -> Vec<String> {
+        std::mem::take(&mut self.decline_messages.0.lock())
     }
 
     /// Note that a tool call read this machine into the turn's history.

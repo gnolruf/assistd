@@ -93,7 +93,7 @@ impl Tool for EnterPlanModeTool {
         let start = Instant::now();
         let reason = string_arg(&args, "reason")?;
         let router = router_of(turn)?;
-        let reply = match router.ask(enter_request(reason)).await {
+        let reply = match turn.ask(enter_request(reason)).await {
             Approval::Deny => ENTER_DECLINED,
             Approval::Once | Approval::Always => {
                 router.enter_plan_mode().await;

@@ -108,7 +108,10 @@ from example.com?" Answer after the question ends, within 10 seconds,
 without the wake phrase; a push-to-talk press also answers, and can cut
 the question short. Speech over the question is ignored. Only a clear
 yes approves, and only that one request: "always allow" is given in the
-chat. A no, an unclear answer or silence cancels the request, and after
+chat. An answer that asks for something else, such as "yes, but leave
+the old builds" or "no, use the other folder", cancels the request and
+is passed to the assistant, which may ask again with the change made.
+A no, an unclear answer or silence cancels the request, and after
 a question you did not answer the command's later requests are
 cancelled without being asked. Nothing is asked while speech is muted.
 

@@ -26,6 +26,7 @@ const READING_TIMEOUT: Duration = Duration::from_secs(5);
 
 const CONFIRM: &str = "Confirm";
 const DENY: &str = "Deny";
+const INSTRUCT: &str = "Instruct";
 
 /// What reaches a question being asked from the mic.
 #[derive(Debug)]
@@ -37,7 +38,7 @@ enum Reply {
 }
 
 /// Speaks each prompt of a headless turn as one short question and has the chat model read
-/// the next thing the user says as a yes or a no. Silence, muted or unavailable speech and a
+/// the next thing the user says as a yes, a no or words for the agent. Silence, muted or unavailable speech and a
 /// failed reading all refuse.
 #[derive(Debug)]
 pub(crate) struct VoiceConfirmationGate {
@@ -118,13 +119,15 @@ impl VoiceConfirmationGate {
     }
 
     /// The chat model's reading of `said`, with nothing of the turn's history; anything but a
-    /// clear yes refuses.
-    async fn read_intent(&self, said: &str) -> SpokenAnswer {
-        let reading = self
-            .llm
-            .complete_oneshot(intent_prompt(said), OneShotReply::OneOf(&[CONFIRM, DENY]));
+    /// clear yes refuses, handing `said` to the agent when it asks for something else.
+    async fn read_intent(&self, said: String) -> SpokenAnswer {
+        let reading = self.llm.complete_oneshot(
+            intent_prompt(&said),
+            OneShotReply::OneOf(&[CONFIRM, DENY, INSTRUCT]),
+        );
         match timeout(READING_TIMEOUT, reading).await {
             Ok(Ok(intent)) if intent.trim() == CONFIRM => SpokenAnswer::Confirm,
+            Ok(Ok(intent)) if intent.trim() == INSTRUCT => SpokenAnswer::Message(said),
             Ok(Ok(_)) => SpokenAnswer::Deny,
             Ok(Err(error)) => {
                 warn!(target: "assistd::policy", %error, "spoken answer could not be read");
@@ -159,7 +162,7 @@ impl VoiceGate for VoiceConfirmationGate {
         match timeout(CONFIRM_TIMEOUT, heard).await {
             Ok(Some(said)) => {
                 debug!(target: "assistd::policy", %said, "spoken answer heard");
-                self.read_intent(&said).await
+                self.read_intent(said).await
             }
             Ok(None) | Err(_) => SpokenAnswer::Unanswered,
         }
@@ -230,8 +233,10 @@ fn spoken_question(summary: &Summary) -> String {
 fn intent_prompt(said: &str) -> String {
     format!(
         "Infer the intent of the following phrase from the user. It can be classified into one \
-         of the following options:\n{CONFIRM}\n{DENY}\n\nIf it is at all unclear what the intent \
-         is, you should assume {DENY} by default\n\nThe phrase: {said}"
+         of the following options:\n{CONFIRM}\n{DENY}\n{INSTRUCT}\n\n{INSTRUCT} is for a phrase \
+         that asks for something different or adds a condition, even when it begins with a yes or \
+         a no. If it is at all unclear what the intent is, you should assume {DENY} by \
+         default\n\nThe phrase: {said}"
     )
 }
 

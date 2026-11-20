@@ -1038,7 +1038,7 @@ mod tests {
             };
             let (router, mut rx) = router_in(PermissionMode::Auto);
             let request = confirmation_request(&path, b"x", &confirmation, unattended);
-            assert_eq!(router.ask(request).await, Approval::Deny, "{raw:?}");
+            assert_eq!(router.ask(request).await, Approval::Deny.into(), "{raw:?}");
             assert!(rx.try_recv().is_ok(), "{raw:?} was not put to the user");
         }
     }

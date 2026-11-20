@@ -153,6 +153,32 @@ pub(super) enum ConfirmChoice {
     /// Run, and stop asking for the request's `always_allow` names.
     Always,
     Deny,
+    /// Deny, and send the agent the typed message; with none typed, only deny.
+    Tell,
+}
+
+/// A confirmation prompt's answer as sent to the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ConfirmAnswer {
+    Once,
+    Always,
+    /// Deny, with words for the agent whose command it was.
+    Deny {
+        message: Option<String>,
+    },
+}
+
+impl ConfirmAnswer {
+    pub(super) const DENY: Self = Self::Deny { message: None };
+
+    /// The `allow`, `always` and `message` of the request that carries the answer.
+    pub(super) fn into_wire(self) -> (bool, bool, Option<String>) {
+        match self {
+            Self::Once => (true, false, None),
+            Self::Always => (true, true, None),
+            Self::Deny { message } => (false, false, message),
+        }
+    }
 }
 
 /// What a confirmation prompt asks the user to allow, as the daemon sent it.
@@ -193,6 +219,8 @@ pub(super) struct ConfirmationPrompt {
     pub expanded: bool,
     /// First script row shown while expanded; each frame clamps it.
     pub scroll: usize,
+    /// What to tell the agent, typed on the [`ConfirmChoice::Tell`] row.
+    pub message: String,
 }
 
 impl ConfirmationPrompt {
@@ -221,21 +249,45 @@ impl ConfirmationPrompt {
             selected: Selection::default(),
             expanded: false,
             scroll: 0,
+            message: String::new(),
         };
-        prompt.selected = Selection::at(prompt.choices().len() - 1);
+        prompt.selected = Selection::at(prompt.choices().len() - 2);
         prompt
+    }
+
+    fn select_message_row(&mut self) {
+        self.selected = Selection::at(self.choices().len() - 1);
+    }
+
+    /// The answer `choice` gives, with the message typed when it tells the agent.
+    fn answer(&self, choice: ConfirmChoice) -> ConfirmAnswer {
+        match choice {
+            ConfirmChoice::Once => ConfirmAnswer::Once,
+            ConfirmChoice::Always => ConfirmAnswer::Always,
+            ConfirmChoice::Deny => ConfirmAnswer::DENY,
+            ConfirmChoice::Tell => ConfirmAnswer::Deny {
+                message: Some(self.message.trim())
+                    .filter(|message| !message.is_empty())
+                    .map(str::to_string),
+            },
+        }
     }
 
     /// The answers on offer, in display order; "always" only when the
     /// request names something to stop asking about.
     pub(super) fn choices(&self) -> &'static [ConfirmChoice] {
         if self.request.always_allow.is_empty() {
-            &[ConfirmChoice::Once, ConfirmChoice::Deny]
+            &[
+                ConfirmChoice::Once,
+                ConfirmChoice::Deny,
+                ConfirmChoice::Tell,
+            ]
         } else {
             &[
                 ConfirmChoice::Once,
                 ConfirmChoice::Always,
                 ConfirmChoice::Deny,
+                ConfirmChoice::Tell,
             ]
         }
     }
