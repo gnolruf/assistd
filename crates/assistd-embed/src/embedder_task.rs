@@ -244,7 +244,10 @@ mod tests {
             self.embed_documents(&[query])
                 .await?
                 .pop()
-                .ok_or(EmbedError::Disabled)
+                .ok_or(EmbedError::CountMismatch {
+                    got: 0,
+                    expected: 1,
+                })
         }
         async fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
             self.calls

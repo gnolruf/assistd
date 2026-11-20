@@ -47,7 +47,6 @@ pub enum EventKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
-    System,
     User,
     Assistant,
     Tool,
@@ -57,7 +56,6 @@ impl Role {
     /// The wire spelling.
     pub fn as_str(self) -> &'static str {
         match self {
-            Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
             Role::Tool => "tool",

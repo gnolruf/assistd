@@ -49,8 +49,6 @@ pub struct SearchResults {
     /// Instant answers, when an engine or plugin gave one.
     #[serde(default, deserialize_with = "answer_texts")]
     pub answers: Vec<String>,
-    #[serde(default)]
-    pub suggestions: Vec<String>,
     /// `(engine, reason)` for each engine that failed to answer.
     #[serde(default)]
     pub unresponsive_engines: Vec<(String, String)>,
@@ -63,11 +61,6 @@ pub struct SearchHit {
     pub title: String,
     #[serde(default, deserialize_with = "collapsed_whitespace")]
     pub content: String,
-    #[serde(default)]
-    pub engines: Vec<String>,
-    /// Publication time as the engine reported it, when it did.
-    #[serde(default, rename = "publishedDate")]
-    pub published: Option<String>,
 }
 
 /// SearXNG releases differ on whether an answer is a bare string or an object.
@@ -183,8 +176,6 @@ mod tests {
                     2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824 . \
                     A single changed bit, capital letter or line ending produces a ..."
                     .into(),
-                engines: vec!["google cse".into()],
-                published: None,
             }
         );
         assert_eq!(

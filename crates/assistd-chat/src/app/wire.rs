@@ -486,7 +486,6 @@ impl App {
                         .push_replayed_relay(label, content, exit_code, duration_ms, relay);
                 }
             }
-            Role::System => self.output.push_info(&content),
         }
     }
 

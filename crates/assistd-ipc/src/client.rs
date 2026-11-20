@@ -241,12 +241,6 @@ impl DialogConnection {
     pub async fn send(&mut self, req: Request) -> Result<()> {
         write_frame(&mut self.write, &req).await
     }
-
-    /// Close the write half; events stay readable until the terminal one.
-    pub async fn close_write(&mut self) -> Result<()> {
-        self.write.shutdown().await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
