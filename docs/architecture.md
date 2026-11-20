@@ -60,11 +60,11 @@ flowchart TB
 | `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | every other `assistd-*` crate                                                    |
 | `assistd-chat`   | The `assistd chat` terminal window and the `assistd settings` panel, a client that only reads and writes the socket. | `config`, `ipc`, `utils`                                                         |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
-| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, document index passes and the watches between them, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
+| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, document index passes and the watches between them, page transcription while drowsy, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-documents` | Document text extraction (text, HTML, PDF, office files, e-books) and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
-| `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `utils`                                                         |
+| `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec and presets file + control plane + `PageTranscriber` for the OCR model. | `config`, `ipc`, `utils`                                                         |
 | `assistd-mcp`    | Stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools.  | `config`, `ipc`, `tools`, `utils`                                                |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `SemanticStore`, `TaskStore`.   | `ipc`                                                                            |
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
@@ -154,6 +154,29 @@ its cache holds `model.name`; if not, it has the router download it
 `Downloading` with them. `model.ready_timeout_secs` bounds how long the
 download may go without new bytes, not the download. The idle timers and GPU monitor
 under `[sleep]` move it down, and a query wakes it.
+
+The router gives every model it loads the flags on its own command line, and
+a flag given there overrides a preset. So `model.context_length` is not passed
+as `-c`: each launch writes a presets file (`--models-preset`,
+`~/.cache/assistd/model-presets.ini`) whose `[*]` section sets it for every
+model, and whose `[assistd-ocr]` section, present while `documents.ocr.model`
+is set, serves that model under the name `assistd-ocr` with a context of its
+own: one page image of up to 4,100 tokens, its prompt, and a transcription of
+up to 4,096. The section is not named after the model itself, because the
+router refuses to download a model a preset already defines.
+`model.gpu_layers` and `model.custom_args` stay on the command line and reach
+both models.
+
+While `Drowsy`, the presence manager can lend the idle server to a second
+model (`lend_while_drowsy`), which is how pages are transcribed (see
+[page transcription](#page-transcription-assistd-core)). The loan passes the
+check a wake does, that the main model would fit beside the configured
+headroom, waits for the main model's process to be gone, downloads the
+borrowed model if the router lacks it, loads it, and unloads it when the work
+is done. Presence stays `Drowsy` throughout. A wake or a sleep takes the
+transition lock, cancels the work, and waits until the router lists the
+borrowed model as unloaded before it loads the main model or stops the server,
+so the two are never loaded together.
 
 If the child crashes mid-stream (CUDA OOM, OOM-killer, segfault), the
 supervisor restarts it with exponential backoff and the in-flight
@@ -825,7 +848,9 @@ the root with the `ignore` crate, asks the store which of the files it found
 have a changed stamp, sends those to the extraction worker one at a time,
 stores each file's pages, wakes the embedding worker, and finishes by removing
 the root's documents it did not see. A file none of whose pages has text is
-skipped as having no text layer instead of stored empty. Passes run over every root in turn, one at a
+skipped as having no text layer instead of stored empty, unless it is a PDF and
+`documents.ocr.model` is set. Every PDF page without text is recorded as waiting
+for transcription, model or not. Passes run over every root in turn, one at a
 time: once the embedder is ready after daemon start, which is also when a
 changed `[documents]` takes effect, and again whenever `DocumentIndex` is
 asked for one. A stored root that `documents.roots` no longer lists is
@@ -880,13 +905,55 @@ indexed, unchanged, removed, and skipped by reason.
 the store holds of each root: its documents, their chunks, and the chunks
 still waiting for a vector. It also says whether each root can be listed now,
 why its changes wait for a pass when it is not watched, whether the
-extraction worker and the embedder run, and how many chunks the index holds
-of its ceiling. `assistd documents reindex` (`DocumentsReindex`)
+extraction worker and the embedder run, how many chunks the index holds
+of its ceiling, and where page transcription stands: how many pages wait for
+the OCR model and how many it failed on, whether a run is under way, that
+none ever starts while `documents.ocr.model` is unset or
+`sleep.idle_to_drowsy_mins` is `0`, and why the last run stopped early. `assistd documents reindex` (`DocumentsReindex`)
 asks for a round of passes and streams the progress of the round that answers
 it, which is the next one when a round is already under way; it is refused
 when no worker will run, and is not held to the dispatch timeout.
 `assistd documents search <query>` (`DocumentsSearch`) ranks the documents as
 `docs search` does, without a turn.
+
+### Page transcription (`assistd-core`)
+
+A scanned PDF page has no text, only an image. With `documents.ocr.model`
+set, an OCR model reads those pages, and only while the daemon is `Drowsy`:
+the main model's weights are unloaded then and llama-server is still up, so
+transcription never takes VRAM or time from a turn. With
+`sleep.idle_to_drowsy_mins = 0` the daemon never drowses on its own, so
+nothing is transcribed unless it is made drowsy by hand.
+
+Each time presence reaches `Drowsy` with a page waiting, and again when a pass
+stores a PDF meanwhile, a run borrows the server for the OCR model and takes
+the waiting pages in document and page order. The extraction worker renders
+the page; a blank one is recorded as read with no text and never sent, since
+the recommended model answers a blank image with a sentence about it. The
+image goes to the model in one request (`PageTranscriber`): the image, then
+`documents.ocr.prompt`, with no history, no tools, thinking off, greedy
+sampling, at most 4,096 output tokens, and `autoload=false` so a request that
+lost a race with the unload cannot load the model again. A reply that reaches
+the token limit, or that ends in one unit repeated eight times or more over at
+least 64 characters, is not the page's text: the page is recorded as failed
+and nothing of the reply is kept. A repeated unit with no letter or digit,
+such as a ruled line or empty table cells, does not count.
+
+A page's text is stored as soon as it is read, so a wake in the middle of a
+document loses at most the page in flight, which stays waiting. When a
+document's last waiting page is done its pages are cut into chunks again, the
+chunks whose text did not change keeping their vectors, and the new ones wake
+the embedding worker. Until then the transcribed pages can be read but are
+not found by a search. A page is failed, and the run goes on, when it cannot
+be rendered, when the worker exits over it twice, or when its request fails
+with the model still loaded. A failed page is tried again when its file
+changes or the daemon restarts, which is also when a changed
+`[documents.ocr]` takes effect. A run stops with its page still waiting when
+the model is gone, the model refuses three requests in a row (as one without
+a vision projector refuses every page), the worker is unavailable, the store
+fails, or the loan is refused (no room on the GPU, a download or load that
+fails); the status keeps the reason, and the next run starts after five
+minutes or when the daemon next drowses.
 
 The daemon broadcasts a `DocumentActivity` whenever the root being walked or
 the number of document chunks left to embed changes. It counts those chunks

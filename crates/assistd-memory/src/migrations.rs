@@ -180,6 +180,20 @@ CREATE TABLE document_pages (
     PRIMARY KEY (document_id, page)
 ) STRICT;
 
+-- A page that had no text when its file was read and is an image a model can read.
+-- `state` is 0 waiting for the OCR model, 1 read, its page then holding what the model
+-- found, 2 failed. Rows last until the file is indexed again.
+CREATE TABLE page_transcriptions (
+    document_id INTEGER NOT NULL,
+    page        INTEGER NOT NULL,
+    state       INTEGER NOT NULL DEFAULT 0 CHECK (state BETWEEN 0 AND 2),
+    PRIMARY KEY (document_id, page),
+    FOREIGN KEY (document_id, page)
+        REFERENCES document_pages(document_id, page) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+CREATE INDEX idx_page_transcriptions_waiting ON page_transcriptions(document_id, page)
+    WHERE state = 0;
+
 -- A byte range into the content of the one message or document page that owns it.
 CREATE TABLE chunks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -22,7 +22,9 @@ window-manager bindings), and integrates with the running compositor for context
   pages as readable text and, with a local SearXNG installed, searches
   the web ([web search](docs/web-search.md)). With folders indexed
   (`[documents]`), `docs` searches them by meaning and by keyword and
-  reads what it finds: text, HTML, PDFs, office files and e-books.
+  reads what it finds: text, HTML, PDFs, office files and e-books. Scanned
+  PDF pages are read by an optional OCR model (`[documents.ocr]`) while
+  the daemon is drowsy.
   Alongside `run`, `remember` saves and looks up facts, and `reminisce`
   searches transcripts from earlier sessions.
 - **Voice in/out.** Push-to-talk and hands-free

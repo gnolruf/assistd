@@ -8,8 +8,12 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use parking_lot::Mutex as StdMutex;
 use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, oneshot, watch};
+use tokio::sync::{
+    Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, OwnedRwLockReadGuard, RwLock, oneshot,
+    watch,
+};
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{Instrument, debug, info, warn};
 
@@ -22,7 +26,7 @@ use assistd_ipc::{
 };
 use assistd_llm::{
     HealthSnapshot, HealthWaitError, LlamaServerControl, LlamaServerError, LlamaServerSpec,
-    LlmHealthProbe, ReadyState, SlotDir,
+    LlmHealthProbe, ModelPresets, ReadyState, SlotDir,
 };
 use assistd_utils::child_server::{ApiKey, ChildServer, ChildServerError};
 use assistd_utils::time::saturating_millis;
@@ -100,6 +104,12 @@ pub enum PresenceError {
 
     #[error(transparent)]
     NoRoom(#[from] VramShortfall),
+
+    #[error("the daemon is not Drowsy with its llama-server serving")]
+    NotDrowsy,
+
+    #[error("another model already borrows the drowsy llama-server")]
+    AlreadyLent,
 }
 
 /// Loading the model now would leave less free VRAM than the configured headroom.
@@ -108,6 +118,16 @@ pub enum PresenceError {
 pub struct VramShortfall {
     pub free_mb: u64,
     pub needed_mb: u64,
+}
+
+/// A model loaded on the llama-server in the main model's place while the daemon
+/// is `Drowsy`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BorrowedModel {
+    /// The Hugging Face name the server downloads it by.
+    pub source: String,
+    /// The name the server loads and serves it under.
+    pub served_as: String,
 }
 
 /// Says, before a wake loads the model, whether the GPU has room for it.
@@ -130,6 +150,7 @@ pub struct PresenceManager {
     timeouts: TimeoutsConfig,
     api_key: ApiKey,
     slot_dir: SlotDir,
+    presets: ModelPresets,
     control: LlamaServerControl,
     /// The shutdown forwarder and detached wakes, joined by [`Self::shutdown`].
     tasks: TaskTracker,
@@ -149,6 +170,10 @@ pub struct PresenceManager {
     wake_room: OnceLock<Arc<dyn WakeRoom>>,
     /// Whether the daemon sleeps because another process needs the GPU.
     gpu_hold: watch::Sender<bool>,
+    /// Held while a [`BorrowedModel`] is on the drowsy server; `wake` and `sleep`
+    /// cancel `borrower` and take this before they load or stop anything.
+    loan: AsyncMutex<()>,
+    borrower: StdMutex<CancellationToken>,
 }
 
 impl PresenceManager {
@@ -159,9 +184,11 @@ impl PresenceManager {
         timeouts: TimeoutsConfig,
         api_key: ApiKey,
         slot_dir: SlotDir,
+        presets: ModelPresets,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>, PresenceError> {
-        let manager = Self::new_sleeping(model, timeouts, api_key, slot_dir, daemon_shutdown)?;
+        let manager =
+            Self::new_sleeping(model, timeouts, api_key, slot_dir, presets, daemon_shutdown)?;
         manager
             .wake()
             .await
@@ -169,15 +196,15 @@ impl PresenceManager {
         Ok(manager)
     }
 
-    /// Create a manager in `Sleeping` with no llama-server started. Every
-    /// server it starts accepts only `api_key` and saves slots only into
-    /// `slot_dir`. Flipping `daemon_shutdown`
-    /// cancels any wake in flight.
+    /// Create a manager in `Sleeping` with no llama-server started. Every server it starts
+    /// accepts only `api_key`, saves slots only into `slot_dir` and reads its models'
+    /// presets from `presets`. Flipping `daemon_shutdown` cancels any wake in flight.
     pub fn new_sleeping(
         model: ModelConfig,
         timeouts: TimeoutsConfig,
         api_key: ApiKey,
         slot_dir: SlotDir,
+        presets: ModelPresets,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>, PresenceError> {
         let control = LlamaServerControl::new(model.listen_addr(), Some(&api_key), None)
@@ -199,6 +226,7 @@ impl PresenceManager {
             timeouts,
             api_key,
             slot_dir,
+            presets,
             control,
             tasks,
             current_inner_shutdown,
@@ -209,6 +237,8 @@ impl PresenceManager {
             wake_started: StdMutex::new(None),
             wake_room: OnceLock::new(),
             gpu_hold: watch::channel(false).0,
+            loan: AsyncMutex::new(()),
+            borrower: StdMutex::new(CancellationToken::new()),
         }))
     }
 
@@ -431,6 +461,7 @@ impl PresenceManager {
             return Ok(());
         }
 
+        self.reclaim_drowsy_server().await;
         let _inflight = self.inflight.write().await;
 
         let started = Instant::now();
@@ -557,6 +588,7 @@ impl PresenceManager {
         if prior == PresenceTarget::Active {
             return Ok(());
         }
+        self.reclaim_drowsy_server().await;
         self.ensure_room_to_wake()?;
 
         let _wake_marker = WakeMarker::new(self);
@@ -584,13 +616,135 @@ impl PresenceManager {
     }
 
     fn ensure_room_to_wake(&self) -> Result<(), PresenceError> {
-        let Some(room) = self.wake_room.get() else {
-            return Ok(());
-        };
-        room.check(self.llama_pid()).map_err(|shortfall| {
+        self.room_to_load().map_err(|shortfall| {
             warn!(target: "assistd::presence", "wake refused: {shortfall}");
             PresenceError::NoRoom(shortfall)
         })
+    }
+
+    fn room_to_load(&self) -> Result<(), VramShortfall> {
+        self.wake_room
+            .get()
+            .map_or(Ok(()), |room| room.check(self.llama_pid()))
+    }
+
+    /// While `Drowsy`, load `model` on the idle server, run `work` and unload `model`.
+    /// A `wake` or `sleep` cuts `work` short, `Ok(None)` here, and waits for the unload.
+    /// Errors when not `Drowsy`, without room to wake, or when `model` does not load.
+    pub async fn lend_while_drowsy<T>(
+        &self,
+        model: &BorrowedModel,
+        work: impl Future<Output = T>,
+    ) -> Result<Option<T>, PresenceError> {
+        let (_loan, reclaimed, ready_rx) = self.begin_loan().await?;
+        let outcome = tokio::select! {
+            biased;
+            () = reclaimed.cancelled() => Ok(None),
+            outcome = self.work_with_borrowed(model, ready_rx, work) => outcome.map(Some),
+        };
+        self.unload_borrowed(model).await;
+        outcome
+    }
+
+    /// Take the loan of the drowsy server, with what cuts it short and the
+    /// server's readiness feed.
+    async fn begin_loan(
+        &self,
+    ) -> Result<
+        (
+            AsyncMutexGuard<'_, ()>,
+            CancellationToken,
+            watch::Receiver<ReadyState>,
+        ),
+        PresenceError,
+    > {
+        let _transition = self.transition.lock().await;
+        let ready_rx = self
+            .lifecycle
+            .lock()
+            .drowsy_server()
+            .filter(|server| server.is_serving())
+            .map(ChildServer::subscribe_ready)
+            .ok_or(PresenceError::NotDrowsy)?;
+        self.room_to_load()?;
+        let loan = self
+            .loan
+            .try_lock()
+            .map_err(|_| PresenceError::AlreadyLent)?;
+        let reclaimed = CancellationToken::new();
+        *self.borrower.lock() = reclaimed.clone();
+        Ok((loan, reclaimed, ready_rx))
+    }
+
+    async fn work_with_borrowed<T>(
+        &self,
+        model: &BorrowedModel,
+        mut ready_rx: watch::Receiver<ReadyState>,
+        work: impl Future<Output = T>,
+    ) -> Result<T, PresenceError> {
+        self.load_borrowed(model, ready_rx.clone()).await?;
+        tokio::select! {
+            done = work => Ok(done),
+            () = wait_until_not_ready(&mut ready_rx) => Err(PresenceError::LeftReady {
+                model: model.served_as.clone(),
+            }),
+        }
+    }
+
+    /// Download `model` if the server lacks it, reporting no `Downloading`, and load
+    /// it once the main model's process is gone.
+    async fn load_borrowed(
+        &self,
+        model: &BorrowedModel,
+        mut ready_rx: watch::Receiver<ReadyState>,
+    ) -> Result<(), PresenceError> {
+        self.await_main_model_unloaded().await?;
+        let stall = Duration::from_secs(self.model.ready_timeout_secs.get());
+        tokio::select! {
+            cached = self.control.ensure_cached(&model.source, stall, |_| {}) => {
+                cached.map_err(PresenceError::Download)?;
+            }
+            () = wait_until_not_ready(&mut ready_rx) => {
+                return Err(PresenceError::LeftReady {
+                    model: model.source.clone(),
+                });
+            }
+        }
+        self.load_and_await(&model.served_as, ready_rx).await
+    }
+
+    async fn await_main_model_unloaded(&self) -> Result<(), PresenceError> {
+        let model = self.model.name.as_str();
+        let deadline = Duration::from_secs(self.timeouts.presence_drowse_secs);
+        self.control
+            .wait_for_unloaded(model, deadline, LOAD_POLL_INTERVAL)
+            .await
+            .map_err(|source| PresenceError::Unload {
+                model: model.to_string(),
+                source,
+            })
+    }
+
+    /// Unload `model` and wait until its process is gone, so its VRAM is free
+    /// before anything else loads.
+    async fn unload_borrowed(&self, model: &BorrowedModel) {
+        let name = model.served_as.as_str();
+        let deadline = Duration::from_secs(self.timeouts.presence_drowse_secs);
+        if let Err(error) = self.control.unload_model(name).await {
+            debug!(target: "assistd::presence", "llama-server did not unload {name}: {error}");
+        }
+        let gone = self
+            .control
+            .wait_for_unloaded(name, deadline, LOAD_POLL_INTERVAL);
+        if let Err(error) = gone.await {
+            warn!(target: "assistd::presence", "{name} may still be loaded: {error}");
+        }
+    }
+
+    /// Cut short whatever borrows the drowsy server and wait for its model to unload.
+    async fn reclaim_drowsy_server(&self) {
+        self.borrower.lock().cancel();
+        drop(self.loan.lock().await);
     }
 
     async fn reload_model(
@@ -611,6 +765,7 @@ impl PresenceManager {
             self.model.clone(),
             self.api_key.clone(),
             self.slot_dir.clone(),
+            self.presets.clone(),
         );
         let service = match ChildServer::start(spec, inner_rx).await {
             Ok(service) => service,
@@ -663,15 +818,23 @@ impl PresenceManager {
         ready_rx: watch::Receiver<ReadyState>,
     ) -> Result<(), PresenceError> {
         self.ensure_model_cached(ready_rx.clone()).await?;
+        self.load_and_await(self.model.name.as_str(), ready_rx)
+            .await
+    }
+
+    async fn load_and_await(
+        &self,
+        model: &str,
+        ready_rx: watch::Receiver<ReadyState>,
+    ) -> Result<(), PresenceError> {
         self.control
-            .load_model(self.model.name.as_str())
+            .load_model(model)
             .await
             .map_err(|source| PresenceError::Load {
-                model: self.model.name.to_string(),
+                model: model.to_string(),
                 source,
             })?;
-
-        self.await_model_loaded(ready_rx).await
+        self.await_model_loaded(model, ready_rx).await
     }
 
     /// Download the model if llama-server lacks it, reporting `Downloading`
@@ -719,23 +882,21 @@ impl PresenceManager {
 
     async fn await_model_loaded(
         &self,
+        model: &str,
         mut ready_rx: watch::Receiver<ReadyState>,
     ) -> Result<(), PresenceError> {
         let secs = self.model.ready_timeout_secs.get();
         let backstop = Duration::from_secs(secs);
         tokio::select! {
-            res = self
-                .control
-                .wait_for_loaded(self.model.name.as_str(), backstop, LOAD_POLL_INTERVAL) =>
-            {
+            res = self.control.wait_for_loaded(model, backstop, LOAD_POLL_INTERVAL) => {
                 res.map_err(|source| PresenceError::LoadWait {
-                    model: self.model.name.to_string(),
+                    model: model.to_string(),
                     secs,
                     source,
                 })
             }
             () = wait_until_not_ready(&mut ready_rx) => Err(PresenceError::LeftReady {
-                model: self.model.name.to_string(),
+                model: model.to_string(),
             }),
         }
     }
@@ -956,6 +1117,7 @@ pub(crate) mod tests {
             timeouts: TimeoutsConfig::default(),
             api_key,
             slot_dir: SlotDir::new("/does/not/exist/slots".into()),
+            presets: ModelPresets::new("/does/not/exist/presets.ini".into(), None),
             control,
             tasks: TaskTracker::new(),
             current_inner_shutdown: Arc::new(StdMutex::new(None)),
@@ -966,6 +1128,8 @@ pub(crate) mod tests {
             wake_started: StdMutex::new(None),
             wake_room: OnceLock::new(),
             gpu_hold: watch::channel(false).0,
+            loan: AsyncMutex::new(()),
+            borrower: StdMutex::new(CancellationToken::new()),
         })
     }
 
@@ -1042,6 +1206,31 @@ pub(crate) mod tests {
             .expect("sleep task panicked")
             .expect("sleep returned Err");
         assert_eq!(m.state(), PresenceState::Sleeping);
+    }
+
+    #[tokio::test]
+    async fn a_wake_cancels_the_borrower_and_waits_for_its_model_to_be_unloaded() {
+        let m = stub_presence(PresenceTarget::Drowsy);
+        let loan = m.loan.lock().await;
+        let borrower = m.borrower.lock().clone();
+        let waking = tokio::spawn({
+            let m = Arc::clone(&m);
+            async move { m.wake().await }
+        });
+
+        timeout(Duration::from_secs(2), borrower.cancelled())
+            .await
+            .expect("the wake left the borrower running");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waking.is_finished(), "the wake went on during the loan");
+        assert_eq!(m.state(), PresenceState::Drowsy);
+
+        drop(loan);
+        timeout(Duration::from_secs(2), waking)
+            .await
+            .expect("the wake never went on after the loan")
+            .expect("wake task panicked")
+            .expect_err("the stub llama-server is not serving");
     }
 
     #[tokio::test]

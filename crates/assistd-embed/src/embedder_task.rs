@@ -218,8 +218,9 @@ mod tests {
 
     use assistd_memory::{
         AdjacentChunks, ChunkId, ChunkLocator, DocumentHit, DocumentText, Embedding, EmbeddingHit,
-        EmbeddingSpace, FileStamp, IndexPass, IndexRootCounts, MemoryHit, MemoryId,
-        NoSemanticStore, Result as MemoryResult, SessionScope, UnindexedRows,
+        EmbeddingSpace, EmptyPages, FileStamp, IndexPass, IndexRootCounts, MemoryHit, MemoryId,
+        NoSemanticStore, PageReading, Result as MemoryResult, SessionScope, TranscriptionCounts,
+        UnindexedRows, WaitingPage,
     };
 
     /// The id of the first document chunk a [`Harness`] adds, above every message chunk's.
@@ -390,10 +391,27 @@ mod tests {
             path: PathBuf,
             stamp: FileStamp,
             pages: Vec<String>,
+            empty_pages: EmptyPages,
         ) -> MemoryResult<Vec<ChunkId>> {
             NoSemanticStore
-                .index_document(pass, path, stamp, pages)
+                .index_document(pass, path, stamp, pages, empty_pages)
                 .await
+        }
+        async fn next_waiting_page(&self) -> MemoryResult<Option<WaitingPage>> {
+            NoSemanticStore.next_waiting_page().await
+        }
+        async fn store_page_reading(
+            &self,
+            page: WaitingPage,
+            reading: PageReading,
+        ) -> MemoryResult<Vec<ChunkId>> {
+            NoSemanticStore.store_page_reading(page, reading).await
+        }
+        async fn count_transcriptions(&self) -> MemoryResult<TranscriptionCounts> {
+            NoSemanticStore.count_transcriptions().await
+        }
+        async fn retry_failed_transcriptions(&self) -> MemoryResult<u64> {
+            NoSemanticStore.retry_failed_transcriptions().await
         }
         async fn finish_index_pass(&self, pass: IndexPass) -> MemoryResult<u64> {
             NoSemanticStore.finish_index_pass(pass).await

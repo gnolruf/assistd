@@ -5,11 +5,13 @@ pub mod capabilities;
 pub mod control;
 mod download;
 pub mod error;
+pub mod presets;
 pub mod slots;
 pub mod spec;
 
 pub use capabilities::{VisionState, probe_capabilities_routed};
 pub use control::LlamaServerControl;
 pub use error::LlamaServerError;
+pub use presets::{ModelPresets, OCR_MODEL_ALIAS};
 pub use slots::{SlotAssignment, SlotDir, SlotHolder, SlotStash};
 pub use spec::LlamaServerSpec;

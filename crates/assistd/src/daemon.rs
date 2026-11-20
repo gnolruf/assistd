@@ -19,7 +19,8 @@ use assistd_core::{
     Subsystems, VisionRevalidator, VramLedger, gpu_monitor, idle_monitor,
 };
 use assistd_llm::{
-    HistoryReplay, LlamaClient, LlamaServerControl, LlmBackend, LlmHealthProbe, SlotDir, SlotStash,
+    HistoryReplay, LlamaClient, LlamaServerControl, LlmBackend, LlmHealthProbe, ModelPresets,
+    SlotDir, SlotStash,
 };
 use assistd_utils::child_server::ApiKey;
 use assistd_voice::VoiceManager;
@@ -128,6 +129,7 @@ async fn start(
         config.timeouts.clone(),
         api_key.clone(),
         slot_dir.clone(),
+        model_presets(&config)?,
         stages.llm.subscribe(),
     )?;
     let health_probe: Arc<dyn LlmHealthProbe> =
@@ -167,7 +169,8 @@ async fn start(
         },
     )?;
 
-    let (documents, documents_startup) = documents_init::prepare(&config, tools.sandbox.as_ref());
+    let (documents, documents_startup) =
+        documents_init::prepare(&config, tools.sandbox.as_ref(), &api_key, &health_probe)?;
 
     replay_history(llm.as_ref(), std::mem::take(&mut memory.resumed_history)).await;
 
@@ -320,6 +323,14 @@ fn prepare_slot_dir() -> Result<SlotDir> {
         )
     })?;
     Ok(slot_dir)
+}
+
+/// The model server's presets file under the user cache dir, defining the OCR model
+/// when `documents.ocr.model` names one.
+fn model_presets(config: &Config) -> Result<ModelPresets> {
+    let cache_dir = dirs::cache_dir().context("no user cache directory for model presets")?;
+    let path = cache_dir.join("assistd").join("model-presets.ini");
+    Ok(ModelPresets::new(path, config.documents.ocr_model()))
 }
 
 /// The main backend, what the `relay` tool runs sub-agents with beside it on the same

@@ -58,6 +58,7 @@ async fn start_service(fake: &FakeLlama, port: u16) -> (ChildServer, watch::Send
             model_spec(fake, port),
             fake.api_key().clone(),
             fake.slot_dir(),
+            fake.presets(),
         ),
         shutdown_rx,
     )
@@ -147,6 +148,7 @@ async fn health_from_a_squatter_on_the_port_is_not_ready() {
             model_spec(&fake, port),
             fake.api_key().clone(),
             fake.slot_dir(),
+            fake.presets(),
         ),
         shutdown_rx,
     )

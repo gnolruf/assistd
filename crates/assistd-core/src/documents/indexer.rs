@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 
 use super::DocumentsUnavailable;
 use super::pass::{IndexDeps, PassCounts, PassEnd, RootPass, SkipCause, index_root};
+use super::transcribe::PageTranscription;
 use super::walk::{IndexRoot, WalkScope};
 use super::watch::RootWatches;
 
@@ -45,14 +46,15 @@ impl IndexProgress {
 }
 
 /// The document index as the rest of the daemon sees it: where a pass is asked
-/// for, how far the passes have got, what the last pass over each root did, and
-/// which roots are not watched.
+/// for, how far the passes have got, what the last pass over each root did,
+/// which roots are not watched, and how page transcription goes.
 #[derive(Debug, Default)]
 pub struct DocumentIndex {
     requested: Notify,
     passes: Mutex<Vec<RootPass>>,
     unwatched: Mutex<BTreeMap<PathBuf, String>>,
     progress: watch::Sender<IndexProgress>,
+    transcription: PageTranscription,
 }
 
 impl DocumentIndex {
@@ -84,6 +86,10 @@ impl DocumentIndex {
     /// Follows the passes as they run.
     pub fn subscribe_progress(&self) -> watch::Receiver<IndexProgress> {
         self.progress.subscribe()
+    }
+
+    pub fn transcription(&self) -> &PageTranscription {
+        &self.transcription
     }
 
     /// Record what the pass over `root` has done so far.

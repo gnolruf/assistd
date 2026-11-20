@@ -20,8 +20,9 @@ pub use relay_traces::{
 };
 pub use semantic::{
     AdjacentChunks, ChunkLocator, ChunkSource, ContextChunk, DocumentHit, DocumentText, Embedding,
-    EmbeddingHit, EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass, IndexRootCounts,
-    MemoryHit, NoSemanticStore, SemanticStore, SessionScope, SourcePointer, UnindexedRows,
+    EmbeddingHit, EmbeddingSpace, EmbeddingTarget, EmptyPages, FileStamp, IndexPass,
+    IndexRootCounts, MemoryHit, NoSemanticStore, PageReading, SemanticStore, SessionScope,
+    SourcePointer, TranscriptionCounts, UnindexedRows, WaitingPage,
 };
 pub use sqlite::{
     MemoryStore, SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore, TaskStore,

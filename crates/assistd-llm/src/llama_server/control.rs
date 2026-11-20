@@ -145,6 +145,29 @@ impl LlamaServerControl {
         }
     }
 
+    /// Poll `/models` until `model` reports unloaded, its process gone, erroring
+    /// with [`LlamaServerError::UnloadTimeout`] once `deadline` elapses.
+    pub async fn wait_for_unloaded(
+        &self,
+        model: &str,
+        deadline: Duration,
+        poll_interval: Duration,
+    ) -> Result<(), LlamaServerError> {
+        let start = tokio::time::Instant::now();
+        loop {
+            if self.fetch_models().await?.is_unloaded(model) {
+                return Ok(());
+            }
+            if start.elapsed() >= deadline {
+                return Err(LlamaServerError::UnloadTimeout {
+                    model: model.to_string(),
+                    timeout: deadline,
+                });
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
     async fn require_serving(&self) -> Result<(), LlamaServerError> {
         match &self.health {
             Some(probe) if !probe.is_serving().await => Err(LlamaServerError::NotReady),
@@ -259,6 +282,14 @@ impl ModelsResponse {
         self.data.iter().any(|e| e.matches(model) && e.is_loaded())
     }
 
+    /// Whether `model` is listed as unloaded, or not listed at all.
+    fn is_unloaded(&self, model: &str) -> bool {
+        self.data
+            .iter()
+            .filter(|entry| entry.matches(model))
+            .all(ModelEntry::is_unloaded)
+    }
+
     fn cache_state(&self, model: &str) -> CacheState {
         self.data
             .iter()
@@ -282,6 +313,12 @@ impl ModelEntry {
 
     fn is_loaded(&self) -> bool {
         self.status.as_ref().is_some_and(ModelStatus::is_loaded)
+    }
+
+    fn is_unloaded(&self) -> bool {
+        self.status
+            .as_ref()
+            .is_some_and(|status| status.value == "unloaded")
     }
 
     fn cache_state(&self) -> CacheState {

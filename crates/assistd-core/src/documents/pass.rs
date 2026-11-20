@@ -7,8 +7,8 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use assistd_documents::{Extraction, Extractor, ExtractorError, SkipReason};
-use assistd_memory::{FileStamp, IndexPass, MemoryError, SemanticStore};
+use assistd_documents::{Extraction, Extractor, ExtractorError, SkipReason, renders_pages};
+use assistd_memory::{EmptyPages, FileStamp, IndexPass, MemoryError, SemanticStore};
 use assistd_tools::policy::{PathGuards, on_blocking_pool};
 use assistd_utils::readiness::NotReady;
 use chrono::{DateTime, Utc};
@@ -137,6 +137,7 @@ struct RunningPass<'a> {
     root: &'a Path,
     pass: IndexPass,
     max_file_bytes: u64,
+    keeps_scans: bool,
     counts: &'a mut PassCounts,
     /// The first part of the root the walk could not list.
     unlisted: Option<String>,
@@ -179,8 +180,15 @@ impl RunningPass<'_> {
     }
 
     /// Extract and store the file at `path`, returning how many chunks that added.
+    /// Its pages without text wait for transcription when they can be rendered.
     async fn index_file(&mut self, path: PathBuf, stamp: FileStamp) -> Result<u64, PassStopped> {
-        let pages = match self.extract(&path).await? {
+        let empty_pages = if renders_pages(&path) {
+            EmptyPages::AwaitTranscription
+        } else {
+            EmptyPages::Final
+        };
+        let keeps_textless = self.keeps_scans && empty_pages == EmptyPages::AwaitTranscription;
+        let pages = match self.extract(&path, keeps_textless).await? {
             Ok(pages) => pages,
             Err(reason) => {
                 debug!(target: "assistd::documents", "skipped {}: {reason}", path.display());
@@ -189,27 +197,32 @@ impl RunningPass<'_> {
             }
         };
         let store = &self.deps.store;
-        let added = store.index_document(self.pass, path, stamp, pages).await?;
+        let indexed = store.index_document(self.pass, path, stamp, pages, empty_pages);
+        let added = indexed.await?;
         self.counts.indexed += 1;
         if !added.is_empty() {
             self.deps.embed_wake.notify_one();
         }
+        if empty_pages == EmptyPages::AwaitTranscription {
+            self.index.transcription().pages_may_wait();
+        }
         Ok(added.len() as u64)
     }
 
-    /// The pages of the file at `path`, or why it is not indexed. A worker that
-    /// exits is waited for and asked again, and the file is skipped once the worker
-    /// has exited over it [`WORKER_EXITS_PER_FILE`] times.
+    /// The pages of the file at `path`, or why it is not indexed; one with no text
+    /// is indexed only when `keeps_textless`. A worker that exits is asked again,
+    /// and the file is skipped once it has exited [`WORKER_EXITS_PER_FILE`] times.
     async fn extract(
         &mut self,
         path: &Path,
+        keeps_textless: bool,
     ) -> Result<Result<Vec<String>, SkipReason>, PassStopped> {
         let mut worker_exits = 0;
         loop {
             self.worker_ready().await?;
             let extractor = &self.deps.extractor;
             match extractor.extract(path, self.max_file_bytes).await {
-                Ok(extraction) => return Ok(indexable_pages(extraction)),
+                Ok(extraction) => return Ok(indexable_pages(extraction, keeps_textless)),
                 Err(ExtractorError::NotReady(_)) => {}
                 Err(ExtractorError::Exited) => {
                     worker_exits += 1;
@@ -291,6 +304,7 @@ async fn walk_and_store(
         root: root.path(),
         pass,
         max_file_bytes: root.max_file_bytes(),
+        keeps_scans: root.keeps_scans(),
         counts,
         unlisted: None,
         shutdown: shutdown.clone(),
@@ -357,10 +371,16 @@ fn walk_in_batches(
 }
 
 /// The pages to store for `extraction`. A file none of whose pages has text is
-/// skipped as [`SkipReason::NoTextLayer`].
-fn indexable_pages(extraction: Extraction) -> Result<Vec<String>, SkipReason> {
+/// skipped as [`SkipReason::NoTextLayer`], unless it has pages and `keeps_textless`.
+fn indexable_pages(
+    extraction: Extraction,
+    keeps_textless: bool,
+) -> Result<Vec<String>, SkipReason> {
+    let has_text = |pages: &[String]| pages.iter().any(|page| !page.trim().is_empty());
     match extraction {
-        Extraction::Pages { pages, .. } if pages.iter().any(|page| !page.trim().is_empty()) => {
+        Extraction::Pages { pages, .. }
+            if has_text(&pages) || (keeps_textless && !pages.is_empty()) =>
+        {
             Ok(pages)
         }
         Extraction::Pages { .. } => Err(SkipReason::NoTextLayer),
@@ -392,7 +412,13 @@ mod tests {
         let seeded = store.begin_index_pass(&root_dir).await.unwrap();
         for path in [&kept, &deleted] {
             let chunks = store
-                .index_document(seeded, path.clone(), stamp, vec!["kept".into()])
+                .index_document(
+                    seeded,
+                    path.clone(),
+                    stamp,
+                    vec!["kept".into()],
+                    EmptyPages::Final,
+                )
                 .await
                 .unwrap();
             assert_eq!(chunks.len(), 1);

@@ -62,6 +62,12 @@ impl Format {
     }
 }
 
+/// Whether a page of the file at `path` can be rendered to an image, which only a
+/// PDF's can.
+pub fn renders_pages(path: &Path) -> bool {
+    Format::of(path) == Format::Pdf
+}
+
 /// The text of the regular file at `path` page by page, or why it has none; a
 /// file larger than `max_file_bytes` is not read. Blocks on the filesystem.
 pub(crate) fn extract_text(path: &Path, max_file_bytes: u64) -> Extraction {

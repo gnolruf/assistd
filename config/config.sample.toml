@@ -134,6 +134,11 @@
 # embed_during_tasks = false  # true: also while a task runs
 # embed_during_gpu_sleep = false  # true: also while asleep for another program's VRAM
 
+[documents.ocr]
+# Reads PDF pages that have no text layer, while the daemon is drowsy; unset, they are left out.
+# model = "ggml-org/GLM-OCR-GGUF:Q8_0"  # owner/repo:quant; downloaded on first use
+# prompt = "Text Recognition:"  # sent with each page image; "" for a model that takes none
+
 [search]
 # A local SearXNG instance the web command searches through.
 # enabled = false

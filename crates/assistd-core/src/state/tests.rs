@@ -25,10 +25,11 @@ use assistd_llm::{
 };
 use assistd_memory::{
     AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkSource, DocumentHit, DocumentText,
-    Embedding, EmbeddingHit, EmbeddingSpace, FileStamp, HistoryRow, HistoryScope, IndexPass,
-    IndexRootCounts, MemoryHit, MemoryId, MemoryStore, MessageId, MessageKind, NoSemanticStore,
-    PersistedMessage, PersistedRole, PersistedToolCall, SemanticStore, SessionId, SessionScope,
-    SqliteHandle, SqliteTranscriptStore, TaskStore, TranscriptStore, UnindexedRows,
+    Embedding, EmbeddingHit, EmbeddingSpace, EmptyPages, FileStamp, HistoryRow, HistoryScope,
+    IndexPass, IndexRootCounts, MemoryHit, MemoryId, MemoryStore, MessageId, MessageKind,
+    NoSemanticStore, PageReading, PersistedMessage, PersistedRole, PersistedToolCall,
+    SemanticStore, SessionId, SessionScope, SqliteHandle, SqliteTranscriptStore, TaskStore,
+    TranscriptStore, TranscriptionCounts, UnindexedRows, WaitingPage,
 };
 use assistd_tools::{
     Approval, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, OutputCap, PresentSpec, RunTool,

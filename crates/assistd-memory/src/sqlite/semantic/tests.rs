@@ -243,18 +243,36 @@ async fn documents_and_messages_rank_apart_and_reindexing_replaces_document_chun
     let path = PathBuf::from("/notes/plan.md");
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
     let stale = store
-        .index_document(pass, path.clone(), STAMP, one_page("draft"))
+        .index_document(
+            pass,
+            path.clone(),
+            STAMP,
+            one_page("draft"),
+            EmptyPages::Final,
+        )
         .await
         .unwrap();
     embed_chunk(&store, stale[0], &unit_vec(0.1)).await;
     let section = format!("{}{}", "intro ".repeat(90), "detail ".repeat(60));
     let fresh_chunks = store
-        .index_document(pass, path.clone(), STAMP, one_page(&section))
+        .index_document(
+            pass,
+            path.clone(),
+            STAMP,
+            one_page(&section),
+            EmptyPages::Final,
+        )
         .await
         .unwrap();
     assert!(
         store
-            .index_document(pass, path.clone(), STAMP, one_page(&section))
+            .index_document(
+                pass,
+                path.clone(),
+                STAMP,
+                one_page(&section),
+                EmptyPages::Final
+            )
             .await
             .unwrap()
             .is_empty(),
@@ -307,7 +325,7 @@ async fn document_text_narrows_a_byte_range_of_one_page_to_whole_characters() {
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
     let pages = vec!["café crème".to_string(), String::new(), "thé".to_string()];
     store
-        .index_document(pass, path.clone(), STAMP, pages)
+        .index_document(pass, path.clone(), STAMP, pages, EmptyPages::Final)
         .await
         .unwrap();
 
@@ -350,23 +368,18 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
     };
     let section = format!("{}{}", "intro ".repeat(90), "detail ".repeat(60));
 
+    let index = |pass: IndexPass, path: &Path, stamp: FileStamp, text: &str| {
+        let (path, pages) = (path.to_path_buf(), one_page(text));
+        store.index_document(pass, path, stamp, pages, EmptyPages::Final)
+    };
+
     let first = store.begin_index_pass(root).await.unwrap();
-    let indexed = store
-        .index_document(first, plan.clone(), STAMP, one_page(&section))
-        .await
-        .unwrap();
+    let indexed = index(first, &plan, STAMP, &section).await.unwrap();
     let [intro, detail] = indexed[..] else {
         panic!("expected two chunks, got {indexed:?}");
     };
-    store
-        .index_document(
-            first,
-            gone.clone(),
-            STAMP,
-            one_page("deleted before the next pass"),
-        )
-        .await
-        .unwrap();
+    let deleted = index(first, &gone, STAMP, "deleted before the next pass");
+    deleted.await.unwrap();
     assert_eq!(store.finish_index_pass(first).await.unwrap(), 0);
     embed_chunk(&store, intro, &unit_vec(0.0)).await;
     embed_chunk(&store, detail, &unit_vec(0.1)).await;
@@ -385,25 +398,15 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
         .await
         .unwrap();
     assert_eq!(changed, [(never_indexed, STAMP), (plan.clone(), touched)]);
-    let rewritten = store
-        .index_document(second, plan.clone(), touched, one_page(&section))
-        .await
-        .unwrap();
+    let rewritten = index(second, &plan, touched, &section).await.unwrap();
     assert!(rewritten.is_empty(), "the same text must keep its chunks");
     let changed = store
         .changed_documents(second, vec![(plan.clone(), touched)])
         .await
         .unwrap();
     assert!(changed.is_empty(), "the stored stamp is the touched one");
-    let edited = store
-        .index_document(
-            second,
-            plan.clone(),
-            touched,
-            one_page(section.replace("detail", "change")),
-        )
-        .await
-        .unwrap();
+    let edit = section.replace("detail", "change");
+    let edited = index(second, &plan, touched, &edit).await.unwrap();
     assert_eq!(
         edited.len(),
         1,
@@ -453,7 +456,13 @@ async fn a_pass_over_part_of_a_root_drops_only_the_unseen_documents_under_it() {
     let whole = store.begin_index_pass(root).await.unwrap();
     for path in [&plan, &seen, &moved_away, &deleted, &beside] {
         store
-            .index_document(whole, path.clone(), STAMP, one_page("text"))
+            .index_document(
+                whole,
+                path.clone(),
+                STAMP,
+                one_page("text"),
+                EmptyPages::Final,
+            )
             .await
             .unwrap();
     }
@@ -494,6 +503,7 @@ async fn a_document_chunk_keeps_its_vector_wherever_its_text_moves() {
             path.clone(),
             STAMP,
             one_page([one, two, six].join("\n\n")),
+            EmptyPages::Final,
         )
         .await
         .unwrap();
@@ -507,14 +517,20 @@ async fn a_document_chunk_keeps_its_vector_wherever_its_text_moves() {
     let opening = "A new opening paragraph.";
     let prepended = [opening, one, two, six].join("\n\n");
     let added = store
-        .index_document(pass, path.clone(), STAMP, one_page(prepended))
+        .index_document(
+            pass,
+            path.clone(),
+            STAMP,
+            one_page(prepended),
+            EmptyPages::Final,
+        )
         .await
         .unwrap();
     assert_eq!(added.len(), 1, "only the new paragraph is a new chunk");
 
     let swapped = [opening, two, one, six].join("\n\n");
     let added = store
-        .index_document(pass, path, STAMP, one_page(swapped))
+        .index_document(pass, path, STAMP, one_page(swapped), EmptyPages::Final)
         .await
         .unwrap();
     assert!(added.is_empty(), "sections trading places are not new text");
@@ -544,7 +560,7 @@ async fn a_chunk_stays_on_its_page_and_keeps_its_vector_when_the_page_moves() {
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
     let body = vec!["alpha".to_string(), String::new(), "bravo".to_string()];
     let stored = store
-        .index_document(pass, path.clone(), STAMP, body.clone())
+        .index_document(pass, path.clone(), STAMP, body.clone(), EmptyPages::Final)
         .await
         .unwrap();
     let [alpha, bravo] = stored[..] else {
@@ -560,7 +576,7 @@ async fn a_chunk_stays_on_its_page_and_keeps_its_vector_when_the_page_moves() {
 
     let with_cover = [vec!["Cover".to_string()], body].concat();
     let added = store
-        .index_document(pass, path, STAMP, with_cover)
+        .index_document(pass, path, STAMP, with_cover, EmptyPages::Final)
         .await
         .unwrap();
     let [cover] = added[..] else {
@@ -595,7 +611,7 @@ async fn a_document_holding_the_querys_words_ranks_with_those_nearest_in_meaning
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
     let index = |name: &str, text: &str| {
         let path = PathBuf::from(format!("/notes/{name}"));
-        store.index_document(pass, path, STAMP, one_page(text))
+        store.index_document(pass, path, STAMP, one_page(text), EmptyPages::Final)
     };
     let terms = "# Terms\n\nrenewal terms of the lease\n\n# Reference\n\nfiled under REF-77";
     let terms = index("terms.md", terms).await.unwrap();
@@ -646,7 +662,9 @@ async fn keyword_search_follows_a_document_through_reindexing_and_removal() {
     let path = PathBuf::from("/notes/scan.pdf");
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
     let pages = |texts: &[&str]| texts.iter().copied().map(String::from).collect::<Vec<_>>();
-    let index = |texts: &[&str]| store.index_document(pass, path.clone(), STAMP, pages(texts));
+    let index = |texts: &[&str]| {
+        store.index_document(pass, path.clone(), STAMP, pages(texts), EmptyPages::Final)
+    };
     let found = async |word: &str| {
         let hits = store.search_documents(word.to_string(), Vec::new(), 5);
         let hits = hits.await.unwrap();
@@ -698,13 +716,154 @@ async fn keyword_search_follows_a_document_through_reindexing_and_removal() {
     );
 }
 
+/// The text stored for each page of the document at `path`.
+async fn page_texts(store: &SqliteSemanticStore, path: &Path, pages: usize) -> Vec<String> {
+    let mut texts = Vec::with_capacity(pages);
+    for page in 0..pages {
+        let stored = store.document_text(path, page, 0..1024).await;
+        texts.push(stored.unwrap().expect("the document is stored").text);
+    }
+    texts
+}
+
+#[tokio::test]
+async fn a_scanned_documents_pages_are_cut_in_page_order_once_its_last_waiting_page_is_done() {
+    let (_handle, store, _temp) = fresh().await;
+    let path = PathBuf::from("/notes/scan.pdf");
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let extracted = ["", "typed", "", ""].map(String::from).to_vec();
+    let indexed = store.index_document(
+        pass,
+        path.clone(),
+        STAMP,
+        extracted,
+        EmptyPages::AwaitTranscription,
+    );
+    let [typed] = indexed.await.unwrap()[..] else {
+        panic!("only the page with text is cut");
+    };
+    let counts = async || store.count_transcriptions().await.unwrap();
+    let found = async |word: &str| {
+        let hits = store.search_documents(word.to_string(), Vec::new(), 5);
+        let hits = hits.await.unwrap();
+        hits.iter()
+            .map(|hit| (hit.chunk_id, hit.page))
+            .collect::<Vec<_>>()
+    };
+    let first = store.next_waiting_page().await.unwrap().expect("a page");
+    assert_eq!(
+        (first.path.as_path(), first.page, first.stamp),
+        (path.as_path(), 0, STAMP)
+    );
+    let read = |page: usize, reading: PageReading| {
+        let waiting = WaitingPage {
+            page,
+            ..first.clone()
+        };
+        store.store_page_reading(waiting, reading)
+    };
+
+    let after_last = read(3, PageReading::Text("last".into())).await.unwrap();
+    let after_failed = read(2, PageReading::Failed).await.unwrap();
+    assert!(
+        after_last.is_empty() && after_failed.is_empty(),
+        "nothing is cut while a page waits"
+    );
+    assert_eq!(found("last").await, []);
+    assert_eq!(
+        counts().await,
+        TranscriptionCounts {
+            waiting: 1,
+            failed: 1
+        }
+    );
+
+    let added = read(0, PageReading::Text("cover".into())).await.unwrap();
+    let [cover, last] = added[..] else {
+        panic!("each transcribed page is cut once none waits, got {added:?}");
+    };
+    assert_eq!(found("cover").await, [(cover, 0)]);
+    assert_eq!(found("typed").await, [(typed, 1)], "a cut page is kept");
+    assert_eq!(found("last").await, [(last, 3)]);
+    assert_eq!(
+        page_texts(&store, &path, 4).await,
+        ["cover", "typed", "", "last"],
+        "a failed page keeps no text"
+    );
+    assert_eq!(store.next_waiting_page().await.unwrap(), None);
+
+    let late = read(0, PageReading::Text("late".into())).await.unwrap();
+    assert!(late.is_empty(), "a page that no longer waits is not read");
+    assert_eq!(page_texts(&store, &path, 1).await, ["cover"]);
+
+    assert_eq!(store.retry_failed_transcriptions().await.unwrap(), 1);
+    let retried = store.next_waiting_page().await.unwrap().expect("a page");
+    assert_eq!(retried.page, 2);
+    let reread = read(2, PageReading::Text("middle".into())).await.unwrap();
+    let [middle] = reread[..] else {
+        panic!("only the page read again is cut, got {reread:?}");
+    };
+    assert_eq!(found("middle").await, [(middle, 2)]);
+    assert_eq!(found("cover").await, [(cover, 0)]);
+}
+
+#[tokio::test]
+async fn a_file_whose_stamp_changes_drops_its_waiting_pages_and_its_transcriptions() {
+    let (_handle, store, _temp) = fresh().await;
+    let path = PathBuf::from("/notes/scan.pdf");
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let index = |stamp: FileStamp| {
+        let blank = vec![String::new(), String::new()];
+        store.index_document(
+            pass,
+            path.clone(),
+            stamp,
+            blank,
+            EmptyPages::AwaitTranscription,
+        )
+    };
+    let waiting = async || store.count_transcriptions().await.unwrap().waiting;
+    let read_next = async |text: &str| {
+        let page = store.next_waiting_page().await.unwrap().expect("a page");
+        let reading = PageReading::Text(text.into());
+        (
+            page.clone(),
+            store.store_page_reading(page, reading).await.unwrap(),
+        )
+    };
+    let touched = |mtime_ns| FileStamp { mtime_ns, ..STAMP };
+
+    index(STAMP).await.unwrap();
+    let (old_page, _) = read_next("old cover").await;
+    index(touched(2)).await.unwrap();
+    assert_eq!(waiting().await, 2, "the read page waits again");
+    assert_eq!(page_texts(&store, &path, 2).await, ["", ""]);
+    let stale = store
+        .store_page_reading(old_page, PageReading::Text("old cover".into()))
+        .await;
+    assert!(stale.unwrap().is_empty());
+    assert_eq!(
+        (waiting().await, page_texts(&store, &path, 1).await),
+        (2, vec![String::new()]),
+        "a reading of the file as it was is not stored"
+    );
+
+    read_next("cover").await;
+    let (_, cut) = read_next("back").await;
+    assert_eq!(cut.len(), 2);
+    index(touched(3)).await.unwrap();
+    assert_eq!(waiting().await, 2);
+    assert_eq!(page_texts(&store, &path, 2).await, ["", ""]);
+    assert_eq!(store.count_document_chunks().await.unwrap(), 0);
+}
+
 #[tokio::test]
 async fn a_query_is_matched_as_words_and_never_read_as_fts5_syntax() {
     let (_handle, store, _temp) = fresh().await;
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
     let text = "pass --remap-path-prefix to rustc, then call read_regular_file";
     let path = PathBuf::from("/notes/build.md");
-    let stored = store.index_document(pass, path, STAMP, one_page(text));
+    let stored = store.index_document(pass, path, STAMP, one_page(text), EmptyPages::Final);
     let chunk = stored.await.unwrap()[0];
     let found = async |query: &str| {
         let hits = store.search_documents(query.to_string(), Vec::new(), 5);
@@ -828,6 +987,7 @@ async fn missing_embedding_lists_only_unindexed_rows() {
             PathBuf::from("/notes/plan.md"),
             STAMP,
             one_page("draft"),
+            EmptyPages::Final,
         )
         .await
         .unwrap();

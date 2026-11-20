@@ -1,5 +1,5 @@
 //! Document-search configuration: the directories indexed, which of their files are
-//! left out, and when their text is embedded.
+//! left out, when their text is embedded, and the model that reads scanned pages.
 
 use std::num::NonZeroU32;
 
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::defaults::nz32;
 use crate::settings::{DescribeSettings, describe_fields};
-use crate::values::AbsoluteDir;
+use crate::values::{AbsoluteDir, NonBlankString};
 
 const BYTES_PER_MB: u64 = 1024 * 1024;
 
@@ -38,6 +38,7 @@ pub struct DocumentsConfig {
     /// Embed document text while the daemon sleeps for another process's VRAM
     /// (`sleep.gpu_monitor_enabled`). When `false`, it waits for the next wake.
     pub embed_during_gpu_sleep: bool,
+    pub ocr: DocumentsOcrConfig,
 }
 
 impl DescribeSettings for DocumentsConfig {
@@ -71,6 +72,7 @@ impl DescribeSettings for DocumentsConfig {
             "Keep embedding document text while asleep for another program's VRAM",
             advanced
         ),
+        ocr => nested,
     }
 }
 
@@ -84,6 +86,7 @@ impl Default for DocumentsConfig {
             embed_during_interaction: false,
             embed_during_tasks: false,
             embed_during_gpu_sleep: false,
+            ocr: DocumentsOcrConfig::default(),
         }
     }
 }
@@ -92,5 +95,51 @@ impl DocumentsConfig {
     /// `max_file_mb` expressed in bytes.
     pub fn max_file_bytes(&self) -> u64 {
         u64::from(self.max_file_mb.get()) * BYTES_PER_MB
+    }
+
+    /// `ocr.model` while `enabled`; `None` when no page is ever transcribed.
+    pub fn ocr_model(&self) -> Option<&str> {
+        self.ocr
+            .model
+            .as_ref()
+            .filter(|_| self.enabled)
+            .map(NonBlankString::as_str)
+    }
+}
+
+/// The model that transcribes PDF pages without a text layer, one page image per
+/// request, while the daemon is `Drowsy`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DocumentsOcrConfig {
+    /// HuggingFace model, as `owner/repo:quant`, the model server loads in the agent
+    /// model's place with `model.gpu_layers` and `model.custom_args`. Unset, no page is
+    /// transcribed. Never runs while `sleep.idle_to_drowsy_mins` is `0`.
+    pub model: Option<NonBlankString>,
+    /// Text sent after each page image, as the model's card gives it; empty sends
+    /// the image alone.
+    pub prompt: String,
+}
+
+impl DescribeSettings for DocumentsOcrConfig {
+    describe_fields! {
+        model => (
+            "OCR model",
+            "Model that reads scanned PDF pages while drowsy, as owner/repo:quant; unset for none"
+        ),
+        prompt => (
+            "OCR prompt",
+            "Text sent with each page image; empty for a model that takes none",
+            advanced
+        ),
+    }
+}
+
+impl Default for DocumentsOcrConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            prompt: "Text Recognition:".to_owned(),
+        }
     }
 }

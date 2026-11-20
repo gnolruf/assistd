@@ -1,19 +1,23 @@
 //! Document indexing for the daemon: the extraction worker runs under supervision
 //! from the daemon's own binary, sandboxed over the index roots, its readiness is
-//! published whenever it changes, passes over the roots feed it, and what the index
-//! is doing is broadcast.
+//! published whenever it changes, passes over the roots feed it, what the index
+//! is doing is broadcast, and an OCR model reads the pages that have no text.
 
 use std::path::Path;
 use std::sync::Arc;
 
+use anyhow::{Context, Result};
 use assistd_config::Config;
 use assistd_core::{
-    AppState, Component, DocumentsUnavailable, IndexDeps, IndexPasses, remove_dropped_roots,
-    spawn_supervised,
+    AppState, BorrowedModel, Component, DocumentIndex, DocumentsUnavailable, IndexDeps,
+    IndexPasses, TranscriptionDeps, remove_dropped_roots, spawn_supervised,
+    transcribe_while_drowsy,
 };
 use assistd_documents::{Extractor, WorkerCommand, supervise};
 use assistd_ipc::{ComponentReadiness, StartupComponent};
+use assistd_llm::{LlamaServerControl, LlmHealthProbe, OCR_MODEL_ALIAS, PageTranscriber};
 use assistd_tools::{SandboxInfo, ToolsDisabled};
+use assistd_utils::child_server::ApiKey;
 use assistd_utils::readiness::NotReady;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -28,6 +32,42 @@ const WORKER_SUBCOMMAND: &str = "extract-worker";
 pub(super) struct DocumentsStartup {
     /// The worker's command and the passes, or none when indexing is unavailable.
     indexing: Option<(WorkerCommand, IndexPasses)>,
+    /// The OCR model, or none when `documents.ocr.model` is unset.
+    ocr: Option<OcrModel>,
+}
+
+/// The model that reads pages without text, and the clients that reach it on the
+/// model server.
+struct OcrModel {
+    model: BorrowedModel,
+    transcriber: PageTranscriber,
+    control: LlamaServerControl,
+}
+
+impl OcrModel {
+    fn from_config(
+        config: &Config,
+        api_key: &ApiKey,
+        health_probe: &Arc<dyn LlmHealthProbe>,
+    ) -> Result<Option<Self>> {
+        let Some(source) = config.documents.ocr_model() else {
+            return Ok(None);
+        };
+        let addr = config.model.listen_addr();
+        let prompt = config.documents.ocr.prompt.clone();
+        let transcriber = PageTranscriber::new(addr, Some(api_key), prompt)
+            .context("failed to construct the OCR model's client")?;
+        let control = LlamaServerControl::new(addr, Some(api_key), Some(Arc::clone(health_probe)))
+            .context("failed to construct llama-server control client for the OCR model")?;
+        Ok(Some(Self {
+            model: BorrowedModel {
+                source: source.to_owned(),
+                served_as: OCR_MODEL_ALIAS.to_owned(),
+            },
+            transcriber,
+            control,
+        }))
+    }
 }
 
 /// The background task that runs the extraction worker and the index passes, or
@@ -69,22 +109,26 @@ impl DocumentsService {
 }
 
 /// The extractor requests see from startup and, while `documents.enabled`, what
-/// document indexing starts with in `sandbox`.
+/// document indexing starts with in `sandbox`: the passes, and the OCR model on the
+/// model server that takes `api_key`.
 pub(super) fn prepare(
     config: &Config,
     sandbox: Result<&Arc<SandboxInfo>, &ToolsDisabled>,
-) -> (Arc<Extractor>, Option<DocumentsStartup>) {
+    api_key: &ApiKey,
+    health_probe: &Arc<dyn LlmHealthProbe>,
+) -> Result<(Arc<Extractor>, Option<DocumentsStartup>)> {
     let indexing = assistd_core::document_indexing(
         &config.documents,
         sandbox,
         Path::new(SELF_EXE),
         WORKER_SUBCOMMAND,
     );
-    match indexing {
+    let prepared = match indexing {
         Ok(indexing) => (
             Arc::new(Extractor::starting()),
             Some(DocumentsStartup {
                 indexing: Some(indexing),
+                ocr: OcrModel::from_config(config, api_key, health_probe)?,
             }),
         ),
         Err(reason) => {
@@ -95,7 +139,10 @@ pub(super) fn prepare(
                 }
                 _ => {
                     warn!("document indexing is unavailable: {reason}");
-                    Some(DocumentsStartup { indexing: None })
+                    Some(DocumentsStartup {
+                        indexing: None,
+                        ocr: None,
+                    })
                 }
             };
             (
@@ -103,7 +150,8 @@ pub(super) fn prepare(
                 startup,
             )
         }
-    }
+    };
+    Ok(prepared)
 }
 
 async fn run(startup: DocumentsStartup, state: Arc<AppState>, shutdown: watch::Receiver<bool>) {
@@ -119,12 +167,36 @@ async fn run(startup: DocumentsStartup, state: Arc<AppState>, shutdown: watch::R
         extractor: Arc::clone(extractor),
         embed_wake: Arc::clone(&state.memory.embed_wake),
     };
+    let transcription = startup.ocr.map(|ocr| TranscriptionDeps {
+        store: Arc::clone(&state.memory.semantic),
+        extractor: Arc::clone(extractor),
+        presence: Arc::clone(&state.subsystems.presence),
+        embed_wake: Arc::clone(&state.memory.embed_wake),
+        model: ocr.model,
+        transcriber: ocr.transcriber,
+        control: ocr.control,
+        max_file_bytes: state.config.documents.max_file_bytes(),
+    });
+    let index = &state.subsystems.document_index;
     tokio::join!(
         supervise(worker, Arc::clone(extractor), shutdown.clone()),
         publish_changes(&state, changes, shutdown.clone()),
         state.documents.broadcast_activity(shutdown.clone()),
-        passes.run(deps, &state.subsystems.document_index, shutdown),
+        transcribe_pages(transcription, index, shutdown.clone()),
+        passes.run(deps, index, shutdown),
     );
+}
+
+/// Read the pages that wait for the OCR model until `shutdown` flips; returns at
+/// once when there is no model.
+async fn transcribe_pages(
+    transcription: Option<TranscriptionDeps>,
+    index: &DocumentIndex,
+    shutdown: watch::Receiver<bool>,
+) {
+    if let Some(deps) = transcription {
+        transcribe_while_drowsy(deps, index, shutdown).await;
+    }
 }
 
 async fn publish_changes(

@@ -16,9 +16,9 @@ use rusqlite::{OptionalExtension, Params, Row, Transaction};
 
 use crate::{
     AdjacentChunks, ChunkId, ChunkLocator, ChunkSource, ContextChunk, DocumentHit, DocumentId,
-    DocumentText, Embedding, EmbeddingHit, EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass,
-    IndexRootCounts, MemoryHit, MemoryId, MessageId, Result, SemanticStore, SessionId,
-    SessionScope, UnindexedRows,
+    DocumentText, Embedding, EmbeddingHit, EmbeddingSpace, EmbeddingTarget, EmptyPages, FileStamp,
+    IndexPass, IndexRootCounts, MemoryHit, MemoryId, MessageId, PageReading, Result, SemanticStore,
+    SessionId, SessionScope, TranscriptionCounts, UnindexedRows, WaitingPage,
 };
 
 use super::connection::SqliteHandle;
@@ -375,10 +375,43 @@ impl SemanticStore for SqliteSemanticStore {
         path: PathBuf,
         stamp: FileStamp,
         pages: Vec<String>,
+        empty_pages: EmptyPages,
     ) -> Result<Vec<ChunkId>> {
         self.handle
             .write("index_document", move |tx| {
-                documents::store_document(tx, pass, &path, stamp, &pages)
+                documents::store_document(tx, pass, &path, stamp, &pages, empty_pages)
+            })
+            .await
+    }
+
+    async fn next_waiting_page(&self) -> Result<Option<WaitingPage>> {
+        self.handle
+            .read("next_waiting_page", documents::next_waiting_page)
+            .await
+    }
+
+    async fn store_page_reading(
+        &self,
+        page: WaitingPage,
+        reading: PageReading,
+    ) -> Result<Vec<ChunkId>> {
+        self.handle
+            .write("store_page_reading", move |tx| {
+                documents::store_page_reading(tx, &page, &reading)
+            })
+            .await
+    }
+
+    async fn count_transcriptions(&self) -> Result<TranscriptionCounts> {
+        self.handle
+            .read("count_transcriptions", documents::count_transcriptions)
+            .await
+    }
+
+    async fn retry_failed_transcriptions(&self) -> Result<u64> {
+        self.handle
+            .write("retry_failed_transcriptions", |tx| {
+                documents::retry_failed_transcriptions(tx)
             })
             .await
     }

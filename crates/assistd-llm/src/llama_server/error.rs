@@ -33,6 +33,9 @@ pub enum LlamaServerError {
     #[error("llama-server did not report {model} loaded within {timeout:?}")]
     LoadTimeout { model: String, timeout: Duration },
 
+    #[error("llama-server still reported {model} loaded after {timeout:?}")]
+    UnloadTimeout { model: String, timeout: Duration },
+
     #[error("llama-server model event stream: {0}")]
     EventStream(#[source] LlamaClientError),
 

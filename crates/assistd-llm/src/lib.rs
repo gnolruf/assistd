@@ -17,6 +17,7 @@ pub mod completion;
 #[cfg(feature = "test-support")]
 mod echo;
 pub mod llama_server;
+mod page_transcriber;
 #[cfg(feature = "test-support")]
 mod scripted;
 
@@ -26,8 +27,11 @@ pub use completion::{LlamaClient, LlamaClientError};
 #[cfg(feature = "test-support")]
 pub use echo::EchoBackend;
 pub use llama_server::{
-    LlamaServerControl, LlamaServerError, LlamaServerSpec, SlotAssignment, SlotDir, SlotHolder,
-    SlotStash, VisionState, probe_capabilities_routed,
+    LlamaServerControl, LlamaServerError, LlamaServerSpec, ModelPresets, OCR_MODEL_ALIAS,
+    SlotAssignment, SlotDir, SlotHolder, SlotStash, VisionState, probe_capabilities_routed,
+};
+pub use page_transcriber::{
+    PageTranscriber, TranscribeError, Transcription, UnusableTranscription,
 };
 #[cfg(feature = "test-support")]
 pub use scripted::{Gate, JournaledStep, ScriptedBackend, Seen, Step, StepJournal};
