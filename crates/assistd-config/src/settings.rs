@@ -70,8 +70,8 @@ pub enum SettingKind {
     Choice(&'static [&'static str]),
     /// A TOML array, edited entry by entry.
     List(ListItem),
-    /// Too structured to edit in a line; shown as an entry count.
-    External,
+    /// The MCP servers; opens the list that adds, edits and deletes them.
+    McpServers,
     /// A theme color, picked in the color picker and shown in itself.
     Color,
     /// The saved themes; opens the list that loads, saves and deletes themes.
@@ -117,7 +117,7 @@ impl SettingValue for NonEmpty<SearchEngine> {
 }
 
 impl SettingValue for Vec<McpServerConfig> {
-    const KIND: SettingKind = SettingKind::External;
+    const KIND: SettingKind = SettingKind::McpServers;
 }
 
 impl SettingValue for ThemeColor {

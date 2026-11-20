@@ -10,9 +10,9 @@ use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::prompt_box::{PromptBox, RunPermissions};
-use super::trigger_form::{FormAction, TriggerForm, UpstreamChoice, cycled};
+use super::trigger_form::{FormAction, TriggerForm, UpstreamChoice};
 use super::{Outbox, PendingOp};
-use crate::selection::Selection;
+use crate::selection::{Selection, cycled};
 use crate::settings::{ListAction, ListEditor};
 use crate::text_editor::{EditAction, EditorShape, TextEditor};
 

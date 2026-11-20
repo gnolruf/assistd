@@ -233,10 +233,9 @@ impl Setting {
         self.info().is_some_and(|info| info.advanced)
     }
 
-    /// How the key is edited and shown; `External` if no config field has
-    /// its path.
+    /// How the key is edited and shown; `Text` if no config field has its path.
     pub(crate) fn kind(&self) -> SettingKind {
-        self.info().map_or(SettingKind::External, |info| info.kind)
+        self.info().map_or(SettingKind::Text, |info| info.kind)
     }
 
     fn info(&self) -> Option<&'static SettingInfo> {
@@ -360,7 +359,7 @@ mod tests {
             SettingKind::Color => toml::Value::from("red"),
             SettingKind::Themes => toml::Value::Table(toml::Table::new()),
             SettingKind::Choice(options) => toml::Value::from(options[0]),
-            SettingKind::List(_) | SettingKind::External => toml::Value::Array(Vec::new()),
+            SettingKind::List(_) | SettingKind::McpServers => toml::Value::Array(Vec::new()),
         }
     }
 

@@ -23,12 +23,15 @@ mod list_editor;
 mod panel;
 mod preview;
 mod render;
+mod server_box;
+mod server_form;
+mod server_list;
 mod theme_list;
 
 pub(crate) use list_editor::{ListAction, ListEditor};
 pub(crate) use panel::{PanelHost, SettingsPanel};
 pub(crate) use render::{
-    editor_window, list_hint, place_cursor, render_list_editor, render_settings,
+    choice_span, editor_window, list_hint, place_cursor, render_list_editor, render_settings,
     render_wrapped_editor, titled_box,
 };
 

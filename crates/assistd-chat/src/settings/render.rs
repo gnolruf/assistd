@@ -17,12 +17,14 @@ use super::color_picker::{ColorPicker, PALETTE_CELL_WIDTH, PickerFocus};
 use super::list_editor::{EntryEditor, ListEditor, ListState, entry_summary};
 use super::panel::{Feedback, PanelMode, Row, SettingsPanel, short_decimal};
 use super::preview::render_theme_preview;
+use super::server_box::{render_server_list, server_hint};
+use super::server_list::server_name;
 use super::theme_list::{ThemeEntry, ThemeListState};
 
 /// Validation problems listed under the settings; more are counted.
 const MAX_ISSUE_ROWS: usize = 3;
 const POINTER: &str = "❯ ";
-const NO_POINTER: &str = "  ";
+pub(super) const NO_POINTER: &str = "  ";
 /// Columns between the longest label and the values.
 const LABEL_GAP: usize = 2;
 const RULE: &str = "─";
@@ -52,7 +54,7 @@ const GAUGE_EMPTY: &str = "░";
 const THEME_NAME_WIDTH: usize = 16;
 const SAVE_AS: &str = "save as: ";
 /// Lines kept below the selection before the list scrolls.
-const SCROLL_MARGIN: usize = 5;
+pub(super) const SCROLL_MARGIN: usize = 5;
 
 /// The title, tab bar and list (over the text or list box while one is
 /// open), then the selected key's details, feedback, problems and key hints.
@@ -104,6 +106,7 @@ pub(crate) fn render_settings(frame: &mut Frame<'_>, area: Rect, panel: &mut Set
                 .areas(list_area);
         match panel.mode() {
             PanelMode::List(_) => render_list_box(frame, box_area, panel, theme),
+            PanelMode::Servers(_) => render_server_box(frame, box_area, panel, theme),
             PanelMode::Color { .. } => render_color_box(frame, box_area, panel, theme),
             PanelMode::Themes { .. } => render_theme_box(frame, box_area, panel, theme),
             _ => render_text_box(frame, box_area, panel, theme),
@@ -277,7 +280,11 @@ fn heading_line(
     Line::styled(text, style)
 }
 
-fn pointed_line(selected: bool, theme: &Theme, mut spans: Vec<Span<'static>>) -> Line<'static> {
+pub(super) fn pointed_line(
+    selected: bool,
+    theme: &Theme,
+    mut spans: Vec<Span<'static>>,
+) -> Line<'static> {
     if selected {
         spans.insert(
             0,
@@ -323,20 +330,29 @@ fn value_span(
     }
 }
 
-/// The selected setting's full key, description and default.
+/// The selected setting's full key, description and default, or what the server form's
+/// focused field holds.
 fn render_detail(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, theme: &Theme) {
     let Some(setting) = panel.selected_setting() else {
         return;
     };
-    let default = panel.document().default_value(setting.key).map_or_else(
-        || "unset".to_string(),
-        |value| shown_value(setting.kind(), value),
-    );
-    let detail = format!(
-        "{} : {} (default value: {default})",
-        setting.key,
-        setting.description()
-    );
+    let detail = match panel.mode() {
+        PanelMode::Servers(list) if let Some(form) = list.form() => {
+            let field = form.focus();
+            format!("{} : {}", field.label(), field.help())
+        }
+        _ => {
+            let default = panel.document().default_value(setting.key).map_or_else(
+                || "unset".to_string(),
+                |value| shown_value(setting.kind(), value),
+            );
+            format!(
+                "{} : {} (default value: {default})",
+                setting.key,
+                setting.description()
+            )
+        }
+    };
     let detail = ellipsize(&detail, usize::from(area.width));
     frame.render_widget(
         Paragraph::new(Span::styled(detail, theme.meta_style())),
@@ -383,6 +399,7 @@ fn hint(panel: &SettingsPanel) -> &'static str {
         }
         PanelMode::Edit(_) => "Enter apply · Esc cancel · Ctrl+U clear",
         PanelMode::List(editor) => list_hint(editor.state()),
+        PanelMode::Servers(list) => server_hint(list),
         PanelMode::Color { picker, .. } => match (picker.hex_input(), picker.focus()) {
             (Some(_), _) => "type 6 hex digits · Backspace erase · Esc stop typing",
             (None, PickerFocus::Palette(_)) => {
@@ -411,7 +428,10 @@ fn hint(panel: &SettingsPanel) -> &'static str {
 fn has_box(mode: &PanelMode) -> bool {
     match mode {
         PanelMode::Edit(editor) => editor.is_box(),
-        PanelMode::List(_) | PanelMode::Color { .. } | PanelMode::Themes { .. } => true,
+        PanelMode::List(_)
+        | PanelMode::Servers(_)
+        | PanelMode::Color { .. }
+        | PanelMode::Themes { .. } => true,
         PanelMode::Browse | PanelMode::ConfirmClose | PanelMode::ConfirmOverwrite => false,
     }
 }
@@ -522,6 +542,15 @@ pub(crate) fn render_list_editor(
     if let Some((row, column)) = cursor {
         place_cursor(frame, inner, row.saturating_sub(start), column);
     }
+}
+
+/// The MCP servers in the box titled with the setting's label.
+fn render_server_box(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, theme: &Theme) {
+    let (PanelMode::Servers(list), Some(setting)) = (panel.mode(), panel.selected_setting()) else {
+        return;
+    };
+    let servers = panel.list_entries(setting.key);
+    render_server_list(frame, area, list, servers, setting.label(), theme);
 }
 
 /// The keys the list box takes in `state`.
@@ -719,7 +748,11 @@ fn list_box_line(
 }
 
 /// The entry awaiting deletion, asking y or n.
-fn confirm_delete_line(entry: &toml::Value, width: usize, theme: &Theme) -> Line<'static> {
+pub(super) fn confirm_delete_line(
+    entry: &toml::Value,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
     let summary = escape_controls_single_line(&entry_summary(entry)).into_owned();
     let question = format!("delete {summary}? (y/n)");
     pointed_line(
@@ -767,17 +800,29 @@ fn push_entry_lines(
     cursor
 }
 
+/// A value picked from choices, between arrows while `focused`.
+pub(crate) fn choice_span(text: &str, focused: bool, theme: &Theme) -> Span<'static> {
+    let text = escape_controls_single_line(text);
+    if focused {
+        Span::styled(format!("◂ {text} ▸"), theme.accent_style())
+    } else {
+        Span::raw(format!("  {text}"))
+    }
+}
+
 /// `chars` with control characters shown as `↵` so they cannot move the
 /// terminal's cursor.
 fn visible_char(c: char) -> char {
     if c.is_control() { '↵' } else { c }
 }
 
-/// `value` as listed: toggles as checkboxes, structured values as a count.
+/// `value` as listed: toggles as checkboxes, lists by their entries, servers by name.
 fn shown_value(kind: SettingKind, value: &toml::Value) -> String {
     match (kind, value) {
         (SettingKind::Toggle, toml::Value::Boolean(on)) => checkbox(*on).to_string(),
-        (SettingKind::List(_), toml::Value::Array(entries)) if entries.is_empty() => {
+        (SettingKind::List(_) | SettingKind::McpServers, toml::Value::Array(entries))
+            if entries.is_empty() =>
+        {
             "(none)".to_string()
         }
         (SettingKind::List(_), toml::Value::Array(entries)) => entries
@@ -791,10 +836,11 @@ fn shown_value(kind: SettingKind, value: &toml::Value) -> String {
         (SettingKind::Themes, toml::Value::Table(saved)) => {
             saved.keys().cloned().collect::<Vec<_>>().join(", ")
         }
-        (SettingKind::External, toml::Value::Array(entries)) => match entries.len() {
-            1 => "1 entry".to_string(),
-            count => format!("{count} entries"),
-        },
+        (SettingKind::McpServers, toml::Value::Array(servers)) => servers
+            .iter()
+            .map(server_name)
+            .collect::<Vec<_>>()
+            .join(", "),
         (_, toml::Value::String(text)) if text.is_empty() => "(empty)".to_string(),
         (_, toml::Value::String(text)) => escape_controls_single_line(text).into_owned(),
         (SettingKind::Decimal, toml::Value::Float(number)) => short_decimal(*number),

@@ -32,6 +32,17 @@ impl Selection {
     }
 }
 
+/// The entry after or before `current` in `all`, wrapping; the first when it is not there.
+pub(crate) fn cycled<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
+    let index = all.iter().position(|item| *item == current).unwrap_or(0);
+    let next = if forward {
+        (index + 1) % all.len()
+    } else {
+        (index + all.len() - 1) % all.len()
+    };
+    all[next]
+}
+
 /// The entries of a `total`-entry list to draw in `visible` rows: a window
 /// that keeps `selected` in view with `margin` entries below it, or as many
 /// as half the window allows.

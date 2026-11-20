@@ -208,7 +208,8 @@ pub(crate) fn entry_summary(entry: &toml::Value) -> String {
     }
 }
 
-fn entry_text(entry: &toml::Value) -> String {
+/// `entry` as the text an edit of it starts from.
+pub(super) fn entry_text(entry: &toml::Value) -> String {
     match entry {
         toml::Value::String(text) => text.clone(),
         other => other.to_string(),

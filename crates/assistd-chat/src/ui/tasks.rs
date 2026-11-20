@@ -16,7 +16,8 @@ use ratatui::widgets::Paragraph;
 
 use super::super::selection::list_window;
 use super::super::settings::{
-    editor_window, list_hint, place_cursor, render_list_editor, render_wrapped_editor, titled_box,
+    choice_span, editor_window, list_hint, place_cursor, render_list_editor, render_wrapped_editor,
+    titled_box,
 };
 use super::super::tasks::{
     AT_FORMAT, EditorMode, EditorRow, ListRow, ListedTask, Message, PanelTab, QueueView,
@@ -790,15 +791,6 @@ fn render_trigger_form(
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
     if let Some((line, column)) = cursor {
         place_cursor(frame, inner, line, column);
-    }
-}
-
-fn choice_span(text: &str, focused: bool, theme: &Theme) -> Span<'static> {
-    let text = escape_controls_single_line(text);
-    if focused {
-        Span::styled(format!("◂ {text} ▸"), theme.accent_style())
-    } else {
-        Span::raw(format!("  {text}"))
     }
 }
 
