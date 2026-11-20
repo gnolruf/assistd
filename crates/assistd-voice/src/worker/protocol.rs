@@ -42,6 +42,10 @@ pub(super) enum ToWorker {
         replying: bool,
     },
     OpenFollowUp,
+    AwaitAnswer {
+        wait: Duration,
+    },
+    AnswerSettled,
 }
 
 /// What a [`ToWorker::Call`] asks for.
@@ -243,6 +247,10 @@ mod tests {
             },
             ToWorker::SetReplying { replying: true },
             ToWorker::OpenFollowUp,
+            ToWorker::AwaitAnswer {
+                wait: Duration::from_secs(10),
+            },
+            ToWorker::AnswerSettled,
         ]);
         round_trips(&messages);
     }
@@ -292,6 +300,9 @@ mod tests {
             },
             FromWorker::Heard {
                 heard: Heard::Command("what time is it".into()),
+            },
+            FromWorker::Heard {
+                heard: Heard::Answer("yes go ahead".into()),
             },
             FromWorker::Heard {
                 heard: Heard::BargeIn,

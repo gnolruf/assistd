@@ -183,6 +183,7 @@ impl PageTranscriber {
                 reasoning_effort: None,
             }),
             response_format: None,
+            grammar: None,
             id_slot: None,
         }
     }

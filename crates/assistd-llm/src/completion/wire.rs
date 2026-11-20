@@ -45,6 +45,9 @@ pub struct ChatRequest<'a> {
     /// Holds the reply to a JSON schema through llama-server's grammar sampler.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat<'a>>,
+    /// A GBNF grammar llama-server holds the reply to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grammar: Option<String>,
     /// The server slot to decode in; the server picks an idle one when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id_slot: Option<u32>,
@@ -289,6 +292,7 @@ mod tests {
             reasoning_budget_message: None,
             chat_template_kwargs: None,
             response_format: None,
+            grammar: None,
             id_slot: None,
         }
     }

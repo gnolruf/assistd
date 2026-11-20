@@ -156,6 +156,16 @@ impl Worker {
                     capture.listener.open_follow_up();
                 }
             }
+            ToWorker::AwaitAnswer { wait } => {
+                if let Some(Ok(capture)) = self.capture.get() {
+                    capture.listener.await_answer(wait);
+                }
+            }
+            ToWorker::AnswerSettled => {
+                if let Some(Ok(capture)) = self.capture.get() {
+                    capture.listener.answer_settled();
+                }
+            }
         }
     }
 

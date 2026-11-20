@@ -1,11 +1,13 @@
 //! Command review: the classifier, the shell-word helpers it shares, and why a script needs the
 //! user's confirmation.
 
+use std::collections::BTreeSet;
 use std::fmt;
+use std::path::Path;
 
 use self::variables::is_assignment;
 use super::allowlist::ProgramApproval;
-use super::confirm::Risk;
+use super::confirm::{Risk, Summary, spoken_list, spoken_path};
 use super::shell::{COMMAND_PREFIX_WORDS, Word};
 
 mod classify;
@@ -18,6 +20,9 @@ mod variables;
 mod wrappers;
 
 pub use classify::{Action, Analysis, Class, Effect, analyze, classify};
+
+/// The tool that runs a whole script, which a prompt calls a shell command.
+const SHELL_TOOL: &str = "bash";
 
 /// How many scripts deep (`eval`, `trap`, …) the classifier looks before
 /// calling a script unvetted.
@@ -66,6 +71,39 @@ impl Confirmation {
         match self {
             Self::Unvetted { always_allow, .. } => always_allow,
             Self::Sensitive(_) | Self::Edit(_) => &[],
+        }
+    }
+
+    /// What a run by `tool` that needs this confirmation would do and why it asks, in a
+    /// sentence.
+    pub fn summary(&self, tool: &str) -> Summary {
+        let command = if tool == SHELL_TOOL {
+            "a shell command".to_string()
+        } else {
+            format!("a {tool} command")
+        };
+        match self {
+            Self::Unvetted { why, always_allow } => {
+                let programs: BTreeSet<&str> = always_allow
+                    .iter()
+                    .map(|approval| approval.name.as_str())
+                    .filter(|program| *program != tool)
+                    .collect();
+                let what = if programs.is_empty() {
+                    command
+                } else {
+                    format!("{command} that runs {}", spoken_list(programs))
+                };
+                Summary::of(what).because(format!("It could not be checked: {why}."))
+            }
+            Self::Sensitive(why) => Summary::of(command).because(format!("It {why}.")),
+            Self::Edit(paths) if paths.is_empty() => {
+                Summary::of(format!("{command} that edits files"))
+            }
+            Self::Edit(paths) => {
+                let paths = paths.iter().map(|path| spoken_path(Path::new(path)));
+                Summary::of(format!("{command} that edits {}", spoken_list(paths)))
+            }
         }
     }
 

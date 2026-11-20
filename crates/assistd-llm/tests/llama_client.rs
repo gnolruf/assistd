@@ -1788,6 +1788,34 @@ async fn json_oneshot_is_a_lone_greedy_schema_request_and_recent_user_messages_a
 }
 
 #[tokio::test]
+async fn one_word_oneshot_holds_the_reply_to_its_words_by_grammar() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::Deltas(vec!["Deny".into()]))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+    let client = build_client(&client_spec(port));
+
+    let reply = client
+        .complete_oneshot(
+            "yes or no?".into(),
+            OneShotReply::OneOf(&["Confirm", "Deny"]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(reply, "Deny");
+    let request = &script.captured().await[0].body;
+    assert_eq!(request["grammar"], r#"root ::= "Confirm" | "Deny""#);
+    assert_eq!(
+        request["chat_template_kwargs"],
+        json!({"enable_thinking": false})
+    );
+    assert_eq!(request["temperature"], json!(0.0));
+    assert!(request.get("response_format").is_none());
+}
+
+#[tokio::test]
 async fn json_oneshot_prompt_carries_chat_template_tokens_as_inert_text() {
     let script = Script::new();
     script

@@ -22,7 +22,7 @@ use crate::chain::Word;
 use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
-    ApprovalGate, ConfirmationRequest, EgressPolicy, Risk, Unattended, on_blocking_pool,
+    ApprovalGate, ConfirmationRequest, EgressPolicy, Risk, Summary, Unattended, on_blocking_pool,
 };
 
 mod page;
@@ -142,6 +142,7 @@ impl WebCommand {
                 tool: NAME.to_string(),
                 script: format!("web fetch {url}"),
                 matched_pattern: format!("fetches from {host}, which is not yet approved"),
+                summary: fetch_summary(host),
                 always_allow: vec![host.to_string()],
                 risk: Risk::Elevated,
                 unattended: Unattended::WebHost(host.to_string()),
@@ -161,6 +162,10 @@ impl WebCommand {
                     matched_pattern: format!(
                         "fetches from {host} after files or other data on this machine were \
                          read, which the URL could carry"
+                    ),
+                    summary: fetch_summary(host).because(
+                        "Files or other data on this machine were read first, and the address \
+                         could carry them.",
                     ),
                     always_allow: Vec::new(),
                     risk: Risk::Elevated,
@@ -184,6 +189,8 @@ impl WebCommand {
                         "fetches from {host} over unencrypted HTTP, which anything on the network \
                      path can read or rewrite, because HTTPS failed: {https_error}"
                     ),
+                    summary: fetch_summary(host)
+                        .because("It goes over unencrypted HTTP, because HTTPS failed."),
                     always_allow: Vec::new(),
                     risk: Risk::Elevated,
                     unattended: Unattended::Never,
@@ -362,6 +369,11 @@ struct UnapprovedRedirect(String);
 #[derive(Debug, thiserror::Error)]
 #[error("redirect to unencrypted {0}; fetch it directly to be asked")]
 struct PlaintextRedirect(Url);
+
+/// A fetch from `host`, in a sentence.
+fn fetch_summary(host: &str) -> Summary {
+    Summary::of(format!("a fetch from {host}"))
+}
 
 fn follow_redirect(attempt: Attempt<'_>, egress: &EgressPolicy) -> reqwest::redirect::Action {
     if attempt.previous().len() > MAX_REDIRECTS {

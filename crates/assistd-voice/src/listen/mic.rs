@@ -103,7 +103,9 @@ pub struct MicContinuousListener {
     tuning: VadTuning,
     speech: Arc<VoiceOutputController>,
     barge_in: bool,
+    /// Whether speech is checked for barge-in: a reply is under way and no answer is awaited.
     replying_tx: watch::Sender<bool>,
+    reply: parking_lot::Mutex<ReplyState>,
     spotter: Arc<WakeWordSpotter>,
     command_timeout: Duration,
     follow_up: Option<Duration>,
@@ -120,11 +122,26 @@ pub struct MicContinuousListener {
     listen_mode: Mutex<ListenMode>,
 }
 
+/// What the daemon is saying to the user.
+#[derive(Debug, Clone, Copy, Default)]
+struct ReplyState {
+    /// A reply to a wake-word command is under way.
+    replying: bool,
+    /// A question asked aloud awaits its answer.
+    awaiting_answer: bool,
+}
+
 /// Steers the running session from outside it.
 #[derive(Debug, Clone, Copy)]
 enum SessionSignal {
     /// A reply to a wake-word command ended at this instant.
     FollowUp(Instant),
+    /// A question finished being asked aloud at `asked`; speech begun within `wait` answers it.
+    Answer {
+        asked: Instant,
+        wait: Duration,
+    },
+    AnswerSettled,
     /// Push-to-talk took the mic; act on nothing more this session.
     Abandon,
 }
@@ -264,6 +281,7 @@ impl MicContinuousListener {
             speech,
             barge_in: config.wakeword.barge_in,
             replying_tx: watch::channel(false).0,
+            reply: parking_lot::Mutex::default(),
             spotter,
             command_timeout: Duration::from_millis(config.wakeword.command_timeout_ms.get().into()),
             follow_up: (config.wakeword.follow_up_ms.get() > 0)
@@ -275,6 +293,13 @@ impl MicContinuousListener {
             capture_lost,
             listen_mode: Mutex::new(ListenMode::Off),
         }
+    }
+
+    fn update_reply(&self, update: impl FnOnce(&mut ReplyState)) {
+        let mut reply = self.reply.lock();
+        update(&mut reply);
+        self.replying_tx
+            .send_replace(reply.replying && !reply.awaiting_answer);
     }
 
     fn barge_in_watch(&self) -> Option<BargeInWatch> {
@@ -443,7 +468,21 @@ impl ContinuousListener for MicContinuousListener {
     }
 
     fn set_replying(&self, replying: bool) {
-        self.replying_tx.send_replace(replying);
+        self.update_reply(|reply| reply.replying = replying);
+    }
+
+    fn await_answer(&self, wait: Duration) {
+        self.update_reply(|reply| reply.awaiting_answer = true);
+        self.signal_tx.send_replace(Some(SessionSignal::Answer {
+            asked: Instant::now(),
+            wait,
+        }));
+    }
+
+    fn answer_settled(&self) {
+        self.update_reply(|reply| reply.awaiting_answer = false);
+        self.signal_tx
+            .send_replace(Some(SessionSignal::AnswerSettled));
     }
 
     async fn test_wake_word(&self, sink: mpsc::Sender<WakeTest>) -> Result<(), ListenError> {
@@ -488,8 +527,13 @@ impl TranscribeInputs {
                 Ok(()) = self.signals.changed() => {
                     match *self.signals.borrow_and_update() {
                         Some(SessionSignal::FollowUp(reply_ended)) => {
+                            gate.settle_answer();
                             gate.open_follow_up(reply_ended);
                         }
+                        Some(SessionSignal::Answer { asked, wait }) => {
+                            gate.await_answer(asked, wait);
+                        }
+                        Some(SessionSignal::AnswerSettled) => gate.settle_answer(),
                         Some(SessionSignal::Abandon) => return None,
                         None => {}
                     }
@@ -687,10 +731,10 @@ async fn transcribe_loop(
     while let Some(audio) = inputs.next_audio(&mut gate, &outputs).await {
         let carry_on = match audio {
             ListenAudio::Utterance(utterance) if !utterance.during_reply => {
-                let command = admit_utterance(&listeners, &mut gate, utterance, &outputs).await;
-                let abandoned = command.is_some() && inputs.abandoned();
-                if let Some(command) = command.filter(|_| !abandoned) {
-                    outputs.send_heard(Heard::Command(command));
+                let heard = admit_utterance(&listeners, &mut gate, utterance, &outputs).await;
+                let abandoned = heard.is_some() && inputs.abandoned();
+                if let Some(heard) = heard.filter(|_| !abandoned) {
+                    outputs.send_heard(heard);
                 }
                 !abandoned
             }
@@ -734,16 +778,18 @@ async fn settle_over_reply(
 }
 
 /// Spot the wake phrase in `utterance` and gate it; the command is the
-/// speech after the phrase, or a whole utterance inside a command window.
-/// A phrase with nothing after it opens the command window instead.
+/// speech after the phrase, or a whole utterance inside a command window, and
+/// an utterance inside the answer window is the answer. A phrase with nothing
+/// after it opens the command window instead.
 async fn admit_utterance(
     listeners: &Listeners,
     gate: &mut WakeGate,
     utterance: Utterance,
     outputs: &ListenOutputs,
-) -> Option<String> {
+) -> Option<Heard> {
     let (pcm, phrase_end) = spot(&listeners.spotter, utterance.pcm).await;
-    let command_start = match gate.admit(phrase_end.is_some(), utterance.started) {
+    let admission = gate.admit(phrase_end.is_some(), utterance.started);
+    let said_start = match admission {
         Admission::Dropped => {
             trace!(target: "assistd::voice::listen", "no wake phrase; dropped untranscribed");
             return None;
@@ -752,18 +798,22 @@ async fn admit_utterance(
             outputs.send_heard(Heard::WakePhrase);
             phrase_end.unwrap_or(0)
         }
+        Admission::Answer => phrase_end.unwrap_or(0),
         Admission::Command => 0,
     };
-    let command_pcm = &pcm[command_start..];
-    let command = if command_pcm.len() >= MIN_COMMAND_SAMPLES {
-        transcribe_pcm(listeners.transcriber.as_ref(), command_pcm).await
+    let said_pcm = &pcm[said_start..];
+    let said = if said_pcm.len() >= MIN_COMMAND_SAMPLES {
+        transcribe_pcm(listeners.transcriber.as_ref(), said_pcm).await
     } else {
         None
     };
-    if command.is_none() && phrase_end.is_some() {
+    if admission == Admission::Answer {
+        return said.map(Heard::Answer);
+    }
+    if said.is_none() && phrase_end.is_some() {
         gate.await_command(utterance.started);
     }
-    command
+    said.map(Heard::Command)
 }
 
 /// Run the spotter off the runtime; returns `pcm` with where the phrase

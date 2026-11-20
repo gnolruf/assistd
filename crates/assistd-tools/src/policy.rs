@@ -32,8 +32,9 @@ pub use approvals::{
 pub use confirm::{
     Approval, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate, ConfirmationRequest,
     IpcConfirmationGate, JudgeContext, JudgedClass, MAX_PENDING_CONFIRMS, NoPendingConfirm,
-    NoPendingReview, PromptParking, Risk, Unattended,
+    NoPendingReview, PromptParking, Risk, SpokenAnswer, Summary, Unattended, VoiceGate,
 };
+pub(crate) use confirm::{spoken_list, spoken_path};
 pub(crate) use egress::EgressPolicy;
 pub use file_scope::{ConfinedRoot, FileScope};
 pub use judge::{JUDGE_TIMEOUT, JudgeModel, JudgedCommand, SafetyJudge, Verdict};
@@ -150,6 +151,7 @@ impl SubprocessPolicy {
             tool: tool.to_string(),
             script: script.to_string(),
             matched_pattern: confirmation.to_string(),
+            summary: confirmation.summary(tool),
             always_allow: offered.iter().map(ToString::to_string).collect(),
             risk: confirmation.risk(),
             unattended,
@@ -190,6 +192,7 @@ impl ReadPolicy {
             tool: tool.to_string(),
             script: read_as_shown(tool, paths),
             matched_pattern: confirmation.to_string(),
+            summary: read_summary(paths, &confirmation),
             always_allow: Vec::new(),
             risk: confirmation.risk(),
             unattended: Unattended::Never,
@@ -240,6 +243,14 @@ fn read_as_shown(tool: &str, paths: &[&Word]) -> String {
     paths.iter().fold(tool.to_string(), |shown, path| {
         format!("{shown} {:?}", path.as_str())
     })
+}
+
+/// A read of `paths` that asks because of `confirmation`, in a sentence.
+fn read_summary(paths: &[&Word], confirmation: &Confirmation) -> Summary {
+    let paths = paths
+        .iter()
+        .map(|path| spoken_path(Path::new(path.as_str())));
+    Summary::of(format!("a read of {}", spoken_list(paths))).because(format!("It {confirmation}."))
 }
 
 /// What the path guards make of `analysis`: an edit is checked against `edit_scope`, minus

@@ -132,6 +132,9 @@ pub enum OneShotReply {
     Text(Thinking),
     /// JSON held by grammar to this schema, sampled greedily with thinking off.
     Json(Map<String, Value>),
+    /// Exactly one of these words, held by grammar, sampled greedily with thinking off. The
+    /// words hold no quote or backslash.
+    OneOf(&'static [&'static str]),
 }
 
 /// Events a backend streams during generation.

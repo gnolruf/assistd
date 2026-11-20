@@ -2,15 +2,16 @@
 //! prompts to an IPC client.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 use tracing::{info, warn};
 
 use assistd_config::defaults::CONFIRMATION_PROMPT_SECS;
@@ -21,6 +22,9 @@ use crate::TurnContext;
 
 /// Cap on confirmation prompts and plan reviews in flight on one connection.
 pub const MAX_PENDING_CONFIRMS: usize = 32;
+
+/// How many names a spoken prompt lists before it counts the rest.
+const SPOKEN_LIST_ITEMS: usize = 2;
 
 /// How long a prompt waits for the client's answer before it is denied.
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(CONFIRMATION_PROMPT_SECS);
@@ -34,6 +38,8 @@ pub struct ConfirmationRequest {
     pub script: String,
     /// Why the command needs confirmation, for display.
     pub matched_pattern: String,
+    /// The request in a sentence, for a prompt that is spoken instead of shown.
+    pub summary: Summary,
     /// Programs an [`Approval::Always`] answer adds to the allowlist.
     pub always_allow: Vec<String>,
     /// How much it could do beyond what the prompt shows.
@@ -42,6 +48,31 @@ pub struct ConfirmationRequest {
     pub unattended: Unattended,
     /// The agent whose command it is.
     pub source: ConfirmSource,
+}
+
+/// What a [`ConfirmationRequest`] would do and why it asks, short enough to say out loud.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    /// What would run, worded to follow "Allow": `a fetch from example.com`.
+    pub what: String,
+    /// Why it asks, as a sentence, when that is more than the tool not being approved yet.
+    pub why: Option<String>,
+}
+
+impl Summary {
+    /// A request for `what` that needs no reason said.
+    pub fn of(what: impl Into<String>) -> Self {
+        Self {
+            what: what.into(),
+            why: None,
+        }
+    }
+
+    /// The same request, asked because of `why`.
+    pub fn because(mut self, why: impl Into<String>) -> Self {
+        self.why = Some(why.into());
+        self
+    }
 }
 
 /// Which permission modes may approve a [`ConfirmationRequest`] without asking the user.
@@ -137,6 +168,23 @@ pub trait PromptParking: fmt::Debug + Send + Sync + 'static {
     async fn park(&self, req: ConfirmationRequest) -> Approval;
 }
 
+/// The user's answer to a prompt asked out loud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpokenAnswer {
+    Confirm,
+    Deny,
+    /// The question could not be asked, or nothing was said to it.
+    Unanswered,
+}
+
+/// Asks the prompts of a headless turn, one with no client to show them to, out loud.
+#[async_trait]
+pub trait VoiceGate: fmt::Debug + Send + Sync + 'static {
+    /// Say what `req` asks and read the user's spoken answer. Every failure is
+    /// [`SpokenAnswer::Deny`] or [`SpokenAnswer::Unanswered`].
+    async fn ask_aloud(&self, req: &ConfirmationRequest) -> SpokenAnswer;
+}
+
 /// Who answers a [`ConfirmRouter`]'s prompts.
 #[derive(Debug)]
 enum Answerer {
@@ -144,6 +192,44 @@ enum Answerer {
     Client,
     /// Nobody: the task's mode and allowed hosts, else its [`PromptParking`].
     TaskRun(TaskRunAsks),
+    /// The user, out loud.
+    Voice(VoiceAsks),
+}
+
+/// A headless turn's spoken prompts: one at a time, and none after one went unanswered.
+#[derive(Debug)]
+struct VoiceAsks {
+    gate: Arc<dyn VoiceGate>,
+    /// Whether an earlier prompt of the turn went unanswered; held while one is asked.
+    unanswered: AsyncMutex<bool>,
+}
+
+impl VoiceAsks {
+    /// Approve `req` once when the user says so; an answer never approves anything for good.
+    async fn ask(&self, req: &ConfirmationRequest) -> Approval {
+        let mut unanswered = self.unanswered.lock().await;
+        if *unanswered {
+            warn!(
+                target: "assistd::policy",
+                tool = %req.tool,
+                "command denied: an earlier spoken prompt of this turn went unanswered"
+            );
+            return Approval::Deny;
+        }
+        let answer = self.gate.ask_aloud(req).await;
+        info!(
+            target: "assistd::policy",
+            tool = %req.tool,
+            what = %req.summary.what,
+            ?answer,
+            "spoken prompt answered"
+        );
+        *unanswered = answer == SpokenAnswer::Unanswered;
+        match answer {
+            SpokenAnswer::Confirm => Approval::Once,
+            SpokenAnswer::Deny | SpokenAnswer::Unanswered => Approval::Deny,
+        }
+    }
 }
 
 /// The hosts a task run fetches from unasked, and where its other prompts wait.
@@ -256,10 +342,15 @@ impl ConfirmRouter {
         Arc::new(router)
     }
 
-    /// A router for a turn asked by voice, where nobody can answer a prompt: it approves what
-    /// [`PermissionMode::AcceptEdits`] runs unasked and denies every other ask at once.
-    pub fn for_voice_turn(request_id: String) -> Arc<Self> {
-        let router = Self::unanswered(request_id, None, Answerer::Client);
+    /// A router for a headless turn, asked by voice with no client to show a prompt to: it
+    /// approves what [`PermissionMode::AcceptEdits`] runs unasked and asks `gate` every other
+    /// prompt out loud, until one goes unanswered; the rest are then denied unasked.
+    pub fn for_voice_turn(request_id: String, gate: Arc<dyn VoiceGate>) -> Arc<Self> {
+        let asks = VoiceAsks {
+            gate,
+            unanswered: AsyncMutex::new(false),
+        };
+        let router = Self::unanswered(request_id, None, Answerer::Voice(asks));
         router.set_mode(PermissionMode::AcceptEdits);
         Arc::new(router)
     }
@@ -383,24 +474,21 @@ impl ConfirmRouter {
     }
 
     /// Approve `req` once when the mode lets it run unasked; otherwise prompt the client and
-    /// await the answer, or for a task run settle it by the task's hosts or park it. Every
-    /// failure is [`Approval::Deny`].
+    /// await the answer, for a task run settle it by the task's hosts or park it, or for a
+    /// headless turn ask it out loud. Every failure is [`Approval::Deny`].
     pub async fn ask(&self, mut req: ConfirmationRequest) -> Approval {
         self.label(&mut req.source);
         if self.planning() {
             return refuse_while_planning(&self.refused_while_planning, &req);
         }
-        let task_run = match &self.answerer {
-            Answerer::TaskRun(run) => Some(run),
-            Answerer::Client => None,
-        };
         let mode = *self.mode.lock();
         if self.approves_unasked(mode, &mut req).await {
             return Approval::Once;
         }
-        match task_run {
-            Some(run) => self.ask_for_task_run(run, req).await,
-            None => self.ask_client(req).await,
+        match &self.answerer {
+            Answerer::TaskRun(run) => self.ask_for_task_run(run, req).await,
+            Answerer::Voice(asks) => asks.ask(&req).await,
+            Answerer::Client => self.ask_client(req).await,
         }
     }
 
@@ -654,6 +742,36 @@ impl Drop for PendingPrompt<'_> {
     }
 }
 
+/// `path` as a sentence can name it: its last component and the folder holding that.
+pub(crate) fn spoken_path(path: &Path) -> String {
+    let file = path.file_name().map(OsStr::to_string_lossy);
+    let folder = path
+        .parent()
+        .and_then(Path::file_name)
+        .map(OsStr::to_string_lossy);
+    match (file, folder) {
+        (Some(file), Some(folder)) => format!("{file} in {folder}"),
+        (Some(file), None) => file.into_owned(),
+        (None, _) => path.display().to_string(),
+    }
+}
+
+/// `items` as a sentence lists them, those past [`SPOKEN_LIST_ITEMS`] only counted.
+pub(crate) fn spoken_list(items: impl IntoIterator<Item = impl Into<String>>) -> String {
+    let mut items: Vec<String> = items.into_iter().map(Into::into).collect();
+    let more = items.len().saturating_sub(SPOKEN_LIST_ITEMS);
+    items.truncate(SPOKEN_LIST_ITEMS);
+    let last = match more {
+        0 => items.pop(),
+        more => Some(format!("{more} more")),
+    };
+    match (items.is_empty(), last) {
+        (_, None) => String::new(),
+        (true, Some(last)) => last,
+        (false, Some(last)) => format!("{} and {last}", items.join(", ")),
+    }
+}
+
 /// Count and log `req`'s refusal by a planning turn.
 /// An id no other prompt or plan review of this process has had, so a late answer to a
 /// finished prompt never matches a newer one.
@@ -708,6 +826,7 @@ mod tests {
             tool: "bash".into(),
             script: "rm -rf foo".into(),
             matched_pattern: "rm -rf".into(),
+            summary: Summary::of("a shell command"),
             always_allow: Vec::new(),
             risk: Risk::Elevated,
             unattended: Unattended::Never,
@@ -774,27 +893,6 @@ mod tests {
                     assert_eq!(approval, expected, "{case}");
                 }
             }
-        }
-    }
-
-    #[tokio::test]
-    async fn voice_turn_runs_scoped_edits_and_denies_the_rest_without_waiting() {
-        let router = ConfirmRouter::for_voice_turn("r".into());
-        for (unattended, expected) in [
-            (Unattended::ScopedEdit, Approval::Once),
-            (Unattended::Never, Approval::Deny),
-            (judged(JudgedClass::Unvetted), Approval::Deny),
-            (Unattended::WebHost("example.com".into()), Approval::Deny),
-        ] {
-            let case = format!("{unattended:?}");
-            let ask = router.ask(ConfirmationRequest {
-                unattended,
-                ..sample_request()
-            });
-            let approval = tokio::time::timeout(Duration::from_secs(1), ask)
-                .await
-                .expect("answered without waiting on a client");
-            assert_eq!(approval, expected, "{case}");
         }
     }
 

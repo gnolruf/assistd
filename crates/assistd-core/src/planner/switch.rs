@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 
 use assistd_ipc::{ConfirmSource, PermissionMode, PlanVerdict};
 use assistd_tools::{
-    Approval, ConfirmRouter, ConfirmationRequest, Risk, Tool, ToolError, ToolOutput, TurnContext,
-    Unattended,
+    Approval, ConfirmRouter, ConfirmationRequest, Risk, Summary, Tool, ToolError, ToolOutput,
+    TurnContext, Unattended,
 };
 
 const ENTER_PLAN_MODE: &str = "enter_plan_mode";
@@ -173,6 +173,7 @@ fn enter_request(reason: String) -> ConfirmationRequest {
         tool: ENTER_PLAN_MODE.to_string(),
         script: reason,
         matched_pattern: ENTER_PROMPT.to_string(),
+        summary: Summary::of("planning this before doing it"),
         always_allow: Vec::new(),
         risk: Risk::Routine,
         unattended: Unattended::Never,

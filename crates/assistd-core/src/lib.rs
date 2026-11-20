@@ -22,6 +22,7 @@ pub mod tasks;
 mod transcript;
 mod turn_driver;
 mod vision;
+mod voice_gate;
 mod vram;
 
 pub use agent::{Agent, AgentSpec};

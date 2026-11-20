@@ -662,8 +662,23 @@ searched and fetched, which can still send what the user typed, recalled
 memories and the window title to an approved host, and `web search` queries
 reach SearXNG's search engines unasked.
 A turn asked by voice (push-to-talk
-or the wake word) has nobody to answer prompts: it runs in accept-edits mode
-and every other prompt is denied at once, without being shown to any client.
+or the wake word) is headless: no client shows its prompts. It runs in
+accept-edits mode, and every other prompt goes through
+`ConfirmRouter::for_voice_turn` to the voice confirmation gate
+(`VoiceConfirmationGate`), one at a time. The gate speaks one question built
+from the request's `Summary`: what it would do, and why it asks when that is
+more than the tool not being approved yet. The script is never read out. The
+tool call waits. The answer is the first utterance that begins within 10 s of
+the question ending (`Heard::Answer`, from the listener's answer window, with
+no wake phrase needed and barge-in checks off), or a push-to-talk press, which
+also cuts the question short. Speech over the question is ignored. The chat
+model reads the answer in a one-shot request that holds nothing of the history,
+with thinking off and the reply held by grammar to `Confirm` or `Deny`
+(`OneShotReply::OneOf`). Confirm approves that prompt once; nothing is approved
+for good by voice. Deny, an answer that cannot be read, a failed or late
+reading, muted or unavailable speech and silence all cancel the call, and after
+a question nobody answered the turn's later prompts are denied without being
+asked.
 
 A query connection starts in manual mode, where every prompt goes to the
 client. A client can switch modes with a mid-stream `RequestBody::SetPermissionMode`
