@@ -24,7 +24,7 @@ use assistd_llm::{
     ToolCall,
 };
 use assistd_memory::{
-    AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkScope, ChunkSource, DocumentText,
+    AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkSource, DocumentHit, DocumentText,
     Embedding, EmbeddingHit, EmbeddingSpace, FileStamp, HistoryRow, HistoryScope, IndexPass,
     IndexRootCounts, MemoryHit, MemoryId, MemoryStore, MessageId, MessageKind, NoSemanticStore,
     PersistedMessage, PersistedRole, PersistedToolCall, SemanticStore, SessionId, SessionScope,

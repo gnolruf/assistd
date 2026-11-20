@@ -1,4 +1,5 @@
-//! Vector retrieval over embedded transcript and document chunks and saved memories.
+//! Retrieval over transcript and document chunks and saved memories: by vector, and
+//! for documents by their words as well.
 
 use std::fmt;
 use std::fs::Metadata;
@@ -20,6 +21,23 @@ pub struct EmbeddingHit {
     pub locator: ChunkLocator,
     pub text: String,
     pub similarity: f32,
+}
+
+/// One document a search found, shown through its best-ranked chunk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentHit {
+    pub chunk_id: ChunkId,
+    pub document_id: DocumentId,
+    pub path: PathBuf,
+    /// The page the chunk is on, counted from zero.
+    pub page: usize,
+    pub page_count: usize,
+    /// The bytes of the page's text the chunk covers.
+    pub bytes: Range<usize>,
+    pub indexed_at: DateTime<Utc>,
+    pub text: String,
+    /// The chunk's cosine similarity to the query; `None` while it has no vector.
+    pub similarity: Option<f32>,
 }
 
 /// The source a matched chunk was cut from.
@@ -169,15 +187,6 @@ pub enum SessionScope {
     Only(SessionId),
 }
 
-/// Which sources a chunk search ranks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChunkScope {
-    /// Messages from the sessions in scope.
-    Messages(SessionScope),
-    /// Every indexed document.
-    Documents,
-}
-
 /// What a chunk's text was cut from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkSource {
@@ -284,18 +293,28 @@ pub struct IndexPass {
 }
 
 /// Top-K vector retrieval over embedded chunks and memories, and the index of
-/// local documents behind it.
+/// local documents with its search by vector and keyword.
 #[async_trait]
 pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
-    /// Top-K messages or documents in `scope` by their best chunk's cosine to the
-    /// L2-normalised `query_vector`, each hit carrying that chunk's text.
-    /// Sources outside `scope` are dropped before ranking, so never count toward `top_k`.
+    /// Top-K messages in `scope` by their best chunk's cosine to the L2-normalised
+    /// `query_vector`, each hit carrying that chunk's text. Messages outside `scope`
+    /// are dropped before ranking, so never count toward `top_k`.
     async fn nearest_chunks(
         &self,
         query_vector: Vec<f32>,
         top_k: usize,
-        scope: ChunkScope,
+        scope: SessionScope,
     ) -> Result<Vec<EmbeddingHit>>;
+
+    /// Top-K documents for `query`, best first: their ranking by best chunk's cosine
+    /// to the L2-normalised `query_vector` and their ranking by best chunk's BM25
+    /// against the words of `query`, fused by reciprocal rank.
+    async fn search_documents(
+        &self,
+        query: String,
+        query_vector: Vec<f32>,
+        top_k: usize,
+    ) -> Result<Vec<DocumentHit>>;
 
     /// The chunks around `locator` in its source: for a message, the last chunk of
     /// the previous user or assistant message in its session and the first of the next;
@@ -413,8 +432,16 @@ impl SemanticStore for NoSemanticStore {
         &self,
         _query_vector: Vec<f32>,
         _top_k: usize,
-        _scope: ChunkScope,
+        _scope: SessionScope,
     ) -> Result<Vec<EmbeddingHit>> {
+        Ok(Vec::new())
+    }
+    async fn search_documents(
+        &self,
+        _query: String,
+        _query_vector: Vec<f32>,
+        _top_k: usize,
+    ) -> Result<Vec<DocumentHit>> {
         Ok(Vec::new())
     }
     async fn adjacent_chunks(&self, _locator: &ChunkLocator) -> Result<AdjacentChunks> {

@@ -9,7 +9,7 @@ use assistd_ipc::{
     EventBody, Request, RequestBody, SkippedFiles,
 };
 use assistd_utils::terminal_text::escape_controls_single_line;
-use assistd_utils::text::collapse_whitespace;
+use assistd_utils::text::{collapse_whitespace, similarity_percent};
 use chrono::{DateTime, Local, Utc};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
@@ -40,9 +40,9 @@ pub(crate) enum DocumentsAction {
         #[arg(long)]
         quiet: bool,
     },
-    /// Rank the indexed documents by meaning, as the model's `docs search` does. One
-    /// tab-separated row per document, best first: path, similarity, page, byte range
-    /// within the page, index date, and the best-matching passage.
+    /// Rank the indexed documents by meaning and by the query's exact words, as the
+    /// model's `docs search` does. One tab-separated row per document, best first: path,
+    /// similarity, page, byte range within the page, index date, best-matching passage.
     Search {
         /// Cap on the documents listed; the daemon's `embedding.top_k` when omitted.
         #[arg(short = 'n', long, value_parser = clap::value_parser!(u32).range(1..=20))]
@@ -141,10 +141,10 @@ async fn search(query: String, limit: u32) -> Result<()> {
                 any_hit = true;
                 writeln!(
                     io::stdout(),
-                    "{}\tsim={:.0}%\tpage {page} of {page_count}\tbytes {byte_start}..{byte_end}\t\
+                    "{}\tsim={}\tpage {page} of {page_count}\tbytes {byte_start}..{byte_end}\t\
                      indexed {}\t{}",
                     escape_controls_single_line(path),
-                    similarity * 100.0,
+                    similarity_percent(*similarity),
                     indexed_at.format(INDEXED_DATE_FORMAT),
                     escape_controls_single_line(&collapse_whitespace(content)),
                 )?;

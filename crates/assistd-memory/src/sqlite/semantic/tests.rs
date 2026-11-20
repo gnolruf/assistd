@@ -69,6 +69,18 @@ fn one_page(text: impl Into<String>) -> Vec<String> {
     vec![text.into()]
 }
 
+/// Where `hit` sits in its document.
+fn locator_of(hit: &DocumentHit) -> ChunkLocator {
+    ChunkLocator::Document {
+        document_id: hit.document_id,
+        path: hit.path.clone(),
+        page: hit.page,
+        page_count: hit.page_count,
+        bytes: hit.bytes.clone(),
+        indexed_at: hit.indexed_at,
+    }
+}
+
 /// 2-d unit vector at `angle` radians.
 fn unit_vec(angle: f32) -> Vec<f32> {
     vec![angle.cos(), angle.sin()]
@@ -125,7 +137,7 @@ async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
         .await;
 
     let hits = store
-        .nearest_chunks(unit_vec(0.0), 3, ChunkScope::Messages(SessionScope::All))
+        .nearest_chunks(unit_vec(0.0), 3, SessionScope::All)
         .await
         .unwrap();
     let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
@@ -169,11 +181,7 @@ async fn nearest_chunks_keeps_the_best_top_k() {
 
     for (top_k, expected) in [(3, &ids[..3]), (usize::MAX, &ids[..])] {
         let hits = store
-            .nearest_chunks(
-                unit_vec(0.0),
-                top_k,
-                ChunkScope::Messages(SessionScope::All),
-            )
+            .nearest_chunks(unit_vec(0.0), top_k, SessionScope::All)
             .await
             .unwrap();
         let got: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
@@ -192,7 +200,7 @@ async fn nearest_chunks_can_exclude_or_keep_one_session() {
         .await;
 
     let all = store
-        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Messages(SessionScope::All))
+        .nearest_chunks(unit_vec(0.0), 5, SessionScope::All)
         .await
         .unwrap();
     let all_ids: Vec<ChunkId> = all.iter().map(|h| h.chunk_id).collect();
@@ -203,11 +211,7 @@ async fn nearest_chunks_can_exclude_or_keep_one_session() {
     );
 
     let others = store
-        .nearest_chunks(
-            unit_vec(0.0),
-            5,
-            ChunkScope::Messages(SessionScope::AllExcept(current.session)),
-        )
+        .nearest_chunks(unit_vec(0.0), 5, SessionScope::AllExcept(current.session))
         .await
         .unwrap();
     let other_ids: Vec<(ChunkId, SessionId)> = others
@@ -222,11 +226,7 @@ async fn nearest_chunks_can_exclude_or_keep_one_session() {
     assert_eq!(other_ids, [(past_chunk, past.session)]);
 
     let only_past = store
-        .nearest_chunks(
-            unit_vec(0.0),
-            5,
-            ChunkScope::Messages(SessionScope::Only(past.session)),
-        )
+        .nearest_chunks(unit_vec(0.0), 5, SessionScope::Only(past.session))
         .await
         .unwrap();
     let only_past_ids: Vec<ChunkId> = only_past.iter().map(|h| h.chunk_id).collect();
@@ -267,7 +267,7 @@ async fn documents_and_messages_rank_apart_and_reindexing_replaces_document_chun
     embed_chunk(&store, detail, &unit_vec(0.2)).await;
 
     let messages = store
-        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Messages(SessionScope::All))
+        .nearest_chunks(unit_vec(0.0), 5, SessionScope::All)
         .await
         .unwrap();
     let message_ids: Vec<ChunkId> = messages.iter().map(|h| h.chunk_id).collect();
@@ -278,28 +278,18 @@ async fn documents_and_messages_rank_apart_and_reindexing_replaces_document_chun
     );
 
     let documents = store
-        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Documents)
+        .search_documents(String::new(), unit_vec(0.0), 5)
         .await
         .unwrap();
     let [hit] = &documents[..] else {
         panic!("one document must hit through its re-indexed chunk, got {documents:?}");
     };
     assert_eq!(hit.chunk_id, detail);
-    let ChunkLocator::Document {
-        path: hit_path,
-        page,
-        page_count,
-        bytes,
-        ..
-    } = &hit.locator
-    else {
-        panic!("a document search must hit documents");
-    };
-    assert_eq!((hit_path, *page, *page_count), (&path, 0, 1));
-    assert_eq!(hit.text, section[bytes.clone()]);
-    let adjacent = store.adjacent_chunks(&hit.locator).await.unwrap();
+    assert_eq!((&hit.path, hit.page, hit.page_count), (&path, 0, 1));
+    assert_eq!(hit.text, section[hit.bytes.clone()]);
+    let adjacent = store.adjacent_chunks(&locator_of(hit)).await.unwrap();
     assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(intro));
-    assert!(adjacent.after.is_none() && bytes.start > 0);
+    assert!(adjacent.after.is_none() && hit.bytes.start > 0);
     assert_eq!(
         store.count_missing().await.unwrap(),
         UnindexedRows {
@@ -423,7 +413,7 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
     assert!(!store.remove_document(&gone).await.unwrap());
 
     let hits = store
-        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Documents)
+        .search_documents(String::new(), unit_vec(0.0), 5)
         .await
         .unwrap();
     let hit_ids: Vec<ChunkId> = hits.iter().map(|hit| hit.chunk_id).collect();
@@ -535,14 +525,14 @@ async fn a_document_chunk_keeps_its_vector_wherever_its_text_moves() {
     );
 
     let hits = store
-        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Documents)
+        .search_documents(String::new(), unit_vec(0.0), 5)
         .await
         .unwrap();
     let [hit] = &hits[..] else {
         panic!("the document must hit once, got {hits:?}");
     };
     assert_eq!((hit.chunk_id, hit.text.as_str()), (one_chunk, one));
-    let adjacent = store.adjacent_chunks(&hit.locator).await.unwrap();
+    let adjacent = store.adjacent_chunks(&locator_of(hit)).await.unwrap();
     assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(two_chunk));
     assert_eq!(adjacent.after.map(|chunk| chunk.chunk_id), Some(six_chunk));
 }
@@ -583,29 +573,168 @@ async fn a_chunk_stays_on_its_page_and_keeps_its_vector_when_the_page_moves() {
     );
 
     let hits = store
-        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Documents)
+        .search_documents(String::new(), unit_vec(0.0), 5)
         .await
         .unwrap();
     let [hit] = &hits[..] else {
         panic!("the document must hit once, got {hits:?}");
     };
-    let ChunkLocator::Document {
-        page,
-        page_count,
-        bytes,
-        ..
-    } = &hit.locator
-    else {
-        panic!("a document search must hit documents");
-    };
     assert_eq!(
-        (hit.chunk_id, *page, *page_count, bytes.clone()),
+        (hit.chunk_id, hit.page, hit.page_count, hit.bytes.clone()),
         (alpha, 1, 4, 0..5),
         "the page without text still counts"
     );
-    let adjacent = store.adjacent_chunks(&hit.locator).await.unwrap();
+    let adjacent = store.adjacent_chunks(&locator_of(hit)).await.unwrap();
     assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(cover));
     assert_eq!(adjacent.after.map(|chunk| chunk.chunk_id), Some(bravo));
+}
+
+#[tokio::test]
+async fn a_document_holding_the_querys_words_ranks_with_those_nearest_in_meaning() {
+    let (_handle, store, _temp) = fresh().await;
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let index = |name: &str, text: &str| {
+        let path = PathBuf::from(format!("/notes/{name}"));
+        store.index_document(pass, path, STAMP, one_page(text))
+    };
+    let terms = "# Terms\n\nrenewal terms of the lease\n\n# Reference\n\nfiled under REF-77";
+    let terms = index("terms.md", terms).await.unwrap();
+    let [terms_intro, terms_reference] = terms[..] else {
+        panic!("each heading must open a chunk, got {terms:?}");
+    };
+    let invoice = index("invoice.md", "Invoice INV-2024-0113, due in March").await;
+    let invoice = invoice.unwrap()[0];
+    let ledger = index("ledger.md", "paid INV-2024-0113 in full")
+        .await
+        .unwrap()[0];
+    embed_chunk(&store, terms_intro, &unit_vec(0.0)).await;
+    embed_chunk(&store, terms_reference, &unit_vec(1.4)).await;
+    embed_chunk(&store, invoice, &unit_vec(1.5)).await;
+    let search = async |query: &str| {
+        let hits = store.search_documents(query.to_string(), unit_vec(0.0), 5);
+        let hits = hits.await.unwrap();
+        hits.iter().map(|hit| hit.chunk_id).collect::<Vec<_>>()
+    };
+
+    assert_eq!(search("").await, [terms_intro, invoice]);
+    assert_eq!(
+        search("invoice inv-2024-0113").await,
+        [invoice, terms_intro, ledger],
+        "exact words must outrank a nearer vector, and find a chunk with no vector"
+    );
+    assert_eq!(
+        search("REF-77").await,
+        [terms_reference, invoice],
+        "a document found both ways is shown by the chunk holding the words"
+    );
+    assert_eq!(
+        search("paid").await,
+        [ledger, terms_intro, invoice],
+        "at equal rank the keyword match goes first"
+    );
+    let hits = store.search_documents("paid".into(), unit_vec(0.0), 5);
+    let similarities: Vec<Option<f32>> = hits.await.unwrap().iter().map(|h| h.similarity).collect();
+    assert!(
+        matches!(similarities[..], [None, Some(near), Some(far)] if near > 0.99 && far < 0.1),
+        "{similarities:?}"
+    );
+}
+
+#[tokio::test]
+async fn keyword_search_follows_a_document_through_reindexing_and_removal() {
+    let (handle, store, _temp) = fresh().await;
+    let path = PathBuf::from("/notes/scan.pdf");
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let pages = |texts: &[&str]| texts.iter().copied().map(String::from).collect::<Vec<_>>();
+    let index = |texts: &[&str]| store.index_document(pass, path.clone(), STAMP, pages(texts));
+    let found = async |word: &str| {
+        let hits = store.search_documents(word.to_string(), Vec::new(), 5);
+        let hits = hits.await.unwrap();
+        hits.iter()
+            .map(|hit| (hit.chunk_id, hit.page))
+            .collect::<Vec<_>>()
+    };
+    let indexed_chunks = async || {
+        let count = |c: &rusqlite::Connection| {
+            c.query_row("SELECT count(*) FROM document_chunk_fts", [], |r| {
+                r.get::<_, u64>(0)
+            })
+        };
+        handle.read("count", count).await.unwrap()
+    };
+
+    let stored = index(&["alpha", "draft"]).await.unwrap();
+    let [alpha, draft] = stored[..] else {
+        panic!("two short pages must not share a chunk, got {stored:?}");
+    };
+    assert_eq!(found("alpha").await, [(alpha, 0)]);
+    assert_eq!(found("draft").await, [(draft, 1)]);
+
+    let added = index(&["Cover", "alpha", "final"]).await.unwrap();
+    assert_eq!(
+        added.len(),
+        2,
+        "only the cover and the rewritten page are new"
+    );
+    assert_eq!(
+        found("alpha").await,
+        [(alpha, 1)],
+        "a kept chunk keeps its words"
+    );
+    assert_eq!(found("draft").await, [], "replaced text must not be found");
+    assert_eq!(found("final").await.len(), 1);
+    assert_eq!(
+        indexed_chunks().await,
+        3,
+        "a dropped chunk leaves the index"
+    );
+
+    assert!(store.remove_document(&path).await.unwrap());
+    assert_eq!(found("alpha").await, []);
+    assert_eq!(
+        indexed_chunks().await,
+        0,
+        "a removed document leaves the index"
+    );
+}
+
+#[tokio::test]
+async fn a_query_is_matched_as_words_and_never_read_as_fts5_syntax() {
+    let (_handle, store, _temp) = fresh().await;
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let text = "pass --remap-path-prefix to rustc, then call read_regular_file";
+    let path = PathBuf::from("/notes/build.md");
+    let stored = store.index_document(pass, path, STAMP, one_page(text));
+    let chunk = stored.await.unwrap()[0];
+    let found = async |query: &str| {
+        let hits = store.search_documents(query.to_string(), Vec::new(), 5);
+        let hits = hits
+            .await
+            .unwrap_or_else(|error| panic!("{query:?} failed: {error}"));
+        hits.iter().map(|hit| hit.chunk_id).collect::<Vec<_>>()
+    };
+
+    for literal in [
+        "--remap-path-prefix",
+        "\"read_regular_file\"",
+        "READ_REGULAR_FILE",
+        "rustc:",
+        "(rustc",
+        "prefix*",
+    ] {
+        assert_eq!(found(literal).await, [chunk], "{literal:?}");
+    }
+    for no_match in [
+        "\"unterminated",
+        "NEAR(",
+        "nothing AND",
+        "-x",
+        "col:",
+        "*",
+        "\"\" --",
+    ] {
+        assert_eq!(found(no_match).await, [], "{no_match:?}");
+    }
 }
 
 #[tokio::test]
@@ -676,7 +805,7 @@ async fn non_finite_vectors_never_enter_top_k() {
         .await;
 
     let hits = store
-        .nearest_chunks(unit_vec(0.0), 2, ChunkScope::Messages(SessionScope::All))
+        .nearest_chunks(unit_vec(0.0), 2, SessionScope::All)
         .await
         .unwrap();
     let got: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
@@ -787,7 +916,7 @@ async fn unembeddable_rows_are_neither_missing_nor_searched_until_cleared_or_cha
     );
     assert!(
         store
-            .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Messages(SessionScope::All))
+            .nearest_chunks(unit_vec(0.0), 5, SessionScope::All)
             .await
             .unwrap()
             .is_empty()
@@ -863,7 +992,7 @@ async fn adopting_a_different_embedding_space_drops_every_vector() {
             memories: 1
         }
     );
-    let all_messages = ChunkScope::Messages(SessionScope::All);
+    let all_messages = SessionScope::All;
     let hits = store.nearest_chunks(unit_vec(0.0), 5, all_messages).await;
     assert!(hits.unwrap().is_empty());
     assert!(

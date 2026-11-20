@@ -15,7 +15,7 @@ use assistd_ipc::{
     DocumentActivity, DocumentPass, DocumentPassCounts, DocumentPassEnd, DocumentRootStatus,
     DocumentSkipReason, Event, EventBody, SkippedFiles,
 };
-use assistd_memory::{ChunkLocator, ChunkScope, EmbeddingHit, IndexRootCounts, SemanticStore};
+use assistd_memory::{DocumentHit, IndexRootCounts, SemanticStore};
 use assistd_tools::policy::on_blocking_pool;
 use assistd_utils::readiness::NotReady;
 
@@ -252,11 +252,11 @@ impl DocumentsService {
         let query_vector = embedder.embed_query(&query).await.context("embed failed")?;
         let hits = self
             .semantic
-            .nearest_chunks(query_vector, limit as usize, ChunkScope::Documents)
+            .search_documents(query, query_vector, limit as usize)
             .await
             .context("document search failed")?;
-        for body in hits.into_iter().filter_map(wire_hit) {
-            let _ = tx.send(Event::new(id.clone(), body)).await;
+        for hit in hits {
+            let _ = tx.send(Event::new(id.clone(), wire_hit(hit))).await;
         }
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
@@ -339,27 +339,15 @@ fn wire_skip_reason(cause: SkipCause) -> DocumentSkipReason {
     }
 }
 
-/// `hit` as a `DocumentHit` event; `None` for a hit that is not in a document.
-fn wire_hit(hit: EmbeddingHit) -> Option<EventBody> {
-    let ChunkLocator::Document {
-        path,
-        page,
-        page_count,
-        bytes,
-        indexed_at,
-        ..
-    } = hit.locator
-    else {
-        return None;
-    };
-    Some(EventBody::DocumentHit {
-        path: wire_path(&path),
-        page: page as u64 + 1,
-        page_count: page_count as u64,
-        byte_start: bytes.start as u64,
-        byte_end: bytes.end as u64,
-        indexed_at,
+fn wire_hit(hit: DocumentHit) -> EventBody {
+    EventBody::DocumentHit {
+        path: wire_path(&hit.path),
+        page: hit.page as u64 + 1,
+        page_count: hit.page_count as u64,
+        byte_start: hit.bytes.start as u64,
+        byte_end: hit.bytes.end as u64,
+        indexed_at: hit.indexed_at,
         content: hit.text,
         similarity: hit.similarity,
-    })
+    }
 }

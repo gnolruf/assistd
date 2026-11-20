@@ -7,6 +7,10 @@ use assistd_config::{EmbeddingConfig, NonBlankString};
 use assistd_utils::child_server::{ApiKey, ChildServerSpec, remove_llama_env};
 use tokio::process::Command;
 
+/// Tokens one input may hold unless `embedding.custom_args` sets another count.
+/// llama-server's own 512 is fewer than some 512-character chunks come to.
+const INPUT_TOKENS: &str = "2048";
+
 /// Launch parameters for the supervised embedding llama-server, which embeds text
 /// only and loads no image projector. With `gpu_layers == 0` the child sees no
 /// CUDA devices.
@@ -36,6 +40,7 @@ impl ChildServerSpec for EmbedServerSpec {
 
     fn command(&self) -> Command {
         let mut cmd = Command::new(self.server_binary.as_str());
+        cmd.args(["--batch-size", INPUT_TOKENS, "--ubatch-size", INPUT_TOKENS]);
         cmd.args(self.cfg.custom_args.as_slice());
         push_managed_args(&mut cmd, &self.cfg, &self.api_key);
         remove_llama_env(&mut cmd);

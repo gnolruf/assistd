@@ -16,6 +16,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const BODY_MAX: usize = 32 * 1024 * 1024;
 const ERROR_BODY_MAX: usize = 64 * 1024;
 const ERROR_BODY_CHARS: usize = 200;
+/// What llama-server's error says of an input over its batch size. It reports that
+/// refusal as a server error, which only these words tell from a failure of its own.
+const INPUT_TOO_LARGE: &str = "is too large to process";
 
 #[derive(Serialize)]
 struct EmbedRequest<'a> {
@@ -130,13 +133,7 @@ impl LlamaEmbedder {
             let body = read_capped(response, ERROR_BODY_MAX)
                 .await
                 .unwrap_or_default();
-            return Err(EmbedError::Status {
-                status,
-                body: String::from_utf8_lossy(&body)
-                    .chars()
-                    .take(ERROR_BODY_CHARS)
-                    .collect(),
-            });
+            return Err(refusal(status, &String::from_utf8_lossy(&body)));
         }
         let body = read_capped(response, BODY_MAX).await?;
         let parsed: EmbedResponse = serde_json::from_slice(&body).map_err(EmbedError::Decode)?;
@@ -193,6 +190,15 @@ impl Embedder for LlamaEmbedder {
 
     fn dim(&self) -> usize {
         self.dim
+    }
+}
+
+fn refusal(status: reqwest::StatusCode, body: &str) -> EmbedError {
+    let body: String = body.chars().take(ERROR_BODY_CHARS).collect();
+    if body.contains(INPUT_TOO_LARGE) {
+        EmbedError::InputTooLarge { body }
+    } else {
+        EmbedError::Status { status, body }
     }
 }
 
@@ -412,6 +418,24 @@ mod tests {
             "{err:?}"
         );
         server.await.unwrap();
+    }
+
+    #[test]
+    fn an_input_over_the_batch_size_is_the_inputs_fault_and_other_server_errors_are_not() {
+        let server_error = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
+        let too_large = r#"{"error":{"code":500,"message":"input (600 tokens) is too large to process. increase the physical batch size (current batch size: 512)","type":"server_error"}}"#;
+        let failed = r#"{"error":{"code":500,"message":"failed to decode the batch","type":"server_error"}}"#;
+
+        let refused = refusal(server_error, too_large);
+        assert!(
+            matches!(refused, EmbedError::InputTooLarge { .. }) && refused.is_input_caused(),
+            "{refused:?}"
+        );
+        let broken = refusal(server_error, failed);
+        assert!(
+            matches!(broken, EmbedError::Status { .. }) && !broken.is_input_caused(),
+            "{broken:?}"
+        );
     }
 
     #[test]

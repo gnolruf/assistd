@@ -74,6 +74,14 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// A cosine `similarity` as a whole percentage, or `n/a` when there is none.
+pub fn similarity_percent(similarity: Option<f32>) -> String {
+    similarity.map_or_else(
+        || "n/a".to_string(),
+        |similarity| format!("{:.0}%", similarity * 100.0),
+    )
+}
+
 /// `text` with each run of whitespace, line breaks included, as one space and
 /// none at either end.
 pub fn collapse_whitespace(text: &str) -> String {

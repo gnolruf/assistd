@@ -698,12 +698,21 @@ that is stored and `embedding.query_prefix` before a query; callers
 say which of the two a text is and never build a prefix. A pass cut short by the server or the database is retried with
 backoff, so nothing is dropped. A row the server rejects for its own
 content is marked and skipped until `assistd memory reindex` retries
-it. A `remember` search embeds its query and ranks saved memories by
+it. The server is started with `--batch-size 2048 --ubatch-size 2048`,
+the tokens one input may hold, ahead of `embedding.custom_args`, which
+may set another count. llama-server's own 512 is too few: of 151,597
+document chunks in one index, 156 came to more, up to 600 tokens.
+llama-server answers an input over the count with a server error, as it
+would a fault of its own, so the client tells that refusal by its
+message and the row is marked and skipped like any other the server
+rejects; a document chunk marked so is still found by its words. A `remember` search embeds its query and ranks saved memories by
 cosine similarity; the `reminisce` tool runs the same kind of search
 over transcript chunks from earlier sessions. Indexed local documents
 own chunks in the same table, but their vectors are kept in a table
 of their own, quantised to a byte per dimension, so message recall never
-reads or ranks document chunks. Like model requests,
+reads or ranks document chunks. Document chunks alone also have their
+words in a full-text index, for the keyword half of a document search.
+Like model requests,
 embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
 meantime stays pending and is embedded by a later pass.
@@ -888,9 +897,13 @@ included, and otherwise the chunks left to embed.
 
 The model reaches the index through the `docs` command, which `build_tools()`
 registers behind `run` only with `documents.enabled`; the system prompt then
-gains one line saying so. `docs search <query>` embeds the query and prints
+gains one line saying so. `docs search <query>` embeds the query, ranks the
+documents both by vector and by the query's words, and fuses the two rankings
+([how](database.md#document-search)), so an identifier, an error message, a
+name or a number is found as written. It prints
 one line per document for the `embedding.top_k` best (or `-n`, at most 20):
-path, similarity, the page of the best-matching chunk as `page 12 of 212`, the
+path, cosine similarity (`n/a` for a chunk found by its words before it was
+embedded), the page of the best-matching chunk as `page 12 of 212`, the
 chunk's byte range within that page, the date the document was indexed, and
 the chunk. `docs read [--page P] [--offset N] <path>` prints the stored text
 of an indexed document from a byte of a page, pages counted from 1, which is

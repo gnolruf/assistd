@@ -32,20 +32,30 @@ impl SemanticStore for FixedHits {
         &self,
         _query_vector: Vec<f32>,
         top_k: usize,
-        scope: ChunkScope,
+        scope: SessionScope,
     ) -> assistd_memory::Result<Vec<EmbeddingHit>> {
         Ok(self
             .chunks
             .iter()
             .filter(|hit| match hit.locator {
                 ChunkLocator::Message { session_id, .. } => {
-                    scope != ChunkScope::Messages(SessionScope::AllExcept(session_id))
+                    scope != SessionScope::AllExcept(session_id)
                 }
-                ChunkLocator::Document { .. } => scope == ChunkScope::Documents,
+                ChunkLocator::Document { .. } => false,
             })
             .take(top_k)
             .cloned()
             .collect())
+    }
+    async fn search_documents(
+        &self,
+        query: String,
+        query_vector: Vec<f32>,
+        top_k: usize,
+    ) -> assistd_memory::Result<Vec<DocumentHit>> {
+        NoSemanticStore
+            .search_documents(query, query_vector, top_k)
+            .await
     }
     async fn nearest_memories(
         &self,

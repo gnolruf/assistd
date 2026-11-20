@@ -286,8 +286,8 @@ pub enum EventBody {
     /// The pass a `DocumentsReindex` follows over `root` ended.
     DocumentPassEnded { root: String, pass: DocumentPass },
     /// One `DocumentsSearch` hit: a document and its best-matching passage. `page` counts
-    /// from one, the byte range is within that page's text, and `similarity` is in
-    /// `[0.0, 1.0]`.
+    /// from one, the byte range is within that page's text, and `similarity`, in
+    /// `[0.0, 1.0]`, is absent for a passage that has no vector yet.
     DocumentHit {
         path: String,
         page: u64,
@@ -296,7 +296,8 @@ pub enum EventBody {
         byte_end: u64,
         indexed_at: DateTime<Utc>,
         content: String,
-        similarity: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        similarity: Option<f32>,
     },
     /// What the document index is doing; broadcast when it changes and sent first to every
     /// subscriber whose filter takes it.

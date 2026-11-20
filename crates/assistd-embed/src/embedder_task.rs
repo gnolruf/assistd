@@ -217,9 +217,9 @@ mod tests {
     use async_trait::async_trait;
 
     use assistd_memory::{
-        AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, DocumentText, Embedding, EmbeddingHit,
+        AdjacentChunks, ChunkId, ChunkLocator, DocumentHit, DocumentText, Embedding, EmbeddingHit,
         EmbeddingSpace, FileStamp, IndexPass, IndexRootCounts, MemoryHit, MemoryId,
-        NoSemanticStore, Result as MemoryResult, UnindexedRows,
+        NoSemanticStore, Result as MemoryResult, SessionScope, UnindexedRows,
     };
 
     /// The id of the first document chunk a [`Harness`] adds, above every message chunk's.
@@ -304,8 +304,16 @@ mod tests {
             &self,
             _query_vector: Vec<f32>,
             _top_k: usize,
-            _scope: ChunkScope,
+            _scope: SessionScope,
         ) -> MemoryResult<Vec<EmbeddingHit>> {
+            Ok(Vec::new())
+        }
+        async fn search_documents(
+            &self,
+            _query: String,
+            _query_vector: Vec<f32>,
+            _top_k: usize,
+        ) -> MemoryResult<Vec<DocumentHit>> {
             Ok(Vec::new())
         }
         async fn adjacent_chunks(&self, _locator: &ChunkLocator) -> MemoryResult<AdjacentChunks> {

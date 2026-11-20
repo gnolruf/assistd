@@ -42,9 +42,9 @@ pub struct EmbeddingConfig {
     /// Last-ditch cap, in seconds, on becoming healthy; the wait never trips
     /// while the model is still downloading or loading.
     pub ready_timeout_secs: NonZeroU64,
-    /// Extra server arguments. Flags assistd sets itself, or that expose
-    /// files, tools or state through the server, fail to parse. Any change
-    /// drops the stored vectors, which are then embedded again.
+    /// Extra server arguments, after `--batch-size 2048 --ubatch-size 2048`, the tokens
+    /// one input may hold. Flags assistd sets itself, or that expose files, tools or
+    /// state, fail to parse. Any change drops the stored vectors, embedded again after.
     pub custom_args: CustomArgs<EmbeddingServer>,
     /// Nearest-neighbour matches per search: the most saved memories and past-chat
     /// matches auto-injected, and the `reminisce` and `docs search` default. `1..=20`.

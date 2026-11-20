@@ -32,8 +32,8 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 /// Suffixes SQLite appends to the database path for its sidecar files.
 const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
-/// Cheaply cloneable handle shared by every store: document vector scans, other
-/// vector scans and other reads each go to their own read-only connection and writes
+/// Cheaply cloneable handle shared by every store: document searches, other vector
+/// scans and other reads each go to their own read-only connection and writes
 /// to the only writable one, each run in submission order on its connection's own thread.
 #[derive(Debug, Clone)]
 pub struct SqliteHandle {
@@ -126,7 +126,8 @@ impl SqliteHandle {
         read_on(&self.search_reader, op, query).await
     }
 
-    /// Like [`Self::read`], on the connection reserved for full scans of document chunk vectors.
+    /// Like [`Self::read`], on the connection reserved for document searches, which
+    /// scan every document chunk vector.
     pub(super) async fn search_documents<T, F>(&self, op: &'static str, query: F) -> Result<T>
     where
         F: FnOnce(&rusqlite::Connection) -> rusqlite::Result<T> + Send + 'static,

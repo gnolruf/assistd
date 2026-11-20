@@ -37,6 +37,11 @@ pub enum EmbedError {
         body: String,
     },
 
+    /// The server refused an input for holding more tokens than it takes at once;
+    /// `body` holds at most the first 200 chars.
+    #[error("embed server refused an input as too large (body: {body})")]
+    InputTooLarge { body: String },
+
     #[error("read /v1/embeddings response body: {0}")]
     Body(#[from] BodyError),
 
@@ -72,7 +77,7 @@ impl EmbedError {
     pub fn is_input_caused(&self) -> bool {
         match self {
             Self::Status { status, .. } => status.is_client_error(),
-            Self::DimMismatch { .. } | Self::NonFinite => true,
+            Self::InputTooLarge { .. } | Self::DimMismatch { .. } | Self::NonFinite => true,
             _ => false,
         }
     }
