@@ -107,6 +107,9 @@ pub enum PresenceError {
 
     #[error("another model already borrows the drowsy llama-server")]
     AlreadyLent,
+
+    #[error("the daemon is shutting down")]
+    ShuttingDown,
 }
 
 /// Loading the model now would leave less free VRAM than the configured headroom.
@@ -154,8 +157,8 @@ pub struct PresenceManager {
     /// Flipped by `sleep()` to stop the current supervisor only.
     current_inner_shutdown: InnerShutdownSlot,
     state_tx: watch::Sender<PresenceState>,
-    /// Keeps the daemon shutdown watch open so the forwarder cannot miss it.
-    _daemon_shutdown_keepalive: watch::Receiver<bool>,
+    /// Once flipped, no wake starts; holding it keeps the watch open for the forwarder.
+    daemon_shutdown: watch::Receiver<bool>,
     /// Last user-initiated interaction; automatic monitors don't bump it.
     last_activity: StdMutex<Instant>,
     /// Read by request guards, written by `sleep`/`drowse` to drain them.
@@ -176,7 +179,8 @@ pub struct PresenceManager {
 impl PresenceManager {
     /// Create a manager in `Sleeping` with no llama-server started. Every server it starts
     /// accepts only `api_key`, saves slots only into `slot_dir` and reads its models'
-    /// presets from `presets`. Flipping `daemon_shutdown` cancels any wake in flight.
+    /// presets from `presets`. Flipping `daemon_shutdown` cancels any wake in flight
+    /// and fails every later one with [`PresenceError::ShuttingDown`].
     pub fn new_sleeping(
         model: ModelConfig,
         timeouts: TimeoutsConfig,
@@ -209,7 +213,7 @@ impl PresenceManager {
             tasks,
             current_inner_shutdown,
             state_tx,
-            _daemon_shutdown_keepalive: daemon_shutdown,
+            daemon_shutdown,
             last_activity: StdMutex::new(Instant::now()),
             inflight: Arc::new(RwLock::new(())),
             wake_started: StdMutex::new(None),
@@ -559,13 +563,14 @@ impl PresenceManager {
     }
 
     /// `Sleeping|Drowsy → Active`, reporting `Waking` meanwhile.
-    /// Idempotent from `Active`.
+    /// Idempotent from `Active`; errors once the daemon is shutting down.
     pub async fn wake(&self) -> Result<(), PresenceError> {
         let _guard = self.transition.lock().await;
         let prior = self.settled();
         if prior == PresenceTarget::Active {
             return Ok(());
         }
+        self.ensure_not_shutting_down()?;
         self.reclaim_drowsy_server().await;
         self.ensure_room_to_wake()?;
 
@@ -590,6 +595,13 @@ impl PresenceManager {
             duration_ms = saturating_millis(started.elapsed()),
             "transitioned {prior:?} → Active"
         );
+        Ok(())
+    }
+
+    fn ensure_not_shutting_down(&self) -> Result<(), PresenceError> {
+        if *self.daemon_shutdown.borrow() {
+            return Err(PresenceError::ShuttingDown);
+        }
         Ok(())
     }
 
@@ -738,6 +750,10 @@ impl PresenceManager {
         self.signal_inner_shutdown();
         let (inner_tx, inner_rx) = watch::channel(false);
         *self.current_inner_shutdown.lock() = Some(inner_tx);
+        if let Err(shutting_down) = self.ensure_not_shutting_down() {
+            *self.current_inner_shutdown.lock() = None;
+            return Err(shutting_down);
+        }
 
         let spec = LlamaServerSpec::new(
             self.model.clone(),
@@ -1076,15 +1092,7 @@ pub(crate) mod tests {
             PresenceTarget::Drowsy => Lifecycle::Drowsy(stopped_server()),
             PresenceTarget::Sleeping => Lifecycle::Sleeping,
         };
-        let model = ModelConfig {
-            name: "stub/model".parse().expect("stub model name"),
-            context_length: nz32(1024),
-            server_binary: "/does/not/exist".parse().expect("stub server binary"),
-            port: nz16(1),
-            gpu_layers: 1,
-            ready_timeout_secs: nz64(1),
-            ..ModelConfig::default()
-        };
+        let model = stub_model();
         let api_key = ApiKey::generate().expect("stub api key");
         let control =
             LlamaServerControl::new(model.listen_addr(), None, None).expect("dummy control");
@@ -1100,7 +1108,7 @@ pub(crate) mod tests {
             tasks: TaskTracker::new(),
             current_inner_shutdown: Arc::new(StdMutex::new(None)),
             state_tx,
-            _daemon_shutdown_keepalive: rx,
+            daemon_shutdown: rx,
             last_activity: StdMutex::new(Instant::now()),
             inflight: Arc::new(RwLock::new(())),
             wake_started: StdMutex::new(None),
@@ -1109,6 +1117,18 @@ pub(crate) mod tests {
             loan: AsyncMutex::new(()),
             borrower: StdMutex::new(CancellationToken::new()),
         })
+    }
+
+    fn stub_model() -> ModelConfig {
+        ModelConfig {
+            name: "stub/model".parse().expect("stub model name"),
+            context_length: nz32(1024),
+            server_binary: "/does/not/exist".parse().expect("stub server binary"),
+            port: nz16(1),
+            gpu_layers: 1,
+            ready_timeout_secs: nz64(1),
+            ..ModelConfig::default()
+        }
     }
 
     #[tokio::test]
@@ -1219,5 +1239,39 @@ pub(crate) mod tests {
             .expect_err("stub llama-server binary does not exist");
         assert_eq!(m.state(), PresenceState::Sleeping);
         assert!(m.wake_in_progress().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_wake_queued_when_the_daemon_shuts_down_starts_no_server() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let m = PresenceManager::new_sleeping(
+            stub_model(),
+            TimeoutsConfig::default(),
+            ApiKey::generate().expect("stub api key"),
+            SlotDir::new("/does/not/exist/slots".into()),
+            ModelPresets::new("/does/not/exist/presets.ini".into(), None),
+            shutdown_rx,
+        )
+        .expect("stub manager");
+        let transition = m.transition.lock().await;
+        let queued = tokio::spawn({
+            let m = Arc::clone(&m);
+            async move { m.wake().await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        shutdown_tx
+            .send(true)
+            .expect("the manager holds a receiver");
+        drop(transition);
+        let outcome = timeout(Duration::from_secs(2), queued)
+            .await
+            .expect("the queued wake never returned")
+            .expect("wake task panicked");
+        assert!(
+            matches!(outcome, Err(PresenceError::ShuttingDown)),
+            "{outcome:?}"
+        );
+        assert!(m.current_inner_shutdown.lock().is_none());
     }
 }
