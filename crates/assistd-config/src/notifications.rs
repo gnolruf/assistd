@@ -15,9 +15,6 @@ pub struct NotificationsConfig {
     /// Idle ms before the notification closes, `500..=60000`. Reset by
     /// each event and paused while a turn is in flight.
     pub auto_hide_ms: Bounded<500, 60_000>,
-    /// Ask for a short plain-text reply to a voice turn while the chat is
-    /// unfocused or closed.
-    pub brief_when_away: bool,
 }
 
 impl DescribeSettings for NotificationsConfig {
@@ -27,11 +24,6 @@ impl DescribeSettings for NotificationsConfig {
         auto_hide_ms => (
             "hide after idle (ms)",
             "Idle time before a notification closes, 500 to 60000"
-        ),
-        #[consumer(Daemon)]
-        brief_when_away => (
-            "brief voice replies when away",
-            "Ask for short replies to voice turns while the chat is unfocused"
         ),
     }
 }
@@ -49,7 +41,6 @@ impl Default for NotificationsConfig {
         Self {
             enabled: true,
             auto_hide_ms: bounded(3000),
-            brief_when_away: true,
         }
     }
 }

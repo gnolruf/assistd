@@ -76,6 +76,7 @@
 # max_sentence_chars = 400  # 50..=2000
 # partial_flush_ms = 750  # 0 disables
 # output_device = "pipewire"  # as listed by `aplay -L`; unset uses the default
+# conversational = true  # short spoken-style replies while replies are read aloud
 
 [compositor]
 # type = "auto"  # auto | i3 | sway | hyprland; also picks the screenshot tools
@@ -179,7 +180,6 @@
 # Desktop notifications from `assistd tray`; none while the chat is focused.
 # enabled = true
 # auto_hide_ms = 3000
-# brief_when_away = true  # short replies to voice turns while the chat is unfocused
 
 # [tasks]
 # interruption = "interrupt"  # or "after_task", "after_queue"; only with one model lane
