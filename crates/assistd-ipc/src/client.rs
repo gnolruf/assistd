@@ -75,14 +75,14 @@ impl IpcClient {
     }
 
     /// Send one request, close the write half, and stream events until `Done` or `Error`.
-    /// Fails with [`IpcClientError::VersionMismatch`] when the daemon is from another version.
+    /// Fails with [`IpcClientError::VersionMismatch`], sending nothing, when the daemon is
+    /// from another version.
     pub async fn one_shot(&self, req: Request) -> Result<EventStream> {
-        let stream = self.connect().await?;
-        let (read, mut write) = stream.into_split();
+        let (events, mut write) = self.connect().await?;
         if write_initial_frame(&mut write, &req).await? {
             write.shutdown().await?;
         }
-        EventStream::greeted(read).await
+        Ok(events)
     }
 
     /// Send one request and hand every event, the terminal one included, to `on_event`
@@ -122,16 +122,13 @@ impl IpcClient {
     /// Send `initial` but keep the write half open for further requests, such as a
     /// [`crate::RequestBody::ConfirmResponse`]. Fails like [`one_shot`](Self::one_shot).
     pub async fn open_dialog(&self, initial: Request) -> Result<DialogConnection> {
-        let stream = self.connect().await?;
-        let (read, mut write) = stream.into_split();
+        let (events, mut write) = self.connect().await?;
         write_initial_frame(&mut write, &initial).await?;
-        Ok(DialogConnection {
-            write,
-            events: EventStream::greeted(read).await?,
-        })
+        Ok(DialogConnection { write, events })
     }
 
-    async fn connect(&self) -> Result<UnixStream> {
+    /// Nothing is written to the connection, so a refused daemon runs no request.
+    async fn connect(&self) -> Result<(EventStream, OwnedWriteHalf)> {
         let stream = UnixStream::connect(&self.socket_path)
             .await
             .map_err(|source| IpcClientError::NotReachable {
@@ -145,7 +142,8 @@ impl IpcClient {
                 peer_uid,
             });
         }
-        Ok(stream)
+        let (read, write) = stream.into_split();
+        Ok((EventStream::greeted(read).await?, write))
     }
 }
 
@@ -247,7 +245,7 @@ impl DialogConnection {
 mod tests {
     use super::*;
     use crate::{PlanMode, RequestBody};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     fn query() -> Request {
@@ -261,18 +259,17 @@ mod tests {
         )
     }
 
-    /// Mock daemon: accepts one connection, parses one request, writes `responses`, then closes.
+    /// Mock daemon: accepts one connection, greets it, parses one request, writes
+    /// `responses`, then closes.
     /// The returned `TempDir` owns the socket and must outlive the test.
     fn mock_server(
         responses: &[Event],
     ) -> (tempfile::TempDir, PathBuf, tokio::task::JoinHandle<()>) {
         mock_server_raw(
-            std::iter::once(hello_line())
-                .chain(
-                    responses
-                        .iter()
-                        .map(|event| serde_json::to_string(event).unwrap()),
-                )
+            hello_line(),
+            responses
+                .iter()
+                .map(|event| serde_json::to_string(event).unwrap())
                 .collect(),
         )
     }
@@ -281,8 +278,10 @@ mod tests {
         serde_json::to_string(&Hello::current()).unwrap()
     }
 
-    /// [`mock_server`] that writes each of `lines` verbatim.
+    /// [`mock_server`] that writes `greeting` and each of `lines` verbatim, and expects a
+    /// request only when `greeting` is one this client accepts.
     fn mock_server_raw(
+        greeting: String,
         lines: Vec<String>,
     ) -> (tempfile::TempDir, PathBuf, tokio::task::JoinHandle<()>) {
         let dir = tempfile::tempdir().unwrap();
@@ -291,27 +290,31 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, mut write) = stream.into_split();
-            let mut reader = BufReader::new(read);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let _: Request = serde_json::from_str(line.trim()).unwrap();
+            let greeted = greeting == hello_line();
+            write.write_all((greeting + "\n").as_bytes()).await.unwrap();
+            let mut received = String::new();
+            BufReader::new(read)
+                .read_to_string(&mut received)
+                .await
+                .unwrap();
+            if !greeted {
+                assert_eq!(received, "", "a refused daemon must be sent nothing");
+                return;
+            }
+            let _: Request = serde_json::from_str(received.trim()).unwrap();
             for mut out in lines {
                 out.push('\n');
                 write.write_all(out.as_bytes()).await.unwrap();
             }
-            write.flush().await.unwrap();
             write.shutdown().await.unwrap();
         });
         (dir, path, server)
     }
 
     #[tokio::test]
-    async fn daemon_of_another_version_is_refused() {
+    async fn daemon_of_another_version_is_refused_before_the_request_is_sent() {
         let connect = async |first_line: &str| {
-            let (_dir, path, server) = mock_server_raw(vec![
-                first_line.to_owned(),
-                r#"{"type":"done","id":"r"}"#.into(),
-            ]);
+            let (_dir, path, server) = mock_server_raw(first_line.to_owned(), Vec::new());
             let outcome = IpcClient::with_path(path).one_shot(query()).await;
             server.await.unwrap();
             outcome.map(|_| ())
@@ -336,11 +339,13 @@ mod tests {
 
     #[tokio::test]
     async fn undecodable_event_is_an_error() {
-        let (_dir, path, server) = mock_server_raw(vec![
+        let (_dir, path, server) = mock_server_raw(
             hello_line(),
-            r#"{"type":"confirm_request","id":"r","confirm_id":7}"#.into(),
-            r#"{"type":"done","id":"r"}"#.into(),
-        ]);
+            vec![
+                r#"{"type":"confirm_request","id":"r","confirm_id":7}"#.into(),
+                r#"{"type":"done","id":"r"}"#.into(),
+            ],
+        );
         let client = IpcClient::with_path(path);
         let mut stream = client.one_shot(query()).await.unwrap();
         let outcome = stream.next_event().await;
@@ -396,6 +401,10 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, mut write) = stream.into_split();
             let mut reader = BufReader::new(read);
+            write
+                .write_all((hello_line() + "\n").as_bytes())
+                .await
+                .unwrap();
 
             let mut first = String::new();
             reader.read_line(&mut first).await.unwrap();
@@ -412,7 +421,7 @@ mod tests {
                     source: crate::ConfirmSource::Main,
                 },
             );
-            let mut out = hello_line() + "\n" + &serde_json::to_string(&confirm).unwrap();
+            let mut out = serde_json::to_string(&confirm).unwrap();
             out.push('\n');
             write.write_all(out.as_bytes()).await.unwrap();
             write.flush().await.unwrap();

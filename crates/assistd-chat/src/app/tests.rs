@@ -85,7 +85,7 @@ fn status(event: Event) -> ChatEvent {
     }
 }
 
-/// Accept one dialog connection, read its request line, then stream
+/// Accept one dialog connection, greet it, read its request line, then stream
 /// `events` back after a pause in which the query driver sees its writer
 /// channel close with nothing readable.
 fn mock_daemon(socket: &Path, events: Vec<Event>) -> JoinHandle<()> {
@@ -94,10 +94,10 @@ fn mock_daemon(socket: &Path, events: Vec<Event>) -> JoinHandle<()> {
         let (stream, _) = listener.accept().await.unwrap();
         let (read, mut write) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
         let hello = serde_json::to_string(&Hello::current()).unwrap();
         write.write_all((hello + "\n").as_bytes()).await.unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         for ev in events {
             let mut out = serde_json::to_string(&ev).unwrap();
