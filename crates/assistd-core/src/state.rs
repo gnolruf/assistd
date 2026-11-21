@@ -319,6 +319,12 @@ impl AppState {
         safety_judge(&self.config, model)
     }
 
+    /// Cancel every user turn, queued or running, as an interrupt does, and every one
+    /// started afterwards. For daemon shutdown; idempotent.
+    pub fn stop_turns(&self) {
+        self.turns.deps.admission.stop_turns();
+    }
+
     /// Wait for every queued transcript write and every background
     /// persistence task; none may be started afterwards.
     pub async fn finish_persistence(&self) {

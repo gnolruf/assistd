@@ -152,4 +152,16 @@ mod tests {
             .await
             .expect("sentinel must not panic on inner panic");
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_aborts_tasks_still_running_after_the_grace() {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(std::future::pending::<()>());
+
+        tokio::time::timeout(SHUTDOWN_GRACE * 2, drain_join_set(&mut tasks, "stuck"))
+            .await
+            .expect("drain waited on a task that never finishes");
+
+        assert!(tasks.is_empty());
+    }
 }

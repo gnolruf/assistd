@@ -60,7 +60,7 @@ pub(crate) struct TurnAdmission {
     pub(crate) interaction: Arc<UserInteraction>,
     pub(crate) task_queue: TaskQueue,
     /// Parent of every turn's cancellation token; an interrupt cancels it
-    /// and installs a fresh one.
+    /// and installs a fresh one, a stop cancels it for good.
     interrupt: StdMutex<CancellationToken>,
 }
 
@@ -80,7 +80,7 @@ impl TurnAdmission {
     }
 
     /// A token for a turn starting now, cancelled by the next
-    /// [`Self::interrupt_turns`].
+    /// [`Self::interrupt_turns`]; already cancelled after [`Self::stop_turns`].
     pub(crate) fn turn_cancellation(&self) -> CancellationToken {
         self.interrupt.lock().child_token()
     }
@@ -88,8 +88,15 @@ impl TurnAdmission {
     /// Cancel every turn started so far, queued or running; later turns
     /// are unaffected.
     pub(crate) fn interrupt_turns(&self) {
-        let interrupted = std::mem::replace(&mut *self.interrupt.lock(), CancellationToken::new());
-        interrupted.cancel();
+        let mut interrupt = self.interrupt.lock();
+        if !interrupt.is_cancelled() {
+            std::mem::replace(&mut *interrupt, CancellationToken::new()).cancel();
+        }
+    }
+
+    /// Cancel every turn, queued or running, and every turn started afterwards.
+    pub(crate) fn stop_turns(&self) {
+        self.interrupt.lock().cancel();
     }
 
     /// The task queue and the model lanes as they stand.
