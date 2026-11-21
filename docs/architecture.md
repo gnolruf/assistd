@@ -682,6 +682,51 @@ reading, muted or unavailable speech and silence all cancel the call, and after
 a question nobody answered the turn's later prompts are denied without being
 asked.
 
+A headless turn that expects to need more than one approval can collect them
+in one question. Its agent (`Planner::headless_turn_agent`) carries the same
+two plan-mode tools as a typed turn, with different behaviour: `enter_plan_mode`
+starts the turn planning without asking, since planning runs nothing that asks,
+and `exit_plan_mode` takes a one-sentence summary and a list of actions in the
+vocabulary refine uses (`PlannedAction`: program, web host, MCP tool, app,
+write directory) in place of a Markdown plan. `ActionCheck` checks each: one
+that cannot work on this machine sends the plan back unasked, and one that
+already runs unasked is left out of the question. The rest are spoken through
+`ConfirmRouter::propose_grant` as the summary and "I need to edit files in X,
+run cargo, and reach docs.rs. Shall I go ahead?", every action named, and the
+answer is heard and read exactly as a prompt's is. Confirm leaves plan mode and
+grants the actions to that turn (`TurnGrant`); nothing is approved for good.
+Instruct keeps the turn planning and hands the agent what was said, to revise
+the plan and ask again. Deny or silence keeps the turn planning, so nothing
+that asks can run, and tells the agent to stop.
+
+A later prompt runs unasked when the grant covers everything it needs, which
+each request states in `JudgeContext::grantable`. A program granted without a
+subcommand covers every run of it, and with one only that subcommand. A web
+host is covered by its exact name alone. A write directory covers what an edit
+scope directory would: paths below it, none behind a hidden entry. Prompts no
+mode approves unasked are never covered and still ask one at a time: a
+sensitive path, a fetch after local reads or over plain HTTP, a write too long
+to show, a launch with files or a URL, and a script whose programs the
+classifier cannot name. So does anything the plan did not list.
+
+Web research beyond a quick lookup goes through a plan on a headless turn.
+With no plan agreed, the turn may ask about one web host on its own
+(`ConfirmRouter::unplanned_sites_left`, counted across the agent and its
+sub-agents). After that, `web fetch` from a host not approved for good, and a
+`relay` whose web steps would need more hosts than are left, are refused with
+a result that tells the agent to enter plan mode.
+There it runs `web search`,
+which planning runs unasked, and lists each site it means to read; a plan may
+name up to 32 actions, all of them spoken. Once the user agrees, the agent
+hands the research to `web_research` sub-agents itself: a web step of `relay`
+takes `sites`, the hosts that sub-agent should read, and after a headless turn's
+plan every one must be in the grant (`TurnContext::granted_hosts`) or approved for
+good, or the call is refused. The sub-agent's prompt names its sites and says
+that any other costs the user a spoken question, to be fetched only when the
+task cannot be answered well without it. The grant sits on the turn's router,
+so the sub-agent's fetches from granted hosts run unasked and its others ask
+one at a time.
+
 A query connection starts in manual mode, where every prompt goes to the
 client. Besides allowing once, allowing for good where that is offered, and
 denying, a prompt can be answered with a message for the agent
@@ -1064,6 +1109,17 @@ conversation, so no follow-up window opens until the wake phrase starts a
 new one. The listener reports `ListenPhase` (`Off`, `Armed`, `Capturing`)
 and a `WakeWordDetected` event on the bus. The listener keeps running
 while presence sleeps, and a command wakes the model like any other query.
+
+A session talked to by voice with no chat open ends in two stages. The
+follow-up window closing is the first: the listener wants the phrase again.
+`SessionLapse` times the second: `voice.session_hold_secs` after the last
+user turn ends, speech included, a spoken prompt (wake word or push-to-talk) no
+longer continues the active session. `TurnService` then begins a new unsaved
+session for that turn (`BranchService::begin_session_for_turn`), as `/new`
+does, before the prompt is saved. A chat window that is open, focused or not
+(`ChatFocusSlot::open`), keeps spoken prompts in the session it shows. The
+time is kept in memory, so the first spoken prompt after a daemon start
+begins a new session too. With the key at `0` no spoken prompt begins one.
 
 A cpal stream error that ends the stream (the device was unplugged) fails the
 capture reading it: a push-to-talk recording errors, and the listener goes

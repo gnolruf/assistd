@@ -15,9 +15,13 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 use tracing::{info, warn};
 
 use assistd_config::defaults::CONFIRMATION_PROMPT_SECS;
-use assistd_ipc::{ConfirmSource, Event, EventBody, HostName, PermissionMode, PlanVerdict};
+use assistd_ipc::{
+    ConfirmSource, Event, EventBody, HostName, PermissionMode, PlanVerdict, PlannedAction,
+};
 
+use super::grant::{TurnGrant, spoken_needs};
 use super::judge::{JudgedCommand, SafetyJudge, Verdict};
+use super::on_blocking_pool;
 use crate::TurnContext;
 
 /// Cap on confirmation prompts and plan reviews in flight on one connection.
@@ -25,6 +29,9 @@ pub const MAX_PENDING_CONFIRMS: usize = 32;
 
 /// How many names a spoken prompt lists before it counts the rest.
 const SPOKEN_LIST_ITEMS: usize = 2;
+
+/// How many web hosts a headless turn may ask about on their own before it must plan.
+const UNPLANNED_SITES: usize = 1;
 
 /// How long a prompt waits for the client's answer before it is denied.
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(CONFIRMATION_PROMPT_SECS);
@@ -90,13 +97,17 @@ pub enum Unattended {
     WebHost(String),
 }
 
-/// What the safety judge is told about a command besides its text.
+/// What the safety judge is told about a command besides its text, and what a turn's grant
+/// must hold to approve it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JudgeContext {
     pub class: JudgedClass,
     pub cwd: Option<PathBuf>,
     /// Why the policy could not settle it, shown to the judge.
     pub why: String,
+    /// The actions that, all granted to a headless turn, approve it; a write names the path
+    /// changed. Empty when no grant can.
+    pub grantable: Vec<PlannedAction>,
 }
 
 /// The class of a command put to the safety judge.
@@ -210,6 +221,10 @@ pub trait VoiceGate: fmt::Debug + Send + Sync + 'static {
     /// Say what `req` asks and read the user's spoken answer. Every failure is
     /// [`SpokenAnswer::Deny`] or [`SpokenAnswer::Unanswered`].
     async fn ask_aloud(&self, req: &ConfirmationRequest) -> SpokenAnswer;
+
+    /// Say `proposal`, a plan and the approvals it asks for, and read the user's spoken
+    /// answer to it, failing as [`ask_aloud`](Self::ask_aloud) does.
+    async fn propose_aloud(&self, proposal: &str) -> SpokenAnswer;
 }
 
 /// Who answers a [`ConfirmRouter`]'s prompts.
@@ -229,11 +244,77 @@ struct VoiceAsks {
     gate: Arc<dyn VoiceGate>,
     /// Whether an earlier prompt of the turn went unanswered; held while one is asked.
     unanswered: AsyncMutex<bool>,
+    /// What the user approved together for this turn.
+    grant: Mutex<TurnGrant>,
+    /// Whether the user agreed to a plan of this turn.
+    planned: AtomicBool,
+    /// How many web hosts the turn has asked about with no plan agreed.
+    unplanned_sites: AtomicUsize,
 }
 
 impl VoiceAsks {
-    /// Approve `req` once when the user says so; an answer never approves anything for good.
+    fn new(gate: Arc<dyn VoiceGate>) -> Self {
+        Self {
+            gate,
+            unanswered: AsyncMutex::new(false),
+            grant: Mutex::new(TurnGrant::default()),
+            planned: AtomicBool::new(false),
+            unplanned_sites: AtomicUsize::new(0),
+        }
+    }
+
+    /// How many more web hosts the turn may ask about before it must plan; `None` once the
+    /// user agreed to a plan, after which it may ask about any.
+    fn sites_left(&self) -> Option<usize> {
+        let asked = self.unplanned_sites.load(Ordering::Acquire);
+        (!self.planned.load(Ordering::Acquire)).then(|| UNPLANNED_SITES.saturating_sub(asked))
+    }
+
+    /// Ask whether the work `summary` describes may go ahead with `actions` approved, and
+    /// grant them to the turn on a yes. A plan with no actions is agreed to unasked.
+    async fn propose(&self, summary: &str, actions: Vec<PlannedAction>) -> SpokenAnswer {
+        if actions.is_empty() {
+            self.planned.store(true, Ordering::Release);
+            return SpokenAnswer::Confirm;
+        }
+        let mut unanswered = self.unanswered.lock().await;
+        if *unanswered {
+            warn!(
+                target: "assistd::policy",
+                "plan not proposed: an earlier spoken prompt of this turn went unanswered"
+            );
+            return SpokenAnswer::Unanswered;
+        }
+        let proposal = format!(
+            "{summary} I need to {}. Shall I go ahead?",
+            spoken_needs(&actions)
+        );
+        let answer = self.gate.propose_aloud(&proposal).await;
+        info!(target: "assistd::policy", ?actions, ?answer, "spoken plan answered");
+        *unanswered = answer == SpokenAnswer::Unanswered;
+        if answer == SpokenAnswer::Confirm {
+            let granted = on_blocking_pool(move || TurnGrant::canonical(actions)).await;
+            self.grant.lock().merge(granted);
+            self.planned.store(true, Ordering::Release);
+        }
+        answer
+    }
+
+    /// Approve `req` once when the turn's grant covers it or the user says so; an answer
+    /// never approves anything for good.
     async fn ask(&self, req: &ConfirmationRequest) -> Answer {
+        if self.grant.lock().covers(req) {
+            info!(
+                target: "assistd::policy",
+                tool = %req.tool,
+                what = %req.summary.what,
+                "approved: the user granted it to this turn"
+            );
+            return Approval::Once.into();
+        }
+        if matches!(req.unattended, Unattended::WebHost(_)) && self.sites_left().is_some() {
+            self.unplanned_sites.fetch_add(1, Ordering::AcqRel);
+        }
         let mut unanswered = self.unanswered.lock().await;
         if *unanswered {
             warn!(
@@ -371,14 +452,12 @@ impl ConfirmRouter {
     }
 
     /// A router for a headless turn, asked by voice with no client to show a prompt to: it
-    /// approves what [`PermissionMode::AcceptEdits`] runs unasked and asks `gate` every other
-    /// prompt out loud, until one goes unanswered; the rest are then denied unasked.
+    /// approves what [`PermissionMode::AcceptEdits`] or the turn's grant runs unasked and asks
+    /// `gate` every other prompt out loud, until one goes unanswered; the rest are then denied
+    /// unasked.
     pub fn for_voice_turn(request_id: String, gate: Arc<dyn VoiceGate>) -> Arc<Self> {
-        let asks = VoiceAsks {
-            gate,
-            unanswered: AsyncMutex::new(false),
-        };
-        let router = Self::unanswered(request_id, None, Answerer::Voice(asks));
+        let asks = Answerer::Voice(VoiceAsks::new(gate));
+        let router = Self::unanswered(request_id, None, asks);
         router.set_mode(PermissionMode::AcceptEdits);
         Arc::new(router)
     }
@@ -405,6 +484,44 @@ impl ConfirmRouter {
             planning: AtomicBool::new(false),
             refused_while_planning: AtomicUsize::new(0),
             parked: watch::Sender::new(false),
+        }
+    }
+
+    /// Whether the turn's prompts are asked out loud.
+    pub fn asks_aloud(&self) -> bool {
+        matches!(self.answerer, Answerer::Voice(_))
+    }
+
+    /// Ask the user of a headless turn out loud whether the work `summary` describes may go
+    /// ahead with `actions` approved; a yes grants them for the rest of the turn and nothing
+    /// for good, and a plan with no actions is agreed to unasked. `None` when this router's
+    /// prompts are not asked out loud.
+    pub async fn propose_grant(
+        &self,
+        summary: &str,
+        actions: Vec<PlannedAction>,
+    ) -> Option<SpokenAnswer> {
+        match &self.answerer {
+            Answerer::Voice(asks) => Some(asks.propose(summary, actions).await),
+            Answerer::Client | Answerer::TaskRun(_) => None,
+        }
+    }
+
+    /// The web hosts granted to a headless turn so far; `None` when this router's prompts
+    /// are not asked out loud.
+    pub fn granted_hosts(&self) -> Option<Vec<String>> {
+        match &self.answerer {
+            Answerer::Voice(asks) => Some(asks.grant.lock().hosts()),
+            Answerer::Client | Answerer::TaskRun(_) => None,
+        }
+    }
+
+    /// How many more web hosts a headless turn may ask about on their own before its user
+    /// must agree to a plan naming the rest. `None` once they have, and for any other turn.
+    pub fn unplanned_sites_left(&self) -> Option<usize> {
+        match &self.answerer {
+            Answerer::Voice(asks) => asks.sites_left(),
+            Answerer::Client | Answerer::TaskRun(_) => None,
         }
     }
 
@@ -849,6 +966,7 @@ mod tests {
             class,
             cwd: None,
             why: "stub".into(),
+            grantable: Vec::new(),
         })
     }
 

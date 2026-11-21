@@ -263,6 +263,7 @@ impl assistd_tools::Tool for UnvettedScriptTool {
                 class: JudgedClass::Unvetted,
                 cwd: None,
                 why: "`make` is not vetted".into(),
+                grantable: Vec::new(),
             }),
             source: assistd_tools::ConfirmSource::Main,
         };

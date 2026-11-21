@@ -16,7 +16,7 @@ const STT_ENCODER_PREFIX: &str = "encoder";
 const MAX_WAKE_PHRASE_WORDS: usize = 6;
 
 /// Voice input and output settings.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VoiceConfig {
     /// Enables voice input.
@@ -25,6 +25,10 @@ pub struct VoiceConfig {
     /// device that is unplugged, at startup or while listening, is polled for
     /// until it appears.
     pub mic_device: Option<String>,
+    /// After a reply finishes, including its speech, how long in seconds a
+    /// spoken prompt still continues the active session while no chat window
+    /// is open, `0..=86400`; later it begins a new session. `0` never begins one.
+    pub session_hold_secs: Bounded<0, 86_400>,
     pub transcription: TranscriptionConfig,
     pub wakeword: WakeWordConfig,
     pub synthesis: SynthesisConfig,
@@ -34,9 +38,26 @@ impl DescribeSettings for VoiceConfig {
     describe_fields! {
         enabled => ("enabled", "Enables voice input"),
         mic_device => ("microphone", "ALSA/PulseAudio input device; unset uses the system default"),
+        session_hold_secs => (
+            "session hold (s)",
+            "Quiet time a spoken session is held before a spoken prompt starts a new one; 0 holds it for good"
+        ),
         transcription => nested,
         wakeword => nested,
         synthesis => nested,
+    }
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mic_device: None,
+            session_hold_secs: bounded(16),
+            transcription: TranscriptionConfig::default(),
+            wakeword: WakeWordConfig::default(),
+            synthesis: SynthesisConfig::default(),
+        }
     }
 }
 

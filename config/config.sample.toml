@@ -45,6 +45,7 @@
 [voice]
 # enabled = false
 # mic_device = "hw:0,0"
+# session_hold_secs = 16  # quiet after a reply that a spoken session is held; 0 holds it for good
 
 [voice.transcription]
 # model = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16@a6cc4e24ed264a93a17575dad416dacc4238497a:encoder.fp16.onnx"

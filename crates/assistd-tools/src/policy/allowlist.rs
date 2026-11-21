@@ -9,6 +9,8 @@ use std::{fmt, iter};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use assistd_ipc::PlannedAction;
+
 use super::approvals::{read_store, write_store};
 use super::review::program;
 
@@ -243,6 +245,19 @@ pub enum AllowlistError {
 pub struct ProgramApproval {
     pub(super) name: String,
     pub(super) scope: ApprovalScope,
+}
+
+impl ProgramApproval {
+    /// The action a turn's grant must hold to let a run this approval covers go unasked.
+    pub(super) fn planned_action(&self) -> PlannedAction {
+        PlannedAction::Program {
+            program: self.name.clone(),
+            subcommand: match &self.scope {
+                ApprovalScope::Subcommand(subcommand) => Some(subcommand.clone()),
+                ApprovalScope::Options(_) => None,
+            },
+        }
+    }
 }
 
 impl fmt::Display for ProgramApproval {

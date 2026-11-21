@@ -2,6 +2,7 @@
 //! persistence and the spoken reply.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
@@ -22,6 +23,7 @@ use super::branches::BranchService;
 use super::chat_focus::ChatFocusSlot;
 use super::context::{combine_context_blocks, voice_approvals_note};
 use super::host_reads::BranchHostReads;
+use super::session_lapse::SessionLapse;
 use super::wire::decode_wire_attachments;
 use super::{DispatchError, FailedStep};
 use crate::admission::{MainLaneTurn, TurnAdmission};
@@ -124,11 +126,14 @@ pub struct TurnService {
     /// The chat's last focus report.
     pub(super) chat_focus: ChatFocusSlot,
     host_reads: BranchHostReads,
+    session_lapse: SessionLapse,
 }
 
 impl TurnService {
     pub(super) fn new(deps: TurnDeps) -> Self {
+        let lapse_secs = deps.config.voice.session_hold_secs.get();
         Self {
+            session_lapse: SessionLapse::new(Duration::from_secs(lapse_secs.into())),
             deps,
             chat_focus: ChatFocusSlot::default(),
             host_reads: BranchHostReads::default(),
@@ -172,6 +177,10 @@ impl TurnService {
             return finish_interrupted_before_start(&tx, id).await;
         }
         self.require_vision_for(&attachments)?;
+        if origin.is_voice() {
+            self.leave_lapsed_session(&id, &tx).await;
+        }
+        let _turn_in_flight = self.session_lapse.turn();
 
         let (current_session, persist) = self.open_persistence_turn(&text).await;
         let chat_focused = self.refresh_chat_focus(&id);
@@ -212,6 +221,14 @@ impl TurnService {
 
         self.finalize_turn(id, agent_result, speech_handle, &tx, done_emitted)
             .await
+    }
+
+    /// Begin a new session for a spoken prompt when the one before it has lapsed and no chat
+    /// is open to show it.
+    async fn leave_lapsed_session(&self, id: &str, tx: &EventSink) {
+        if self.session_lapse.lapsed() && !self.chat_focus.open() {
+            self.deps.branches.begin_session_for_turn(id, tx).await;
+        }
     }
 
     fn require_vision_for(&self, attachments: &[Attachment]) -> Result<(), DispatchError> {
@@ -371,10 +388,14 @@ impl TurnService {
         ))
     }
 
-    /// The agent of `turn` under `plan`: one that can move through plan mode unless it is off.
+    /// The agent of `turn` under `plan`: one that can move through plan mode unless it is off,
+    /// and for a headless turn one whose plan is put to the user out loud.
     fn query_agent(&self, turn: &TurnContext, plan: PlanMode) -> Agent {
         let llm = self.deps.llm.clone();
         let tools = self.deps.tools.snapshot();
+        if turn.asks_aloud() {
+            return self.deps.planner.headless_turn_agent(turn, llm, &tools);
+        }
         if !plan.is_off() {
             return self.deps.planner.user_turn_agent(turn, llm, &tools);
         }

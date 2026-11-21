@@ -97,6 +97,17 @@ of it.
 reply opens a new window, so a back-and-forth can continue hands-free.
 Set `follow_up_ms = 0` to require the phrase every time.
 
+**Sessions.** With no chat window open, a spoken conversation ends in
+two stages. When the follow-up window closes, the listener wants the
+phrase again but the assistant still remembers what was said. Once
+`voice.session_hold_secs` (default 16) have passed since the reply
+finished, the assistant moves on: the next thing you say, by phrase or push-to-talk,
+begins a new session. The old one is kept and can be resumed from the
+chat. While a chat window is open, spoken prompts stay in the session
+it shows. A restarted daemon also begins a new session for the first
+spoken prompt. Set `session_hold_secs = 0` to keep every spoken
+prompt in the active session.
+
 **Push-to-talk** takes the mic from the listener while held. Anything
 the listener had captured but not yet acted on is dropped, and the
 conversation ends: no follow-up window opens until you say the phrase
@@ -114,6 +125,20 @@ is passed to the assistant, which may ask again with the change made.
 A no, an unclear answer or silence cancels the request, and after
 a question you did not answer the command's later requests are
 cancelled without being asked. Nothing is asked while speech is muted.
+
+When a command will need several approvals, the assistant can plan it
+first and ask once: "I'll update the changelog and publish the crate. I
+need to run cargo, and reach crates.io. Shall I go ahead?" A yes approves
+the things it named for that command only. Say what to change ("yes, but
+skip publishing") and it revises the plan and asks again; a no or
+silence stops the work. Anything it did not name, and anything touching
+a sensitive path, is still asked about on its own.
+
+A lookup that reads a single site just asks about it. Research
+that needs more is planned this way: the assistant searches first, then
+names every site it wants to read in the one question. If it
+later finds it needs a site you did not hear, it asks about that site
+alone.
 
 **Sleep.** Listening keeps running while presence is `Sleeping`. A
 command wakes the model like any other query. The first reply is slower

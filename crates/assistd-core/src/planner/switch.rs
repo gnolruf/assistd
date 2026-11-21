@@ -14,9 +14,9 @@ use assistd_tools::{
     TurnContext, Unattended,
 };
 
-const ENTER_PLAN_MODE: &str = "enter_plan_mode";
+pub(super) const ENTER_PLAN_MODE: &str = "enter_plan_mode";
 
-const EXIT_PLAN_MODE: &str = "exit_plan_mode";
+pub(super) const EXIT_PLAN_MODE: &str = "exit_plan_mode";
 
 const ENTER_DESCRIPTION: &str = "Ask the user to switch to plan mode before doing the work. \
      In plan mode you look around with commands that change nothing, then hand the user a \
@@ -46,7 +46,7 @@ const KEEP_PLANNING: &str = "The user did not accept the plan and will say what 
      You are still in plan mode: reply with one short line asking what they would like \
      changed, and stop.";
 
-const UNREVIEWED: &str = "Nobody can review a plan here, so you are still in plan mode. \
+pub(super) const UNREVIEWED: &str = "Nobody can review a plan here, so you are still in plan mode. \
      Reply with the plan instead.";
 
 /// Asks the user to switch the turn to plan mode.
@@ -162,7 +162,7 @@ fn string_arg(args: &Value, name: &str) -> Result<String, ToolError> {
         .ok_or_else(|| ToolError::InvalidArgs(format!("`{name}` (non-empty string) is required")))
 }
 
-fn router_of(turn: &TurnContext) -> Result<&Arc<ConfirmRouter>, ToolError> {
+pub(super) fn router_of(turn: &TurnContext) -> Result<&Arc<ConfirmRouter>, ToolError> {
     turn.router()
         .ok_or_else(|| ToolError::InvalidArgs("plan mode is unavailable on this turn".into()))
 }
@@ -199,7 +199,7 @@ fn accepted_reply(mode: PermissionMode) -> String {
     )
 }
 
-fn revise_reply(feedback: &str) -> String {
+pub(super) fn revise_reply(feedback: &str) -> String {
     format!(
         "The user did not accept the plan, and said:\n\n{feedback}\n\nYou are still in plan \
          mode. Revise the plan by this, finding out more if you need to, then call \

@@ -49,6 +49,11 @@ const LOCALE_VARS: [&str; 3] = ["LC_ALL", "LC_MESSAGES", "LANG"];
 
 const UNREACHABLE: &str = "a different URL or check the endpoint is reachable";
 
+/// What a headless turn does instead of fetching from a host its user has not been asked about.
+const PLAN_FIRST_RECOVERY: &str = "enter_plan_mode, then `web search` for the sites worth \
+     reading and list each one in the plan; a sub-agent answers from what it has and reports \
+     the sites it still needs";
+
 const FETCH_USAGE: &str = "web fetch [--raw | --full] <URL>";
 
 const RAW_FLAG: &str = "--raw";
@@ -225,6 +230,18 @@ impl WebCommand {
                 format_args!("fetch denied by policy: {refusal}"),
                 Hint::Try,
                 refusal.recovery(),
+            ));
+        }
+        let host = url.host_str().unwrap_or_default();
+        let must_plan = turn.unplanned_sites_left() == Some(0) && !turn.planning();
+        if must_plan && !self.egress.hosts.contains(host) {
+            return Err(CommandError::new(
+                POLICY_DENIED_EXIT,
+                format_args!(
+                    "{host} is not approved, and a voice turn asks for more sites only in a plan"
+                ),
+                Hint::Use,
+                PLAN_FIRST_RECOVERY,
             ));
         }
         if !self.host_confirmed(turn, &url).await {

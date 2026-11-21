@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_ipc::ConfirmSource;
+use assistd_ipc::{ConfirmSource, PlannedAction};
 
 use crate::TurnContext;
 use crate::chain::Word;
@@ -18,6 +18,7 @@ mod approvals;
 mod confirm;
 mod egress;
 mod file_scope;
+mod grant;
 mod judge;
 mod path_class;
 mod review;
@@ -25,6 +26,7 @@ mod sandbox;
 mod shell;
 
 pub use actions::{ActionCheck, StandingApprovals};
+use allowlist::ProgramApproval;
 pub use allowlist::{APPROVALS_FILE, Allowlist, AllowlistError, SearchPath};
 pub use approvals::{
     APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ApprovalGate, Approvals,
@@ -268,13 +270,19 @@ pub(crate) fn guarded_review(
         PathVerdict::Sensitive(why) => Review::Ask(Confirmation::Sensitive(why), Unattended::Never),
         PathVerdict::Ordinary(Class::ReadOnly) => Review::Clear,
         PathVerdict::Ordinary(Class::Edit) => edit_review(guards, &effects, edit_scope, excluded),
-        PathVerdict::Ordinary(Class::Unvetted { why }) => Review::Ask(
-            Confirmation::Unvetted {
-                why: why.clone(),
-                always_allow,
-            },
-            judged(JudgedClass::Unvetted, guards, why),
-        ),
+        PathVerdict::Ordinary(Class::Unvetted { why }) => {
+            let grantable = always_allow
+                .iter()
+                .map(ProgramApproval::planned_action)
+                .collect();
+            Review::Ask(
+                Confirmation::Unvetted {
+                    why: why.clone(),
+                    always_allow,
+                },
+                judged(JudgedClass::Unvetted, guards, why, grantable),
+            )
+        }
     }
 }
 
@@ -299,16 +307,28 @@ fn edit_review(
             JudgedClass::Edit,
             guards,
             format!("it changes `{path}`, outside the edit scope"),
+            guards
+                .changes_outside_scope(effects, edit_scope, excluded)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|under| PlannedAction::Write { under })
+                .collect(),
         ),
     };
     Review::Ask(confirmation, unattended)
 }
 
-fn judged(class: JudgedClass, guards: &PathGuards, why: String) -> Unattended {
+fn judged(
+    class: JudgedClass,
+    guards: &PathGuards,
+    why: String,
+    grantable: Vec<PlannedAction>,
+) -> Unattended {
     Unattended::Judged(JudgeContext {
         class,
         cwd: guards.cwd().map(Path::to_path_buf),
         why,
+        grantable,
     })
 }
 

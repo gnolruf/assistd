@@ -459,10 +459,30 @@ impl BranchService {
             })
     }
 
+    /// Begin a fresh session for the user turn `id`, which is in flight and holds the
+    /// user-turn lock, and report `BranchSwitched`; a session with nothing saved is kept.
+    pub(super) async fn begin_session_for_turn(&self, id: &str, tx: &EventSink) {
+        if self.session_ctx.current().await.1.is_none() {
+            return;
+        }
+        self.transcript.drain_inflight().await;
+        if let Some(stash) = &self.slot_stash {
+            stash.end(SlotHolder::Main).await;
+        }
+        let session = self.start_unsaved_session("a lapsed voice session").await;
+        report_unsaved_session(id.to_string(), session, tx).await;
+    }
+
     /// Make a new, unsaved session active, clear the LLM history, and
     /// report `BranchSwitched` then `Done`. The session and its `main`
     /// branch are inserted with its first message.
     async fn begin_unsaved_session(&self, id: String, tx: &EventSink, label: &str) {
+        let new_session = self.start_unsaved_session(label).await;
+        announce_unsaved_session(id, new_session, tx).await;
+    }
+
+    /// Make a new, unsaved session active and clear the LLM history.
+    async fn start_unsaved_session(&self, label: &str) -> SessionId {
         let new_session = SessionId::new();
         if let Err(e) = self.transcripts.clear_active_session().await {
             warn!(
@@ -481,7 +501,7 @@ impl BranchService {
                 "replace_history(empty) failed during {label} (non-fatal)"
             );
         }
-        announce_unsaved_session(id, new_session, tx).await;
+        new_session
     }
 
     /// `(name, parent name, fork point)` of `branch`, all `None` when the
@@ -523,9 +543,15 @@ pub fn branch_replay(rows: &[HistoryRow], summary: Option<BranchSummary>) -> His
 /// Report the unsaved `session` as active on its future `main` branch:
 /// `BranchSwitched` without a branch id, then `Done`.
 async fn announce_unsaved_session(id: String, session: SessionId, tx: &EventSink) {
+    report_unsaved_session(id.clone(), session, tx).await;
+    let _ = tx.send(Event::new(id, EventBody::Done)).await;
+}
+
+/// Report the unsaved `session` as active on its future `main` branch.
+async fn report_unsaved_session(id: String, session: SessionId, tx: &EventSink) {
     let _ = tx
         .send(Event::new(
-            id.clone(),
+            id,
             EventBody::BranchSwitched {
                 branch_id: None,
                 session_id: session.to_string(),
@@ -536,7 +562,6 @@ async fn announce_unsaved_session(id: String, session: SessionId, tx: &EventSink
             },
         ))
         .await;
-    let _ = tx.send(Event::new(id, EventBody::Done)).await;
 }
 
 fn replay_part(summary: Option<&BranchSummary>, seq: Seq) -> ReplayPart {
