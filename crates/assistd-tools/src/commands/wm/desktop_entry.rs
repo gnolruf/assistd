@@ -9,6 +9,9 @@ use crate::policy::is_within_visible_home_entry;
 /// `$XDG_DATA_DIRS` when unset or empty, per the XDG base directory spec.
 const DEFAULT_DATA_DIRS: &str = "/usr/local/share:/usr/share";
 
+/// `$XDG_CONFIG_DIRS` when unset or empty, per the XDG base directory spec.
+const DEFAULT_CONFIG_DIRS: &str = "/etc/xdg";
+
 /// What an entry's `Exec` line accepts in place of its field codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Targets {
@@ -171,28 +174,58 @@ impl DesktopEntry {
     }
 }
 
-/// `$XDG_DATA_HOME`, then each of `$XDG_DATA_DIRS`, joined with
-/// `applications`; relative entries are ignored.
 fn applications_dirs() -> Vec<PathBuf> {
+    data_dirs()
+        .into_iter()
+        .map(|dir| dir.join("applications"))
+        .collect()
+}
+
+/// `$XDG_DATA_HOME`, then each of `$XDG_DATA_DIRS`.
+pub(super) fn data_dirs() -> Vec<PathBuf> {
+    base_dirs(
+        "XDG_DATA_HOME",
+        ".local/share",
+        "XDG_DATA_DIRS",
+        DEFAULT_DATA_DIRS,
+    )
+}
+
+/// `$XDG_CONFIG_HOME`, then each of `$XDG_CONFIG_DIRS`.
+pub(super) fn config_dirs() -> Vec<PathBuf> {
+    base_dirs(
+        "XDG_CONFIG_HOME",
+        ".config",
+        "XDG_CONFIG_DIRS",
+        DEFAULT_CONFIG_DIRS,
+    )
+}
+
+/// The directory `home_var` names, or `home_default` under `$HOME`, then each
+/// of `dirs_var`, or `dirs_default`; relative entries are ignored.
+fn base_dirs(
+    home_var: &str,
+    home_default: &str,
+    dirs_var: &str,
+    dirs_default: &str,
+) -> Vec<PathBuf> {
     let env_or = |name: &str, default: Option<String>| {
         std::env::var(name)
             .ok()
             .filter(|value| !value.is_empty())
             .or(default)
     };
-    let data_home = env_or(
-        "XDG_DATA_HOME",
+    let home = env_or(
+        home_var,
         std::env::var("HOME")
             .ok()
-            .map(|home| format!("{home}/.local/share")),
+            .map(|home| format!("{home}/{home_default}")),
     );
-    let data_dirs = env_or("XDG_DATA_DIRS", Some(DEFAULT_DATA_DIRS.to_string()));
-    data_home
-        .iter()
-        .chain(&data_dirs)
+    let dirs = env_or(dirs_var, Some(dirs_default.to_string()));
+    home.iter()
+        .chain(&dirs)
         .flat_map(std::env::split_paths)
         .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join("applications"))
         .collect()
 }
 

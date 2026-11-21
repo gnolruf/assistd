@@ -210,6 +210,40 @@ fn open_options_must_precede_the_application() {
 }
 
 #[tokio::test]
+async fn a_file_in_place_of_the_application_always_asks_and_is_named_in_the_prompt() {
+    let gate = RecordingGate::new(true);
+    let cmd = WmCommand::new(
+        Arc::new(StubWm::default()),
+        gate.clone(),
+        Arc::new(Approvals::unsaved()),
+    );
+    for (words, subject) in [
+        (
+            &["~/notes/report.md"][..],
+            Subject::File("~/notes/report.md".to_string()),
+        ),
+        (
+            &["/tmp/a.md", "/tmp/b.md"],
+            Subject::File("/tmp/a.md".to_string()),
+        ),
+        (&["viewer", "/tmp/a.md"], Subject::App("viewer".to_string())),
+    ] {
+        assert_eq!(open_args(words).subject, subject, "{words:?}");
+    }
+
+    let args = open_args(&["/tmp/report.md"]);
+    let launch = PreparedLaunch::new(viewer("viewer %F"), &args).expect("launchable");
+    assert_eq!(launch.command.as_str(), "exec viewer /tmp/report.md");
+    assert!(cmd.confirmed(&TurnContext::default(), &args, &launch).await);
+    let [request] = &gate.requests()[..] else {
+        panic!("one prompt expected: {:?}", gate.prompts());
+    };
+    assert_eq!(request.summary, Summary::of("opening report.md in Viewer"));
+    assert!(request.always_allow.is_empty(), "{request:?}");
+    assert_eq!(request.risk, Risk::Elevated);
+}
+
+#[tokio::test]
 async fn approved_apps_skip_the_prompt_only_when_launched_without_targets_or_cwd() {
     let gate = RecordingGate::new(false);
     let approved = Arc::new(Approvals::unsaved());

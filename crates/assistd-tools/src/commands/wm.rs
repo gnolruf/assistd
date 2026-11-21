@@ -2,6 +2,7 @@
 //! LLM's `run` tool.
 
 use std::fmt::{Display, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 use assistd_ipc::{ConfirmSource, PlannedAction};
@@ -17,11 +18,12 @@ use crate::policy::{
     JudgedClass, Risk, Summary, Unattended, on_blocking_pool,
 };
 
+mod default_app;
 mod desktop_entry;
 mod open;
 
 use desktop_entry::DesktopEntry;
-use open::{OpenArgs, OpenError, PreparedLaunch};
+use open::{OpenArgs, OpenError, PreparedLaunch, Subject};
 
 const NAME: &str = "wm";
 const SUMMARY: &str = "manage windows and workspaces through the compositor";
@@ -38,13 +40,19 @@ const MOVE_HELP: &str = "usage: wm move <id> <workspace>\n\
     Numeric workspace identifiers (e.g. `3`) match by number; \
     non-numeric identifiers match by exact name.\n";
 
-const OPEN_HELP: &str = "usage: wm open [--workspace <ws>] [--cwd <dir>] <app> [file|url...]\n\
+const OPEN_USAGE: &str = "wm open [--workspace <ws>] [--cwd <dir>] <app|file> [file|url...]";
+
+const OPEN_HELP: &str = "usage: wm open [--workspace <ws>] [--cwd <dir>] <app|file> [file|url...]\n\
     \n\
     Launch an installed application, as the user would from their app \
     menu. <app> is a desktop id: the name of a .desktop file in \
     /usr/share/applications or ~/.local/share/applications without the \
     extension (e.g. firefox, nvim, org.gnome.Nautilus). Applications that \
     run in a terminal, such as nvim, open in a terminal emulator.\n\
+    \n\
+    To put a file on the user's screen, name the file in place of the \
+    application (wm open ~/notes/report.md): it opens in the user's default \
+    application for its type, as a double click would.\n\
     \n\
     --workspace switches to that workspace (number or name) first, so the \
     window opens there. --cwd sets the application's working directory. \
@@ -94,12 +102,8 @@ impl WmCommand {
         if args.is_empty() {
             return Ok(CommandOutput::usage(OPEN_HELP.to_string()));
         }
-        let args = OpenArgs::parse(args).map_err(|what| {
-            CommandError::usage(
-                format_args!("open: {what}"),
-                "wm open [--workspace <ws>] [--cwd <dir>] <app> [file|url...]",
-            )
-        })?;
+        let args = OpenArgs::parse(args)
+            .map_err(|what| CommandError::usage(format_args!("open: {what}"), OPEN_USAGE))?;
         let (args, prepared) = on_blocking_pool(move || {
             let prepared = PreparedLaunch::find(&args);
             (args, prepared)
@@ -136,7 +140,7 @@ impl WmCommand {
                 entry.name,
                 workspace_phrase(args.workspace.as_ref())
             ),
-            summary: launch_summary(&entry.name, has_targets),
+            summary: launch_summary(&entry.name, args),
             always_allow: if has_targets {
                 Vec::new()
             } else {
@@ -180,10 +184,12 @@ impl Command for WmCommand {
          Subcommands:\n  \
            focus <id>                             focus the window with this con_id\n  \
            move <id> <workspace>                  move window to workspace\n  \
-           open [--workspace <ws>] [--cwd <dir>] <app> [file|url...]\n                                          \
+           open [--workspace <ws>] [--cwd <dir>] <app|file> [file|url...]\n                                          \
          launch an installed application by desktop id (e.g. firefox);\n                                          \
          terminal programs such as nvim open in a terminal by themselves:\n                                          \
-         wm open --workspace 2 --cwd ~/project nvim\n  \
+         wm open --workspace 2 --cwd ~/project nvim\n                                          \
+         or show the user a file in their default application for it:\n                                          \
+         wm open ~/notes/report.md\n  \
            active                                 TSV: id, app of the focused window\n  \
            resize <id> <grow|shrink> <px>         width-only resize\n  \
            list                                   TSV: id, app, workspace, title\n  \
@@ -427,12 +433,11 @@ fn unattended_launch(launch: &PreparedLaunch, key: &str, args: &OpenArgs) -> Una
     if launch.opens_url {
         return Unattended::Never;
     }
-    let grantable = if args.has_targets_or_cwd() {
-        Vec::new()
-    } else {
-        vec![PlannedAction::App {
-            desktop_entry: args.app.clone(),
-        }]
+    let grantable = match &args.subject {
+        Subject::App(id) if !args.has_targets_or_cwd() => vec![PlannedAction::App {
+            desktop_entry: id.clone(),
+        }],
+        _ => Vec::new(),
     };
     Unattended::Judged(JudgeContext {
         class: JudgedClass::Launch,
@@ -456,14 +461,18 @@ fn opened(launch: &PreparedLaunch, workspace: Option<&WorkspaceId>) -> CommandOu
     CommandOutput::ok(line.into_bytes())
 }
 
-/// A launch of the app named `name`, in a sentence; `has_targets` when it is handed files,
-/// URLs or a working directory.
-fn launch_summary(name: &str, has_targets: bool) -> Summary {
-    let summary = Summary::of(format!("opening {name}"));
-    if has_targets {
-        summary.because("It is handed files, addresses or a folder to open.")
-    } else {
-        summary
+/// A launch of the app named `name` as `args` asks, in a sentence that names the file it is
+/// to show, or else says that it is handed files, URLs or a working directory.
+fn launch_summary(name: &str, args: &OpenArgs) -> Summary {
+    let shown = match &args.subject {
+        Subject::File(file) => Path::new(file).file_name(),
+        Subject::App(_) => None,
+    };
+    match shown {
+        Some(file) => Summary::of(format!("opening {} in {name}", file.to_string_lossy())),
+        None if args.has_targets_or_cwd() => Summary::of(format!("opening {name}"))
+            .because("It is handed files, addresses or a folder to open."),
+        None => Summary::of(format!("opening {name}")),
     }
 }
 

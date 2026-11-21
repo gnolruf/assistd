@@ -635,7 +635,11 @@ clients are told why. `wm open` is the one way out of the sandbox: it
 launches an installed desktop entry as the user, through the compositor's
 `exec` (optionally on a given workspace), so the model picks only which
 entry, a working directory, and the files or URLs the entry's `Exec`
-field codes accept, never a command line. Entries under a visible
+field codes accept, never a command line. Given a file in place of the
+entry, it launches the user's default application for the file's type,
+read from the shared MIME database, `mimeapps.list` and
+`mimeinfo.cache`; while replies are read aloud, the model is told to put
+detail that does not suit speech in a file and open it this way. Entries under a visible
 `$HOME` entry, where sandboxed commands can write, are refused; the user
 confirms each launch unless they chose "always allow" for that entry,
 and one with files or URLs is never approved for good; `write` restricts targets to a
