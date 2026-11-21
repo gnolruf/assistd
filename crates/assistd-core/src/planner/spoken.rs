@@ -15,15 +15,19 @@ use assistd_tools::{
     ActionCheck, SpokenAnswer, Tool, ToolCatalog, ToolError, ToolOutput, TurnContext,
 };
 
-use super::draft::{ACTIONS_MAX_ITEMS, DraftAction, anticipated};
+use super::draft::{DraftAction, anticipated};
 use super::switch::{ENTER_PLAN_MODE, EXIT_PLAN_MODE, UNREVIEWED, revise_reply, router_of};
 use super::{ACTION_KINDS, WorkPermissions};
 
 const SUMMARY_MAX_CHARS: usize = 240;
 
+/// Bounds a runaway plan; every action of a plan within it is spoken.
+const ACTIONS_MAX_ITEMS: usize = 32;
+
 const ENTER_DESCRIPTION: &str = "Switch to plan mode before work that will need the user's \
-     approval more than once: web pages to read on sites not yet approved, by you or by a \
-     sub-agent, several programs to run, apps to open or MCP tools to call, or files to \
+     approval more than once, and before web research that reads more than one site not \
+     yet approved, whether you fetch from them or a sub-agent does; a second such site is \
+     refused without a plan. Other examples: several programs to run, apps to open or MCP tools to call, or files to \
      change outside the writable directories. In plan mode you look \
      around with commands that change nothing, then call exit_plan_mode with what the work \
      needs; the user is asked once, out loud, and what they approve runs without asking for \
@@ -42,19 +46,21 @@ const SUMMARY_PARAMETER: &str = "What you will do, as one short plain sentence s
 const ACTIONS_PARAMETER: &str = "Everything the work needs approved, each once. Leave out \
      reading files and edits inside the writable directories, which need no approval, and \
      name each web host exactly. For web research, run `web search` first and list the host \
-     of each site you plan to read.";
+     of each site you plan to read, as many as the work needs.";
 
 const ENTERED: &str = "You are in plan mode now. Do not do the work yet; find out what it \
      needs, then call exit_plan_mode with a one-sentence summary and the actions that need \
      approval.";
 
 const NOTHING_TO_APPROVE: &str = "Nothing in the plan needs approval, and plan mode is over: \
-     every tool is back. Carry the plan out now.";
+     every tool is back. Carry the plan out now, handing web research to sub-agents with \
+     relay and the `sites` each should read.";
 
 const AGREED: &str = "The user agreed, and plan mode is over: every tool is back. Carry the \
      plan out now. The actions you listed run without asking for the rest of this turn; \
-     anything else that needs approval is still asked out loud. A sub-agent you hand web \
-     research to is told which sites were approved.";
+     anything else that needs approval is still asked out loud. Hand web research to \
+     sub-agents with relay, giving each the `sites` from the plan it should read; split many \
+     sites across several relays.";
 
 const REFUSED: &str = "The user did not agree to the plan. You are still in plan mode: do not \
      do the work or look for another way to do it. Say in one sentence that it was not done, \
@@ -166,14 +172,15 @@ impl Tool for ProposeSpokenPlanTool {
             return Ok(ToolOutput::text(problems, start.elapsed()));
         }
         let asks = asked_about(anticipated);
-        if asks.is_empty() {
-            router.set_planning(false);
-            return Ok(ToolOutput::text(NOTHING_TO_APPROVE, start.elapsed()));
-        }
+        let agreed = if asks.is_empty() {
+            NOTHING_TO_APPROVE
+        } else {
+            AGREED
+        };
         let reply = match router.propose_grant(&proposal.summary, asks).await {
             Some(SpokenAnswer::Confirm) => {
                 router.set_planning(false);
-                AGREED.to_string()
+                agreed.to_string()
             }
             Some(SpokenAnswer::Message(said)) => revise_reply(&said),
             Some(SpokenAnswer::Deny | SpokenAnswer::Unanswered) => REFUSED.to_string(),

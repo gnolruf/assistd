@@ -709,14 +709,23 @@ sensitive path, a fetch after local reads or over plain HTTP, a write too long
 to show, a launch with files or a URL, and a script whose programs the
 classifier cannot name. So does anything the plan did not list.
 
-Web research is the case the grant is mostly for, since every new host asks.
-The headless turn's context note tells the agent to enter plan mode before
-researching, run `web search` (which planning runs unasked) to find the sites
-worth reading, and list each host. The grant sits on the turn's router, so it
-covers the fetches of a `web_research` sub-agent too. `RelayTool` adds to that
-sub-agent's prompt the hosts granted so far (`TurnContext::granted_hosts`) and
-that any other host costs the user a spoken question, to be fetched only when
-the task cannot be answered well without it.
+Web research beyond a quick lookup goes through a plan on a headless turn.
+With no plan agreed, the turn may ask about one web host on its own
+(`ConfirmRouter::unplanned_sites_left`, counted across the agent and its
+sub-agents). After that, `web fetch` from a host not approved for good, and a
+`relay` whose web steps would need more hosts than are left, are refused with
+a result that tells the agent to enter plan mode.
+There it runs `web search`,
+which planning runs unasked, and lists each site it means to read; a plan may
+name up to 32 actions, all of them spoken. Once the user agrees, the agent
+hands the research to `web_research` sub-agents itself: a web step of `relay`
+takes `sites`, the hosts that sub-agent should read, and after a headless turn's
+plan every one must be in the grant (`TurnContext::granted_hosts`) or approved for
+good, or the call is refused. The sub-agent's prompt names its sites and says
+that any other costs the user a spoken question, to be fetched only when the
+task cannot be answered well without it. The grant sits on the turn's router,
+so the sub-agent's fetches from granted hosts run unasked and its others ask
+one at a time.
 
 A query connection starts in manual mode, where every prompt goes to the
 client. Besides allowing once, allowing for good where that is offered, and

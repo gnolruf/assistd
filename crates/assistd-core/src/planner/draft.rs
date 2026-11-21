@@ -16,7 +16,7 @@ const SUMMARY_MAX_CHARS: usize = 800;
 const PROMPT_MAX_CHARS: usize = MAX_TASK_PROMPT_BYTES / 4;
 const STEPS_MAX_ITEMS: usize = 16;
 const DESCRIPTION_MAX_CHARS: usize = 400;
-pub(super) const ACTIONS_MAX_ITEMS: usize = 8;
+const ACTIONS_MAX_ITEMS: usize = 8;
 const TARGET_MAX_CHARS: usize = 300;
 const SUBCOMMAND_MAX_CHARS: usize = 64;
 

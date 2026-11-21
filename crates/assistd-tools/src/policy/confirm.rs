@@ -30,6 +30,9 @@ pub const MAX_PENDING_CONFIRMS: usize = 32;
 /// How many names a spoken prompt lists before it counts the rest.
 const SPOKEN_LIST_ITEMS: usize = 2;
 
+/// How many web hosts a headless turn may ask about on their own before it must plan.
+const UNPLANNED_SITES: usize = 1;
+
 /// How long a prompt waits for the client's answer before it is denied.
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(CONFIRMATION_PROMPT_SECS);
 
@@ -243,6 +246,10 @@ struct VoiceAsks {
     unanswered: AsyncMutex<bool>,
     /// What the user approved together for this turn.
     grant: Mutex<TurnGrant>,
+    /// Whether the user agreed to a plan of this turn.
+    planned: AtomicBool,
+    /// How many web hosts the turn has asked about with no plan agreed.
+    unplanned_sites: AtomicUsize,
 }
 
 impl VoiceAsks {
@@ -251,12 +258,25 @@ impl VoiceAsks {
             gate,
             unanswered: AsyncMutex::new(false),
             grant: Mutex::new(TurnGrant::default()),
+            planned: AtomicBool::new(false),
+            unplanned_sites: AtomicUsize::new(0),
         }
     }
 
+    /// How many more web hosts the turn may ask about before it must plan; `None` once the
+    /// user agreed to a plan, after which it may ask about any.
+    fn sites_left(&self) -> Option<usize> {
+        let asked = self.unplanned_sites.load(Ordering::Acquire);
+        (!self.planned.load(Ordering::Acquire)).then(|| UNPLANNED_SITES.saturating_sub(asked))
+    }
+
     /// Ask whether the work `summary` describes may go ahead with `actions` approved, and
-    /// grant them to the turn on a yes.
+    /// grant them to the turn on a yes. A plan with no actions is agreed to unasked.
     async fn propose(&self, summary: &str, actions: Vec<PlannedAction>) -> SpokenAnswer {
+        if actions.is_empty() {
+            self.planned.store(true, Ordering::Release);
+            return SpokenAnswer::Confirm;
+        }
         let mut unanswered = self.unanswered.lock().await;
         if *unanswered {
             warn!(
@@ -275,6 +295,7 @@ impl VoiceAsks {
         if answer == SpokenAnswer::Confirm {
             let granted = on_blocking_pool(move || TurnGrant::canonical(actions)).await;
             self.grant.lock().merge(granted);
+            self.planned.store(true, Ordering::Release);
         }
         answer
     }
@@ -290,6 +311,9 @@ impl VoiceAsks {
                 "approved: the user granted it to this turn"
             );
             return Approval::Once.into();
+        }
+        if matches!(req.unattended, Unattended::WebHost(_)) && self.sites_left().is_some() {
+            self.unplanned_sites.fetch_add(1, Ordering::AcqRel);
         }
         let mut unanswered = self.unanswered.lock().await;
         if *unanswered {
@@ -470,7 +494,8 @@ impl ConfirmRouter {
 
     /// Ask the user of a headless turn out loud whether the work `summary` describes may go
     /// ahead with `actions` approved; a yes grants them for the rest of the turn and nothing
-    /// for good. `None` when this router's prompts are not asked out loud.
+    /// for good, and a plan with no actions is agreed to unasked. `None` when this router's
+    /// prompts are not asked out loud.
     pub async fn propose_grant(
         &self,
         summary: &str,
@@ -487,6 +512,15 @@ impl ConfirmRouter {
     pub fn granted_hosts(&self) -> Option<Vec<String>> {
         match &self.answerer {
             Answerer::Voice(asks) => Some(asks.grant.lock().hosts()),
+            Answerer::Client | Answerer::TaskRun(_) => None,
+        }
+    }
+
+    /// How many more web hosts a headless turn may ask about on their own before its user
+    /// must agree to a plan naming the rest. `None` once they have, and for any other turn.
+    pub fn unplanned_sites_left(&self) -> Option<usize> {
+        match &self.answerer {
+            Answerer::Voice(asks) => asks.sites_left(),
             Answerer::Client | Answerer::TaskRun(_) => None,
         }
     }

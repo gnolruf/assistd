@@ -123,6 +123,12 @@ skip publishing") and it revises the plan and asks again; a no or
 silence stops the work. Anything it did not name, and anything touching
 a sensitive path, is still asked about on its own.
 
+A lookup that reads a single site just asks about it. Research
+that needs more is planned this way: the assistant searches first, then
+names every site it wants to read in the one question. If it
+later finds it needs a site you did not hear, it asks about that site
+alone.
+
 **Sleep.** Listening keeps running while presence is `Sleeping`. A
 command wakes the model like any other query. The first reply is slower
 because the model has to load. If the GPU lacks room for the model

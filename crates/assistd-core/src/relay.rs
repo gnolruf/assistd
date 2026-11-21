@@ -15,7 +15,7 @@ use tracing::{Instrument, info, info_span};
 use uuid::Uuid;
 
 use assistd_config::ToolsOutputConfig;
-use assistd_ipc::{RelayEvent, RelayStepPlan};
+use assistd_ipc::{HostName, RelayEvent, RelayStepPlan};
 use assistd_llm::SlotStash;
 use assistd_memory::SessionId;
 use assistd_search::SearxngClient;
@@ -75,6 +75,23 @@ const SUBAGENT_PROMPT: &str = "You are a sub-agent of assistd, working alone on 
 /// Why a relay to the web asks once the calling turn's history has read this machine.
 const WEB_AFTER_HOST_READ: &str = "sends this task to a sub-agent on the web after files or \
      other data on this machine were read, which the task could carry";
+
+/// The result of a web relay on a headless turn that would ask about more sites than a turn
+/// with no plan may.
+const WEB_RELAY_NEEDS_PLAN: &str = "[error] relay: a voice turn asks about a single web \
+     site on its own and about more only in a plan. Use: enter_plan_mode, then `web search` for the \
+     sites worth reading, list each one in the plan, and relay with those `sites` once the \
+     user agrees";
+
+/// The result of a web relay on a planned headless turn that hands a step no sites.
+const WEB_RELAY_NEEDS_SITES: &str = "[error] relay: after a plan every step on the web \
+     needs `sites`, the hosts from the plan it should read. Use: the sites the user agreed to";
+
+/// What a web sub-agent of a headless turn is told about sites it was not handed.
+const SPOKEN_SITES_NOTE: &str = " Searching is free, but the user is interrupted and asked \
+     out loud before a page is fetched from any other site not yet approved, so fetch from \
+     one only when the task cannot be answered well without it, and stop looking once you \
+     can answer.";
 
 /// The result of a relay whose web steps the user declined.
 const WEB_RELAY_DECLINED: &str =
@@ -168,6 +185,8 @@ struct RelayStep {
     /// The task searches its inputs rather than reading them through, so
     /// their size is not checked.
     search_only: bool,
+    /// The web hosts the sub-agent is handed to read; empty unless the role reaches the web.
+    sites: Vec<HostName>,
 }
 
 /// Where a step stands in its plan, counted from 1.
@@ -300,6 +319,12 @@ impl RelayTool {
         let quarantine =
             Quarantine::create(&self.deps.dir, &self.policy.sandbox, inputs.clone(), egress)
                 .await?;
+        let prompt = subagent_prompt(
+            &step.role,
+            &quarantine,
+            &step.sites,
+            turn.granted_hosts().is_some(),
+        );
         let task = match previous {
             Some(report) => {
                 let handed = report.relocated(mounted_path(&quarantine, report.artifacts()));
@@ -311,7 +336,7 @@ impl RelayTool {
             .deps
             .runner
             .run(
-                subagent_prompt(&step.role, &quarantine, turn.granted_hosts().as_deref()),
+                prompt,
                 task,
                 self.subagent_tools(&quarantine, gate),
                 self.answer_file(),
@@ -386,6 +411,40 @@ impl RelayTool {
             source: ConfirmSource::Main,
         };
         self.policy.gate.confirm(turn, request).await != Approval::Deny
+    }
+
+    /// Why `plan` may not go to the web on the headless turn `turn`. With no plan agreed, it
+    /// hands over more unapproved sites than the turn may still ask about; with one, a web step
+    /// is handed no sites, or a site neither in the plan nor approved for good. `None` for a
+    /// turn with a client, and for a plan that stays off the web.
+    fn unplanned_web(&self, plan: &RelayPlan, turn: &TurnContext) -> Option<String> {
+        let granted = turn.granted_hosts()?;
+        let mut web_steps = plan
+            .steps()
+            .filter(|step| step.role.reach == Reach::Web)
+            .peekable();
+        web_steps.peek()?;
+        let sites_left = turn.unplanned_sites_left();
+        let mut unagreed = Vec::new();
+        for step in web_steps {
+            if step.sites.is_empty() && sites_left.is_none() {
+                return Some(WEB_RELAY_NEEDS_SITES.to_string());
+            }
+            unagreed.extend(step.sites.iter().map(HostName::as_str).filter(|site| {
+                !self.policy.hosts.contains(site)
+                    && !granted.iter().any(|host| host.eq_ignore_ascii_case(site))
+            }));
+        }
+        if let Some(left) = sites_left {
+            return (left == 0 || unagreed.len() > left).then(|| WEB_RELAY_NEEDS_PLAN.to_string());
+        }
+        (!unagreed.is_empty()).then(|| {
+            format!(
+                "[error] relay: the user did not agree to these sites: {}. Use: only sites \
+                 from the plan; the sub-agent asks the user itself if it needs another",
+                unagreed.join(", ")
+            )
+        })
     }
 
     fn egress(&self, gate: Arc<dyn ConfirmationGate>) -> Egress {
@@ -493,6 +552,9 @@ impl Tool for RelayTool {
         let start = Instant::now();
         let plan = RelayPlan::parse(&args, &self.roles)?;
         self.check_inputs(&plan).await?;
+        if let Some(refusal) = self.unplanned_web(&plan, turn) {
+            return Ok(ToolOutput::failed(refusal, start.elapsed()));
+        }
         if !self.web_tasks_confirmed(&plan, turn).await {
             return Ok(ToolOutput::failed(WEB_RELAY_DECLINED, start.elapsed()));
         }
@@ -564,7 +626,8 @@ impl RelayPlan {
 
 impl RelayStep {
     /// Refuses an `agent` that is not one of `roles`, inputs for a role on the
-    /// web, and inputs that are not absolute after `~` expansion.
+    /// web, inputs that are not absolute after `~` expansion, and sites that are not host
+    /// names or are handed to a role off the web.
     fn parse(args: &Value, roles: &Roles) -> Result<Self, String> {
         let task = args
             .get("task")
@@ -592,11 +655,19 @@ impl RelayStep {
             .get("search_only")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let sites = parse_sites(args)?;
+        if role.reach == Reach::Files && !sites.is_empty() {
+            return Err(format!(
+                "a \"{}\" relay gets no `sites`: it has no network",
+                role.name
+            ));
+        }
         Ok(Self {
             task,
             role: Arc::clone(role),
             inputs,
             search_only,
+            sites,
         })
     }
 
@@ -664,6 +735,24 @@ fn parse_inputs(args: &Value) -> Result<Vec<PathBuf>, String> {
         .collect()
 }
 
+/// The `sites` of a step's `args` as host names; none when it has no `sites`.
+fn parse_sites(args: &Value) -> Result<Vec<HostName>, String> {
+    let Some(sites) = args.get("sites") else {
+        return Ok(Vec::new());
+    };
+    sites
+        .as_array()
+        .ok_or("`sites` must be an array of host names")?
+        .iter()
+        .map(|site| {
+            site.as_str()
+                .map(|site| site.trim().to_ascii_lowercase())
+                .and_then(|site| HostName::try_from(site).ok())
+                .ok_or_else(|| format!("`sites` holds {site}, which is not a host name"))
+        })
+        .collect()
+}
+
 fn step_schema(roles: &Roles) -> Value {
     let names: Vec<&str> = roles.iter().map(|role| role.name.as_str()).collect();
     json!({
@@ -691,25 +780,35 @@ fn step_schema(roles: &Roles) -> Value {
                 "description": "True when the task only searches its inputs, \
                                 for example for where something is defined, rather \
                                 than reading them through; their size is then not checked."
+            },
+            "sites": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "For an agent on the web: the host names of the sites it \
+                                should read, such as \"docs.rs\". After a voice turn's \
+                                plan it is required, and every site must be in the plan the \
+                                user agreed to; split many sites across several relays."
             }
         },
         "required": ["task", "inputs", "agent"]
     })
 }
 
-/// The prompt of a sub-agent in `role`; `spoken_hosts` are the web hosts granted to a turn
-/// whose user is asked out loud about every other one.
+/// The prompt of a sub-agent in `role` handed `sites` to read, on a turn whose user is asked
+/// about other sites out loud when `spoken`.
 fn subagent_prompt(
     role: &Role,
     quarantine: &Quarantine,
-    spoken_hosts: Option<&[String]>,
+    sites: &[HostName],
+    spoken: bool,
 ) -> String {
     let world = match role.reach {
         Reach::Web => format!(
             "You can search the web and fetch pages with `web`, the only command that reaches \
-             the network. Files handed to you, if any, are in {} (read-only).{}",
+             the network. Files handed to you, if any, are in {} (read-only).{}{}",
             quarantine.input_dir().display(),
-            spoken_hosts.map(spoken_hosts_note).unwrap_or_default()
+            handed_sites_note(sites),
+            if spoken { SPOKEN_SITES_NOTE } else { "" }
         ),
         Reach::Files => format!(
             "The files handed to you are in {} (read-only). You have no network.",
@@ -723,21 +822,15 @@ fn subagent_prompt(
     )
 }
 
-/// What a web sub-agent of a headless turn is told about fetching: `granted` hosts are read
-/// freely, and any other costs the user a spoken question.
-fn spoken_hosts_note(granted: &[String]) -> String {
-    let approved = if granted.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " The user already approved these sites for this work, so read them first: {}.",
-            granted.join(", ")
-        )
-    };
+/// What a web sub-agent is told about the `sites` it was handed; nothing when there are none.
+fn handed_sites_note(sites: &[HostName]) -> String {
+    if sites.is_empty() {
+        return String::new();
+    }
+    let sites: Vec<&str> = sites.iter().map(HostName::as_str).collect();
     format!(
-        " Searching is free, but the user is interrupted and asked out loud before a page is \
-         fetched from any site not yet approved.{approved} Fetch from another site only when \
-         the task cannot be answered well without it, and stop looking once you can answer."
+        " You were handed these sites to read for the task: {}.",
+        sites.join(", ")
     )
 }
 

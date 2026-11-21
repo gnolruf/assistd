@@ -191,6 +191,14 @@ impl TurnContext {
             .and_then(|router| router.granted_hosts())
     }
 
+    /// How many more web hosts a headless turn may ask about before its user must agree to a
+    /// plan naming the rest; `None` once they have, and for any other turn.
+    pub fn unplanned_sites_left(&self) -> Option<usize> {
+        self.router
+            .as_ref()
+            .and_then(|router| router.unplanned_sites_left())
+    }
+
     /// Whether the turn is planning.
     pub fn planning(&self) -> bool {
         self.router.as_ref().is_some_and(|router| router.planning())
