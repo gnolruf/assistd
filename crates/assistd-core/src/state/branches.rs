@@ -334,6 +334,27 @@ impl BranchService {
         }
     }
 
+    /// Stream the current branch's history however old it is. An unsaved
+    /// session is reported as is.
+    #[tracing::instrument(skip_all, fields(correlation_id = %id))]
+    pub(super) async fn handle_replay_branch(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
+        let _user_turn = self.admission.user_turn_lock.clone().lock_owned().await;
+        self.transcript.drain_inflight().await;
+
+        let (session, branch) = self.session_ctx.current().await;
+        match branch {
+            Some(branch) => self.replay_branch(id, session, branch, &tx).await,
+            None => {
+                announce_unsaved_session(id, session, &tx).await;
+                Ok(())
+            }
+        }
+    }
+
     /// `/new`: begin a fresh session, saved with its first message.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     pub(super) async fn handle_new_session(

@@ -480,6 +480,7 @@ impl AppState {
                     .handle_resume_or_new(id, recency_secs, tx)
                     .await
             }
+            RequestBody::ReplayBranch => self.branches.handle_replay_branch(id, tx).await,
             RequestBody::NewSession => self.branches.handle_new_session(id, tx).await,
             RequestBody::ChatState { focused } => {
                 replied(self.turns.handle_chat_state(id, focused, peer_pid, tx)).await

@@ -60,9 +60,15 @@ impl App {
     }
 
     /// Replay the daemon's transcript to cover what was missed while the bus was down.
+    /// A chat that has shown no session yet joins one as it does at startup.
     fn on_bus_restored(&mut self) {
         self.on_daemon_reachable();
-        if !self.generating() && self.in_flight_branch_op.is_none() {
+        if self.generating() || self.in_flight_branch_op.is_some() {
+            return;
+        }
+        if self.session_shown {
+            self.spawn_branch_replay();
+        } else {
             self.spawn_resume_or_new();
         }
     }
@@ -439,6 +445,7 @@ impl App {
     ) {
         let title = session_title.map(str::trim).filter(|t| !t.is_empty());
         self.session_title = title.map(str::to_string);
+        self.session_shown = true;
         match self.in_flight_branch_op {
             Some(BranchOp::Switch | BranchOp::Resume | BranchOp::New) => self.reset_transcript(),
             _ => {

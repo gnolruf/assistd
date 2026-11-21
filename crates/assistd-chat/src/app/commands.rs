@@ -150,6 +150,11 @@ impl App {
         self.spawn_branch_command(BranchOp::Resume, req);
     }
 
+    pub(super) fn spawn_branch_replay(&mut self) {
+        let req = Request::new(Uuid::new_v4().to_string(), RequestBody::ReplayBranch);
+        self.spawn_branch_command(BranchOp::Resume, req);
+    }
+
     fn fork_branch(&mut self, name: String) {
         if name.trim().is_empty() {
             self.output

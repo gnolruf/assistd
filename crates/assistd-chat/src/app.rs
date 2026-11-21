@@ -324,6 +324,8 @@ pub(super) struct App {
     pub presence_state: Option<PresenceState>,
     /// Whether the bus subscription is up.
     pub daemon_reachable: bool,
+    /// Whether the daemon has reported the session this chat shows.
+    session_shown: bool,
     pub vision_enabled: bool,
     pub confirmation: Option<ConfirmationPrompt>,
     /// The plan the active reply waits on the user to accept or send back.
@@ -574,6 +576,7 @@ impl App {
             last_output_height: 10,
             presence_state: None,
             daemon_reachable: true,
+            session_shown: false,
             vision_enabled,
             confirmation: None,
             plan_review: None,
