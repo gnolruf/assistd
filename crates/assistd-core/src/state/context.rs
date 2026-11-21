@@ -29,9 +29,11 @@ const SPOKEN_DETAIL_OFFERED: &str = " When there is detail that does not suit sp
      put it on screen; write it out only once the user accepts.\n";
 const SPOKEN_DETAIL_SHOWN: &str = " When there is detail that does not suit speech, such as \
      code, a table, a long list or a long explanation, do not read it out and do not put it in \
-     your reply: write it to a file in the scratch directory, in whatever format suits it \
-     (Markdown, HTML, CSV, an image), open that file on the user's screen with `wm open <file>`, \
-     and say in a sentence what you put on screen. The user is asked before the window opens, \
+     your reply: write it to a file in the scratch directory, open that file on the user's screen with `wm open <file>`, \
+     and say in a sentence what you put on screen. Make the file an HTML page, one file with its \
+     styles inline and nothing loaded from the network, unless the user names another format \
+     or another plainly fits better, such as an image, or a CSV or source file they will use \
+     elsewhere. The user is asked before the window opens, \
      so do not ask first. When the user had you change existing files or data and a sentence \
      cannot describe the change, open the changed file the same way instead of describing it.\n";
 const VOICE_APPROVALS_HEADLESS: &str = "Approvals: the user asked by voice and this turn is \
