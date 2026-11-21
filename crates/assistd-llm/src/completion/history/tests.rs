@@ -849,19 +849,42 @@ fn folded_steps_keep_the_error_line_of_a_failure() {
 }
 
 #[test]
-fn calibration_shifts_the_estimate_by_the_measured_error() {
+fn calibration_scales_the_estimate_by_the_measured_ratio() {
     let mut c = History::new("sys".into());
     c.push_user("a question".into());
     let heuristic = c.heuristic_tokens();
     assert_eq!(c.approx_total_tokens(), heuristic);
 
-    c.calibrate(heuristic, heuristic + 500);
+    c.calibrate(heuristic, heuristic * 3);
     c.push_assistant("an answer".into());
-    assert_eq!(c.approx_total_tokens(), c.heuristic_tokens() + 500);
+    assert_eq!(c.approx_total_tokens(), c.heuristic_tokens() * 3);
 
     c.calibrate(c.heuristic_tokens(), 3);
     assert_eq!(c.approx_total_tokens(), 3);
 
     c.replace_messages(None, &[], Vec::new());
     assert_eq!(c.approx_total_tokens(), c.heuristic_tokens());
+}
+
+#[test]
+fn truncation_after_an_overflow_keeps_the_turns_that_fit_beside_large_tool_schemas() {
+    let mut c = History::new("sys".into());
+    c.set_offered_tools(4 * 2000);
+    for i in 0..40 {
+        c.push_user(format!("question {i} {}", "filler ".repeat(10)));
+        c.push_assistant(format!("answer {i} {}", "filler ".repeat(10)));
+    }
+    c.push_user("current question".into());
+    let (chat, model) = spec(4000, 10_000);
+    c.calibrate(c.heuristic_tokens(), 4400);
+
+    c.truncate_to_budget(&chat, &model);
+
+    assert!(!c.exceeds_budget(&chat, &model));
+    let kept_turns = c.messages.iter().filter(|m| is_user_turn(m)).count();
+    assert!(
+        (5..41).contains(&kept_turns),
+        "kept {kept_turns} turns: {} tokens",
+        c.approx_total_tokens()
+    );
 }

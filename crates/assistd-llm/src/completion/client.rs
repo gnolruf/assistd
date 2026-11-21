@@ -322,7 +322,8 @@ impl LlamaClient {
         tools: &[Value],
         tx: &mpsc::Sender<LlmEvent>,
     ) -> LlmResult<(MutexGuard<'_, History>, Vec<LlmEvent>)> {
-        let history = self.history.lock().await;
+        let mut history = self.history.lock().await;
+        history.set_offered_tools(tools.iter().map(|tool| tool.to_string().len()).sum());
         if !history.exceeds_budget(&self.chat, &self.model) {
             let compacting_soon = self
                 .compaction_headroom(&history)
