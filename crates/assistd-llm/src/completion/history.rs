@@ -2,7 +2,7 @@
 //! heuristic, corrected by the prompt size the server last measured.
 
 use std::borrow::Cow;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -42,12 +42,14 @@ const SUMMARY_INSTRUCTION_RULES: &str = "Start with where things stand now: what
     have the `reminisce` tool, the summarized messages stay searchable with it, so favour state \
     and decisions over verbatim detail. Write with no preamble or commentary.";
 const TOKENS_PER_MESSAGE_OVERHEAD: u32 = 4;
-/// Conservative per-image token weight; errs toward summarizing early.
+/// Per-image token weight before calibration; the real cost depends on the
+/// model's image encoder and the image's size.
 const TOKENS_PER_IMAGE: u32 = 1000;
 /// Share of the history budget, in percent, past which compaction is near.
 const COMPACTION_WARNING_PERCENT: u64 = 80;
-/// Share of the history budget, in percent, that compaction trims down to,
-/// leaving room for several large tool steps before the next one.
+/// Share, in percent, of the budget left beside the system prompt and tool
+/// schemas that compaction trims the messages down to, leaving room for
+/// several large tool steps before the next one.
 const COMPACTION_TARGET_PERCENT: u64 = 40;
 /// Share of `summary_target_tokens`, in percent, the instruction asks for, so
 /// a summary that overruns it still ends before its length limit.
@@ -219,6 +221,22 @@ pub trait Summarizer: Send + Sync {
     async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, LlamaClientError>;
 }
 
+/// One request's heuristic size beside the prompt size the server measured
+/// for it; their ratio corrects every later estimate.
+#[derive(Debug, Clone, Copy)]
+struct Calibration {
+    estimated: NonZeroU32,
+    measured: u32,
+}
+
+impl Calibration {
+    fn scale(self, heuristic: u32) -> u32 {
+        let scaled =
+            u64::from(heuristic) * u64::from(self.measured) / u64::from(self.estimated.get());
+        u32::try_from(scaled).unwrap_or(u32::MAX)
+    }
+}
+
 /// The messages a backend sends its model. `messages` never holds the system prompt,
 /// only turns plus at most one [`Message::Summary`], at index 0; the
 /// rendered form carries a single system message, at its head.
@@ -228,9 +246,10 @@ pub struct History {
     pending_context: Option<String>,
     transient_note: Option<String>,
     messages: Vec<Message>,
-    /// How far the server's measured prompt size was from the heuristic
-    /// on the last measured request, in tokens.
-    calibration: i32,
+    /// Heuristic size of the tool schemas offered with the history.
+    tool_schema_tokens: u32,
+    /// The last measured request, or `None` before any was measured.
+    calibration: Option<Calibration>,
     /// Tokens compaction has removed since the message list was last replaced.
     compacted_tokens: u32,
     /// Bumped whenever existing messages are removed or rewritten; appends
@@ -263,7 +282,8 @@ impl History {
             pending_context: None,
             transient_note: None,
             messages: Vec::new(),
-            calibration: 0,
+            tool_schema_tokens: 0,
+            calibration: None,
             compacted_tokens: 0,
             revision: 0,
         }
@@ -383,7 +403,7 @@ impl History {
             .collect();
         self.pending_context = None;
         self.transient_note = None;
-        self.calibration = 0;
+        self.calibration = None;
         self.compacted_tokens = 0;
         self.revision += 1;
     }
@@ -418,11 +438,15 @@ impl History {
         texts
     }
 
-    /// Estimated prompt size in tokens: [`Self::heuristic_tokens`] shifted
-    /// by the error the server last measured in it.
+    /// Estimated prompt size in tokens: [`Self::heuristic_tokens`] scaled
+    /// by the ratio the server last measured against it.
     pub fn approx_total_tokens(&self) -> u32 {
-        self.heuristic_tokens()
-            .saturating_add_signed(self.calibration)
+        self.calibrated(self.heuristic_tokens())
+    }
+
+    fn calibrated(&self, heuristic: u32) -> u32 {
+        self.calibration
+            .map_or(heuristic, |calibration| calibration.scale(heuristic))
     }
 
     /// Tokens the history has held in all: its current size plus
@@ -435,9 +459,16 @@ impl History {
     /// Record that a request whose [`Self::heuristic_tokens`] was
     /// `estimated` measured `prompt_tokens` on the server.
     pub fn calibrate(&mut self, estimated: u32, prompt_tokens: u32) {
-        let error = i64::from(prompt_tokens) - i64::from(estimated);
-        let bounded = error.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
-        self.calibration = i32::try_from(bounded).unwrap_or_default();
+        self.calibration = NonZeroU32::new(estimated).map(|estimated| Calibration {
+            estimated,
+            measured: prompt_tokens,
+        });
+    }
+
+    /// Count `schema_bytes`, the serialized size of the tool schemas
+    /// offered with the history, toward its estimate.
+    pub fn set_offered_tools(&mut self, schema_bytes: usize) {
+        self.tool_schema_tokens = approx_tokens_bytes(schema_bytes);
     }
 
     /// The current summary text and what it leaves in place, or `None` when
@@ -474,10 +505,11 @@ impl History {
         self.messages.len()
     }
 
-    /// Token count of the history by a bytes-per-token heuristic. It
-    /// knows nothing of tool schemas or the chat template's own tokens.
+    /// Token count of the history and the offered tool schemas by a
+    /// bytes-per-token heuristic. It knows nothing of the chat template's
+    /// own tokens.
     pub fn heuristic_tokens(&self) -> u32 {
-        let mut total = 0u32;
+        let mut total = self.tool_schema_tokens;
         if !self.system_prompt.is_empty() {
             total = total.saturating_add(
                 TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(approx_tokens(&self.system_prompt)),
@@ -624,9 +656,11 @@ impl History {
     fn fold_end(&self, chat: &ChatConfig, model: &ModelConfig) -> usize {
         let preserved = self.first_preserved_index(PRESERVE_RECENT_TURNS);
         let turn_start = self.current_turn_start();
-        let turn_tokens = u64::from(messages_tokens(&self.messages[turn_start..]));
-        let fixed = u64::from(self.fixed_tokens()) + u64::from(chat.summary_target_tokens.get());
-        if fixed + turn_tokens <= u64::from(effective_budget(chat, model)) {
+        let after_fold = self
+            .fixed_heuristic_tokens()
+            .saturating_add(chat.summary_target_tokens.get())
+            .saturating_add(messages_tokens(&self.messages[turn_start..]));
+        if self.calibrated(after_fold) <= effective_budget(chat, model) {
             return preserved;
         }
         self.first_kept_step(chat, model).unwrap_or(preserved)
@@ -638,17 +672,18 @@ impl History {
     fn first_kept_step(&self, chat: &ChatConfig, model: &ModelConfig) -> Option<usize> {
         let turn_start = self.current_turn_start();
         let question = self.messages.get(turn_start)?;
-        let reserved = u64::from(self.fixed_tokens())
-            + u64::from(chat.summary_target_tokens.get())
-            + u64::from(approx_message_tokens(question));
-        let allowance =
-            budget_share(chat, model, COMPACTION_TARGET_PERCENT).saturating_sub(reserved);
+        let reserved = self
+            .fixed_heuristic_tokens()
+            .saturating_add(chat.summary_target_tokens.get())
+            .saturating_add(approx_message_tokens(question));
+        let target = self.compaction_target(chat, model);
         let mut kept = None;
         for start in (turn_start + 1..self.messages.len()).rev() {
             if !is_tool_step(&self.messages[start]) {
                 continue;
             }
-            if kept.is_some() && u64::from(messages_tokens(&self.messages[start..])) > allowance {
+            let with_steps = reserved.saturating_add(messages_tokens(&self.messages[start..]));
+            if kept.is_some() && u64::from(self.calibrated(with_steps)) > target {
                 break;
             }
             kept = Some(start);
@@ -686,11 +721,19 @@ impl History {
         }
     }
 
-    /// Tokens outside the message list: system prompt, transient text, and
-    /// the measured calibration.
-    fn fixed_tokens(&self) -> u32 {
-        self.approx_total_tokens()
+    /// Heuristic tokens outside the message list, which no compaction
+    /// removes: system prompt, tool schemas and transient text.
+    fn fixed_heuristic_tokens(&self) -> u32 {
+        self.heuristic_tokens()
             .saturating_sub(messages_tokens(&self.messages))
+    }
+
+    /// The estimate compaction trims down to: the fixed part plus a share
+    /// of the room the budget leaves beside it.
+    fn compaction_target(&self, chat: &ChatConfig, model: &ModelConfig) -> u64 {
+        let fixed = u64::from(self.calibrated(self.fixed_heuristic_tokens()));
+        let room = u64::from(effective_budget(chat, model)).saturating_sub(fixed);
+        fixed + room * COMPACTION_TARGET_PERCENT / 100
     }
 
     pub fn exceeds_budget(&self, chat: &ChatConfig, model: &ModelConfig) -> bool {
@@ -710,7 +753,7 @@ impl History {
     /// and the newest step always stay.
     pub fn truncate_to_budget(&mut self, chat: &ChatConfig, model: &ModelConfig) {
         let before = self.approx_total_tokens();
-        let target = budget_share(chat, model, COMPACTION_TARGET_PERCENT);
+        let target = self.compaction_target(chat, model);
         while u64::from(self.approx_total_tokens()) > target {
             let Some(idx) = self.first_droppable_index() else {
                 warn!(
