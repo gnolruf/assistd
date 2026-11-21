@@ -108,6 +108,7 @@ pub(crate) const SECTIONS: &[Section] = &[
             setting("tools.bash.sandbox"),
             setting("tools.bash.timeout_secs"),
             setting("tools.allow_auto_mode"),
+            setting("tools.default_permission_mode"),
             setting("tools.write.writable_paths"),
             setting("tools.bash.bwrap_extra_args"),
             setting("tools.scratch.dir"),

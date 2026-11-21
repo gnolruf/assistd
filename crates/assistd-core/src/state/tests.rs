@@ -1410,7 +1410,7 @@ fn memory_hit(id: i64, key: &str, value: &str, similarity: f32) -> MemoryHit {
 /// The main backend, handing out `task_backend` as its one isolated backend; as the
 /// safety judge's model it allows every command.
 pub(crate) fn main_backend(task_backend: Arc<dyn LlmBackend>) -> Arc<ScriptedBackend> {
-    let allow = r#"{"decision":"allow","reason":"a step of the task"}"#;
+    let allow = r#"{"decision":"allow"}"#;
     Arc::new(
         ScriptedBackend::default()
             .handing_out([task_backend])

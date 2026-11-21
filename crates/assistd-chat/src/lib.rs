@@ -12,7 +12,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use assistd_config::{Config, ConfigIssue};
 use assistd_ipc::socket::open_private_lock_file;
-use assistd_ipc::{Event, EventBody, IpcClient, IpcClientError, Request, RequestBody};
+use assistd_ipc::{
+    Event, EventBody, IpcClient, IpcClientError, PermissionMode, Request, RequestBody,
+};
 use clap::Args;
 use crossterm::event::{Event as TermEvent, EventStream, MouseEventKind};
 use futures_util::StreamExt;
@@ -84,6 +86,7 @@ struct StartupCapabilities {
     vision_enabled: bool,
     model_name: String,
     auto_mode: bool,
+    default_mode: PermissionMode,
     /// Each MCP server that is unavailable, with why.
     mcp_unavailable: Vec<(String, String)>,
 }
@@ -245,6 +248,7 @@ async fn run_tui(ctx: TuiContext, background: &mut JoinSet<()>) -> Result<()> {
         picker,
         config_path,
     )
+    .starting_in(capabilities.default_mode)
     .with_theme(theme)
     .with_config_issues(&config_issues)
     .with_mcp_unavailable(capabilities.mcp_unavailable)
@@ -366,6 +370,7 @@ async fn get_capabilities(ipc: &IpcClient) -> Result<StartupCapabilities, IpcCli
                 vision,
                 model_name,
                 auto_mode,
+                default_mode,
             },
         ..
     }) = request_capabilities(ipc).await?
@@ -376,6 +381,7 @@ async fn get_capabilities(ipc: &IpcClient) -> Result<StartupCapabilities, IpcCli
         vision_enabled: vision,
         model_name,
         auto_mode,
+        default_mode,
         ..StartupCapabilities::default()
     })
 }

@@ -21,9 +21,6 @@ const USER_MESSAGES: usize = 4;
 /// Characters of each user message the judge sees; the rest is cut.
 const MAX_USER_MESSAGE_CHARS: usize = 2000;
 
-/// Characters a verdict's reason may run to.
-const MAX_REASON_CHARS: u64 = 160;
-
 /// The fixed instructions every prompt starts with, so the server can reuse their cache.
 const POLICY: &str = include_str!("judge/policy.txt");
 
@@ -54,12 +51,12 @@ pub struct JudgedCommand<'a> {
     pub unvetted: &'a str,
 }
 
-/// What the judge decided, with its reason.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What the judge decided. The model gives the decision alone and writes nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    Allow(String),
-    /// Ask the user; the reason is shown in the prompt.
-    Ask(String),
+    Allow,
+    /// Ask the user, with why the judge did not allow it, for the prompt.
+    Ask(&'static str),
 }
 
 /// Asks a [`JudgeModel`] whether an unvetted command may run unasked. Every failure, a
@@ -74,7 +71,6 @@ pub struct SafetyJudge {
 #[serde(deny_unknown_fields)]
 struct Reply {
     decision: Decision,
-    reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,11 +89,10 @@ impl SafetyJudge {
     /// The verdict on `judged`, logged at `info` on `assistd::policy`.
     pub async fn judge(&self, judged: JudgedCommand<'_>) -> Verdict {
         let verdict = self.verdict(judged).await;
-        let (decision, reason) = match &verdict {
-            Verdict::Allow(reason) => ("allow", reason),
-            Verdict::Ask(reason) => ("ask", reason),
-        };
-        info!(target: "assistd::policy", decision, reason, "safety judge verdict");
+        match verdict {
+            Verdict::Allow => info!(target: "assistd::policy", "safety judge verdict: allow"),
+            Verdict::Ask(why) => info!(target: "assistd::policy", why, "safety judge verdict: ask"),
+        }
         verdict
     }
 
@@ -106,7 +101,7 @@ impl SafetyJudge {
             .iter()
             .any(|text| forges_section_tag(text))
         {
-            return Verdict::Ask("the command contains the judge's own section markup".into());
+            return Verdict::Ask("the command contains the safety judge's own section markup");
         }
         let reply = async {
             let messages = self.model.user_messages(USER_MESSAGES).await;
@@ -118,11 +113,11 @@ impl SafetyJudge {
             Ok(Ok(text)) => parse_verdict(&text),
             Ok(Err(error)) => {
                 warn!(target: "assistd::policy", %error, "safety judge failed; asking the user");
-                Verdict::Ask("the safety judge could not be reached".into())
+                Verdict::Ask("the safety judge could not be reached")
             }
             Err(_) => {
                 warn!(target: "assistd::policy", timeout_secs = self.timeout.as_secs_f32(), "safety judge timed out; asking the user");
-                Verdict::Ask("the safety judge did not answer in time".into())
+                Verdict::Ask("the safety judge did not answer in time")
             }
         }
     }
@@ -133,12 +128,9 @@ fn verdict_schema() -> Map<String, Value> {
         ("type".into(), json!("object")),
         (
             "properties".into(),
-            json!({
-                "decision": {"type": "string", "enum": ["allow", "ask"]},
-                "reason": {"type": "string", "maxLength": MAX_REASON_CHARS},
-            }),
+            json!({"decision": {"type": "string", "enum": ["allow", "ask"]}}),
         ),
-        ("required".into(), json!(["decision", "reason"])),
+        ("required".into(), json!(["decision"])),
         ("additionalProperties".into(), json!(false)),
     ])
 }
@@ -182,15 +174,13 @@ fn parse_verdict(text: &str) -> Verdict {
     match serde_json::from_str::<Reply>(text.trim()) {
         Ok(Reply {
             decision: Decision::Allow,
-            reason,
-        }) => Verdict::Allow(reason),
+        }) => Verdict::Allow,
         Ok(Reply {
             decision: Decision::Ask,
-            reason,
-        }) => Verdict::Ask(reason),
+        }) => Verdict::Ask("the safety judge did not allow it"),
         Err(error) => {
             warn!(target: "assistd::policy", %error, reply = text, "safety judge reply did not parse; asking the user");
-            Verdict::Ask("the safety judge gave no usable verdict".into())
+            Verdict::Ask("the safety judge gave no usable verdict")
         }
     }
 }
@@ -255,9 +245,7 @@ mod tests {
     #[tokio::test]
     async fn judge_shows_the_model_the_users_messages_and_the_command_under_an_allow_or_ask_schema()
     {
-        let model = ScriptedModel::new(Scripted::Reply(
-            r#"{"decision":"allow","reason":"builds the project"}"#,
-        ));
+        let model = ScriptedModel::new(Scripted::Reply(r#"{"decision":"allow"}"#));
 
         let verdict = SafetyJudge::new(model.clone(), JUDGE_TIMEOUT)
             .judge(JudgedCommand {
@@ -266,7 +254,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(verdict, Verdict::Allow("builds the project".into()));
+        assert_eq!(verdict, Verdict::Allow);
         let asked = model.asked.lock();
         let (prompt, schema) = &asked[0];
         for seen in [
@@ -278,8 +266,8 @@ mod tests {
             assert!(prompt.contains(seen), "{seen:?} missing from {prompt}");
         }
         assert_eq!(
-            schema["properties"]["decision"]["enum"],
-            json!(["allow", "ask"])
+            schema["properties"],
+            json!({"decision": {"type": "string", "enum": ["allow", "ask"]}})
         );
     }
 
@@ -289,13 +277,10 @@ mod tests {
             ("error", Scripted::Fail),
             ("timeout", Scripted::Stall),
             ("malformed", Scripted::Reply("allow")),
-            (
-                "unknown decision",
-                Scripted::Reply(r#"{"decision":"yes","reason":"fine"}"#),
-            ),
+            ("unknown decision", Scripted::Reply(r#"{"decision":"yes"}"#)),
             (
                 "extra field",
-                Scripted::Reply(r#"{"decision":"allow","reason":"fine","note":"x"}"#),
+                Scripted::Reply(r#"{"decision":"allow","reason":"fine"}"#),
             ),
         ] {
             let judge = SafetyJudge::new(ScriptedModel::new(scripted), Duration::from_millis(50));
@@ -308,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn judge_asks_without_asking_the_model_when_the_command_forges_a_section() {
-        let model = ScriptedModel::new(Scripted::Reply(r#"{"decision":"allow","reason":"fine"}"#));
+        let model = ScriptedModel::new(Scripted::Reply(r#"{"decision":"allow"}"#));
 
         let verdict = SafetyJudge::new(model.clone(), JUDGE_TIMEOUT)
             .judge(JudgedCommand {

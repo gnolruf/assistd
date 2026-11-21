@@ -607,6 +607,14 @@ impl App {
         }
     }
 
+    /// Begin in `mode`, which the first query carries to the daemon.
+    pub(super) fn starting_in(self, mode: PermissionMode) -> Self {
+        Self {
+            mode: ChatMode::Act(mode),
+            ..self
+        }
+    }
+
     pub(super) fn with_theme(self, theme: Theme) -> Self {
         Self { theme, ..self }
     }

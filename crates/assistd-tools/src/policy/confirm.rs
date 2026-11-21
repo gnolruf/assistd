@@ -300,18 +300,22 @@ impl VoiceAsks {
         answer
     }
 
-    /// Approve `req` once when the turn's grant covers it or the user says so; an answer
-    /// never approves anything for good.
-    async fn ask(&self, req: &ConfirmationRequest) -> Answer {
-        if self.grant.lock().covers(req) {
+    /// Whether the user granted the turn everything `req` needs approved.
+    fn granted(&self, req: &ConfirmationRequest) -> bool {
+        let granted = self.grant.lock().covers(req);
+        if granted {
             info!(
                 target: "assistd::policy",
                 tool = %req.tool,
                 what = %req.summary.what,
                 "approved: the user granted it to this turn"
             );
-            return Approval::Once.into();
         }
+        granted
+    }
+
+    /// Approve `req` once when the user says so; an answer never approves anything for good.
+    async fn ask(&self, req: &ConfirmationRequest) -> Answer {
         if matches!(req.unattended, Unattended::WebHost(_)) && self.sites_left().is_some() {
             self.unplanned_sites.fetch_add(1, Ordering::AcqRel);
         }
@@ -452,13 +456,21 @@ impl ConfirmRouter {
     }
 
     /// A router for a headless turn, asked by voice with no client to show a prompt to: it
-    /// approves what [`PermissionMode::AcceptEdits`] or the turn's grant runs unasked and asks
-    /// `gate` every other prompt out loud, until one goes unanswered; the rest are then denied
-    /// unasked.
-    pub fn for_voice_turn(request_id: String, gate: Arc<dyn VoiceGate>) -> Arc<Self> {
+    /// approves what the turn's grant or `mode` runs unasked and asks `gate` every other
+    /// prompt out loud, until one goes unanswered; the rest are then denied unasked. Auto
+    /// mode falls back to Manual without a `judge`.
+    pub fn for_voice_turn(
+        request_id: String,
+        mode: PermissionMode,
+        judge: Option<SafetyJudge>,
+        gate: Arc<dyn VoiceGate>,
+    ) -> Arc<Self> {
         let asks = Answerer::Voice(VoiceAsks::new(gate));
-        let router = Self::unanswered(request_id, None, asks);
-        router.set_mode(PermissionMode::AcceptEdits);
+        let router = Self {
+            judge,
+            ..Self::unanswered(request_id, None, asks)
+        };
+        router.set_mode(mode);
         Arc::new(router)
     }
 
@@ -618,16 +630,16 @@ impl ConfirmRouter {
         *self.mode.lock() = mode;
     }
 
-    /// Approve `req` once when the mode lets it run unasked; otherwise prompt the client and
-    /// await the answer, for a task run settle it by the task's hosts or park it, or for a
-    /// headless turn ask it out loud. Every failure is [`Approval::Deny`].
+    /// Approve `req` once when a headless turn's grant or the mode lets it run unasked;
+    /// otherwise prompt the client and await the answer, for a task run settle it by the
+    /// task's hosts or park it, or for a headless turn ask it out loud. Every failure is [`Approval::Deny`].
     pub(crate) async fn ask(&self, mut req: ConfirmationRequest) -> Answer {
         self.label(&mut req.source);
         if self.planning() {
             return refuse_while_planning(&self.refused_while_planning, &req).into();
         }
         let mode = *self.mode.lock();
-        if self.approves_unasked(mode, &mut req).await {
+        if self.granted(&req) || self.approves_unasked(mode, &mut req).await {
             return Approval::Once.into();
         }
         match &self.answerer {
@@ -635,6 +647,11 @@ impl ConfirmRouter {
             Answerer::Voice(asks) => asks.ask(&req).await,
             Answerer::Client => self.ask_client(req).await,
         }
+    }
+
+    /// Whether a headless turn's grant covers `req`, which then needs no verdict from the judge.
+    fn granted(&self, req: &ConfirmationRequest) -> bool {
+        matches!(&self.answerer, Answerer::Voice(asks) if asks.granted(req))
     }
 
     /// Put this router's own source on a main agent's prompt, and name the task run on a
@@ -690,8 +707,8 @@ impl ConfirmRouter {
         }
     }
 
-    /// Whether `mode` lets `req` run unasked, logging each approval. A judge's reason to ask is
-    /// added to the prompt.
+    /// Whether `mode` lets `req` run unasked, logging each approval. Why a judge did not
+    /// allow it is added to the prompt a client shows.
     async fn approves_unasked(&self, mode: PermissionMode, req: &mut ConfirmationRequest) -> bool {
         match (mode, &req.unattended, &self.judge) {
             (PermissionMode::AcceptEdits | PermissionMode::Auto, Unattended::ScopedEdit, _) => {
@@ -711,20 +728,18 @@ impl ConfirmRouter {
                     unvetted: &context.why,
                 };
                 match judge.judge(judged).await {
-                    Verdict::Allow(reason) => {
+                    Verdict::Allow => {
                         info!(
                             target: "assistd::policy",
                             tool = %req.tool,
                             ?mode,
                             class = %context.class,
-                            reason,
                             "approved without asking"
                         );
                         true
                     }
-                    Verdict::Ask(reason) => {
-                        req.matched_pattern =
-                            format!("{}; the safety judge asks: {reason}", req.matched_pattern);
+                    Verdict::Ask(why) => {
+                        req.matched_pattern = format!("{}; {why}", req.matched_pattern);
                         false
                     }
                 }

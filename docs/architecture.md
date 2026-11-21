@@ -662,12 +662,20 @@ searched and fetched, which can still send what the user typed, recalled
 memories and the window title to an approved host, and `web search` queries
 reach SearXNG's search engines unasked.
 A turn asked by voice (push-to-talk
-or the wake word) is headless: no client shows its prompts. It runs in
-accept-edits mode, and every other prompt goes through
+or the wake word) is headless: no client shows its prompts. It runs in the mode
+`tools.default_permission_mode` names, which is also the mode a chat window
+starts in (`Capabilities::default_mode`): manual unless set, and manual when
+it is `auto` without `tools.allow_auto_mode`. In manual every prompt is asked,
+edits inside the edit scope included. In Auto the safety judge answers the
+prompts it may, as for a chat connection, judging against the backend's
+history; what the turn's spoken grant covers is never put to it, and a new web
+host is never left to it. Every prompt the mode leaves goes through
 `ConfirmRouter::for_voice_turn` to the voice confirmation gate
 (`VoiceConfirmationGate`), one at a time. The gate speaks one question built
 from the request's `Summary`: what it would do, and why it asks when that is
-more than the tool not being approved yet. The script is never read out. The
+more than the tool not being approved yet. A prompt the judge did not allow
+costs two one-shot requests on the chat model: the verdict, then the reading
+of the answer. The script is never read out. The
 tool call waits. The answer is the first utterance that begins within 10 s of
 the question ending (`Heard::Answer`, from the listener's answer window, with
 no wake phrase needed and barge-in checks off), or a push-to-talk press, which

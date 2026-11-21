@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Component, ComponentReadiness, ConfirmSource, DocumentActivity, DocumentPass,
     DocumentPassCounts, DocumentRootStatus, ListenPhase, McpServerState, McpTransportKind,
-    ModeRecommendation, PageTranscriptionStatus, Plan, PresenceState, RelayEvent, RelayStepRecord,
-    StartupComponent, StatusKind, StatusSeverity, TaskId, TaskName, TaskPrompt, TaskQueueSnapshot,
-    TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary, TaskSpec, TokenRevocation, ToolReport,
-    VoiceCaptureState,
+    ModeRecommendation, PageTranscriptionStatus, PermissionMode, Plan, PresenceState, RelayEvent,
+    RelayStepRecord, StartupComponent, StatusKind, StatusSeverity, TaskId, TaskName, TaskPrompt,
+    TaskQueueSnapshot, TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary, TaskSpec,
+    TokenRevocation, ToolReport, VoiceCaptureState,
 };
 
 /// Kinds of [`Event`] carried on the daemon-wide broadcast bus, selectable by a
@@ -322,12 +322,15 @@ pub enum EventBody {
     /// The user agreed to the model's ask to plan first; the turn now plans.
     PlanModeEntered,
     /// Runtime capabilities; `model_name` is the basename of the configured `model.name`, and
-    /// `auto_mode` whether [`PermissionMode::Auto`](crate::PermissionMode::Auto) is honored.
+    /// `auto_mode` whether [`PermissionMode::Auto`](crate::PermissionMode::Auto) is honored,
+    /// and `default_mode` the mode a chat window starts in.
     Capabilities {
         vision: bool,
         model_name: String,
         #[serde(default)]
         auto_mode: bool,
+        #[serde(default)]
+        default_mode: PermissionMode,
     },
     /// Progress of a relay running inside the turn's `relay` tool call.
     Relay { event: RelayEvent },

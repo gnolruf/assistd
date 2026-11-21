@@ -197,7 +197,7 @@ impl JudgeModel for FixedJudge {
         _prompt: String,
         _schema: Map<String, Value>,
     ) -> Result<String, Box<dyn Error + Send + Sync>> {
-        Ok(format!(r#"{{"decision":"{}","reason":"stub"}}"#, self.0))
+        Ok(format!(r#"{{"decision":"{}"}}"#, self.0))
     }
 }
 
