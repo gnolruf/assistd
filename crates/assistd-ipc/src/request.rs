@@ -77,6 +77,7 @@ impl Request {
             RequestBody::Switch { .. } => "switch",
             RequestBody::Undo => "undo",
             RequestBody::ResumeOrNew { .. } => "resume_or_new",
+            RequestBody::ReplayBranch => "replay_branch",
             RequestBody::NewSession => "new_session",
             RequestBody::ChatState { .. } => "chat_state",
             RequestBody::ChatClosed => "chat_closed",
@@ -215,6 +216,9 @@ pub enum RequestBody {
     /// Resume the current branch if written within `recency_secs` (emits `HistoryEntry`s), else
     /// start a new session (emits `BranchSwitched`); then `Done`.
     ResumeOrNew { recency_secs: u64 },
+    /// Replay the current branch however old it is. Emits `BranchSwitched`, `HistoryEntry`s,
+    /// then `Done`.
+    ReplayBranch,
     /// Start a new session, saved with its first message. Emits `BranchSwitched`, then `Done`.
     NewSession,
     /// Report whether the chat has keyboard focus; the daemon keys the chat by the sender's PID.

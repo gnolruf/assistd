@@ -210,6 +210,10 @@ fn session_request_cases() -> Vec<(Request, &'static str)> {
             r#"{"id":"r","type":"resume_or_new","recency_secs":600}"#,
         ),
         (
+            request(RequestBody::ReplayBranch),
+            r#"{"id":"r","type":"replay_branch"}"#,
+        ),
+        (
             request(RequestBody::Subscribe {
                 filter: SubscribeFilter::default(),
             }),
