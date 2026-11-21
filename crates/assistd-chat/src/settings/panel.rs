@@ -19,6 +19,9 @@ use super::server_list::{ServerList, ServerListAction};
 use super::theme_list::{ThemeList, ThemeListAction};
 
 const THEME_KEY: &str = "chat.theme";
+const DEFAULT_MODE_KEY: &str = "tools.default_permission_mode";
+const AUTO_MODE_KEY: &str = "tools.allow_auto_mode";
+const AUTO_MODE_CHOICE: &str = "auto";
 pub(crate) const SAVED_THEMES_KEY: &str = "chat.themes";
 /// Rows PgUp/PgDn move the selection.
 const PAGE_ROWS: usize = 10;
@@ -699,12 +702,13 @@ impl SettingsPanel {
                 toml::Value::Boolean(!current.and_then(toml::Value::as_bool).unwrap_or(false))
             }
             SettingKind::Choice(options) => {
+                let offered = self.offered_choices(setting.key, options);
                 let index = current
                     .and_then(toml::Value::as_str)
-                    .and_then(|current| options.iter().position(|option| *option == current))
+                    .and_then(|current| offered.iter().position(|option| *option == current))
                     .unwrap_or(0);
-                let offset = if forward { 1 } else { options.len() - 1 };
-                toml::Value::from(options[(index + offset) % options.len()])
+                let offset = if forward { 1 } else { offered.len() - 1 };
+                toml::Value::from(offered[(index + offset) % offered.len()])
             }
             SettingKind::Color => toml::Value::from(
                 next_named_color(self.current_color(setting), forward).to_string(),
@@ -712,6 +716,17 @@ impl SettingsPanel {
             _ => return,
         };
         self.apply(setting, &next);
+    }
+
+    /// The `options` of choice `key` that can take effect: the default permission mode
+    /// offers auto only while auto mode is.
+    fn offered_choices(&self, key: &str, options: &[&'static str]) -> Vec<&'static str> {
+        let auto_withheld = key == DEFAULT_MODE_KEY && !self.is_on(AUTO_MODE_KEY);
+        options
+            .iter()
+            .copied()
+            .filter(|option| !(auto_withheld && *option == AUTO_MODE_CHOICE))
+            .collect()
     }
 
     fn apply_text(&mut self, text: &str) {

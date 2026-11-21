@@ -126,6 +126,7 @@ impl Config {
         let raw: toml::Table = toml::from_str(&content).map_err(parse_error)?;
         let unknown = config.unknown_keys(&raw)?;
         config.warn_if_credentials_exposed(path);
+        config.warn_if_default_mode_not_offered();
         let issues = config.issues_after_unknown_keys(&unknown);
         Ok((config, issues))
     }
@@ -170,6 +171,15 @@ impl Config {
                 .servers
                 .iter()
                 .any(|server| server.transport.sets_secrets())
+    }
+
+    fn warn_if_default_mode_not_offered(&self) {
+        if self.tools.default_permission_mode != self.tools.effective_default_mode() {
+            tracing::warn!(
+                target: "assistd::config",
+                "tools.default_permission_mode = \"auto\" needs tools.allow_auto_mode; using manual"
+            );
+        }
     }
 
     fn warn_if_credentials_exposed(&self, path: &Path) {

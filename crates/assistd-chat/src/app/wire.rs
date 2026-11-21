@@ -282,6 +282,7 @@ impl App {
                 vision,
                 model_name,
                 auto_mode,
+                ..
             } => {
                 self.vision_enabled = vision;
                 self.offer_auto_mode(auto_mode);

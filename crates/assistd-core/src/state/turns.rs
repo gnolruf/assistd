@@ -25,10 +25,11 @@ use super::context::{combine_context_blocks, voice_approvals_note};
 use super::host_reads::BranchHostReads;
 use super::session_lapse::SessionLapse;
 use super::wire::decode_wire_attachments;
-use super::{DispatchError, FailedStep};
+use super::{DispatchError, FailedStep, default_permission_mode};
 use crate::admission::{MainLaneTurn, TurnAdmission};
 use crate::agent::{Agent, AgentSpec};
 use crate::bus::{EventBus, EventSink};
+use crate::judge::{BackendJudgeModel, safety_judge};
 use crate::planner::Planner;
 use crate::presence::{PresenceManager, RequestGuard};
 use crate::recovery::{Component, spawn_supervised};
@@ -83,13 +84,18 @@ impl TurnOrigin {
         matches!(self, Self::Voice)
     }
 
-    /// The context turn `id` runs in, a headless turn's prompts going to `voice_gate`.
-    fn into_turn_context(self, id: &str, voice_gate: &Arc<VoiceConfirmationGate>) -> TurnContext {
+    /// The context turn `id` runs in, a headless turn running in the default permission
+    /// mode with its prompts going to the voice gate.
+    fn into_turn_context(self, id: &str, deps: &TurnDeps) -> TurnContext {
         match self {
             Self::Typed(turn) => turn,
             Self::Voice => {
-                let gate = Arc::clone(voice_gate) as Arc<dyn VoiceGate>;
-                TurnContext::answered_by(ConfirmRouter::for_voice_turn(id.to_string(), gate))
+                let mode = default_permission_mode(&deps.config.tools);
+                let judge_model = BackendJudgeModel::new(Arc::clone(&deps.llm));
+                let judge = safety_judge(&deps.config, judge_model);
+                let gate = Arc::clone(&deps.voice_gate) as Arc<dyn VoiceGate>;
+                let router = ConfirmRouter::for_voice_turn(id.to_string(), mode, judge, gate);
+                TurnContext::answered_by(router)
             }
         }
     }
@@ -190,7 +196,7 @@ impl TurnService {
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
         let turn = origin
-            .into_turn_context(&id, &self.deps.voice_gate)
+            .into_turn_context(&id, &self.deps)
             .reading_into(self.active_branch_host_reads().await);
         let agent_task =
             self.spawn_agent_task(turn, (text, attachments), plan, llm_tx, cancel.clone());
@@ -345,7 +351,8 @@ impl TurnService {
             None
         };
         let window = self.build_window_context().await;
-        let approvals = voice_approvals_note(origin);
+        let mode = default_permission_mode(&self.deps.config.tools);
+        let approvals = voice_approvals_note(origin, mode);
         let brief = self.brief_reply_note(origin, chat_focused);
         if let Some(block) = combine_context_blocks([semantic, window, approvals, brief])
             && let Err(e) = self.deps.llm.set_transient_context(block).await

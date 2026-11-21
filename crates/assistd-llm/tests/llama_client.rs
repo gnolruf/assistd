@@ -1724,7 +1724,7 @@ async fn json_oneshot_is_a_lone_greedy_schema_request_and_recent_user_messages_a
             &[r#"{"command":"ls"}"#],
         )))
         .await;
-    let verdict = r#"{"decision":"allow","reason":"builds the project"}"#;
+    let verdict = r#"{"decision":"allow"}"#;
     for reply in ["ASSISTANT ANSWER", verdict] {
         script
             .push_stream(StreamResponse::Deltas(vec![reply.into()]))

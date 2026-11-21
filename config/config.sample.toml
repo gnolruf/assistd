@@ -89,6 +89,7 @@
 
 [tools]
 # allow_auto_mode = false  # true: shift+tab also offers Auto, where a model judge answers prompts
+# default_permission_mode = "manual"  # or "accept_edits", or "auto" with allow_auto_mode; chat and voice turns start in it
 
 [tools.scratch]
 # dir = "/run/user/1000/assistd/scratch"  # shared by bash and the other commands

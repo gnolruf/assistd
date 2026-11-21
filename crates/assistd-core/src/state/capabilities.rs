@@ -3,6 +3,7 @@
 use assistd_ipc::{Component, ComponentReadiness, Event, EventBody, StatusKind, StatusSeverity};
 use assistd_llm::VisionState;
 
+use super::default_permission_mode;
 use super::status_service::StatusService;
 use crate::bus::EventSink;
 
@@ -60,6 +61,7 @@ impl StatusService {
                     vision: probe.vision_supported,
                     model_name,
                     auto_mode: self.config.tools.allow_auto_mode,
+                    default_mode: default_permission_mode(&self.config.tools),
                 },
             ))
             .await;

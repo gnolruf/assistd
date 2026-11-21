@@ -3,6 +3,7 @@
 
 use tracing::debug;
 
+use assistd_ipc::PermissionMode;
 use assistd_memory::{MemoryHit, SessionScope, SourcePointer};
 use assistd_wm::FocusedWindowContext;
 
@@ -20,9 +21,11 @@ const MAX_WINDOW_FIELD_CHARS: usize = 200;
 const BRIEF_REPLY_NOTE: &str = "Delivery: the user asked by voice and is away from the chat; \
      the reply appears as a desktop notification and may be spoken. Answer in one to three short \
      plain sentences, without Markdown, lists or code blocks, unless they ask for detail.\n";
-const VOICE_APPROVALS_NOTE: &str = "Approvals: the user asked by voice and this turn is \
-     headless: no screen shows them a confirmation prompt. Edits of ordinary files in the \
-     writable directories run without asking. Anything else that needs approval is asked out \
+const VOICE_APPROVALS_HEADLESS: &str = "Approvals: the user asked by voice and this turn is \
+     headless: no screen shows them a confirmation prompt.";
+const VOICE_APPROVALS_EDITS_UNASKED: &str =
+    " Edits of ordinary files in the writable directories run without asking.";
+const VOICE_APPROVALS_ASKED_ALOUD: &str = " Anything that needs approval is asked out \
      loud for you, and the user answers out loud, so call the tool without asking permission \
      first. When the work will need approval more than once, call enter_plan_mode first, so \
      the user is asked one question instead of several. A lookup that reads a single web \
@@ -137,8 +140,15 @@ impl TurnService {
 }
 
 /// What a turn asked by voice is told about being headless and how its prompts are answered.
-pub(super) fn voice_approvals_note(origin: &TurnOrigin) -> Option<String> {
-    origin.is_voice().then(|| VOICE_APPROVALS_NOTE.to_string())
+/// What a voice turn running in `mode` is told about its approvals; `None` for any other turn.
+pub(super) fn voice_approvals_note(origin: &TurnOrigin, mode: PermissionMode) -> Option<String> {
+    let edits_unasked = match mode {
+        PermissionMode::Manual => "",
+        PermissionMode::AcceptEdits | PermissionMode::Auto => VOICE_APPROVALS_EDITS_UNASKED,
+    };
+    origin
+        .is_voice()
+        .then(|| format!("{VOICE_APPROVALS_HEADLESS}{edits_unasked}{VOICE_APPROVALS_ASKED_ALOUD}"))
 }
 
 /// One saved memory as a single-line `key: value` bullet, its value cut to

@@ -27,6 +27,19 @@ pub struct ToolsConfig {
     /// for the user on commands the path guards and edit scope do not settle. `false` keeps
     /// every connection in manual or accept-edits mode.
     pub allow_auto_mode: bool,
+    /// The permission mode a chat window starts in and every spoken turn runs in. `auto`
+    /// without `allow_auto_mode` is read as `manual`.
+    pub default_permission_mode: DefaultPermissionMode,
+}
+
+impl ToolsConfig {
+    /// `default_permission_mode`, or manual when that is auto and `allow_auto_mode` is off.
+    pub fn effective_default_mode(&self) -> DefaultPermissionMode {
+        match self.default_permission_mode {
+            DefaultPermissionMode::Auto if !self.allow_auto_mode => DefaultPermissionMode::Manual,
+            mode => mode,
+        }
+    }
 }
 
 impl DescribeSettings for ToolsConfig {
@@ -39,8 +52,32 @@ impl DescribeSettings for ToolsConfig {
             "offer auto mode",
             "Let the chat toggle into Auto, where a model judge approves commands"
         ),
+        default_permission_mode => (
+            "default permission mode",
+            "Mode the chat starts in and spoken turns run in; auto needs auto mode offered"
+        ),
     }
 }
+
+/// Which confirmation prompts are answered without asking the user.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultPermissionMode {
+    /// Every prompt is asked.
+    #[default]
+    Manual,
+    /// Edits of ordinary paths inside the edit scope run unasked.
+    AcceptEdits,
+    /// As `AcceptEdits`, and the safety judge answers the prompts it may: edits outside
+    /// the scope, unvetted scripts, app launches and MCP tool calls.
+    Auto,
+}
+
+choice_setting!(DefaultPermissionMode {
+    Manual => "manual",
+    AcceptEdits => "accept_edits",
+    Auto => "auto",
+});
 
 /// The directory `bash` scripts and the other commands share.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

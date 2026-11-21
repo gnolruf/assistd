@@ -54,8 +54,8 @@ pub use tasks::{TaskInterruption, TasksConfig};
 pub use theme::{ThemeColor, ThemeConfig, ThemeName};
 pub use timeouts::TimeoutsConfig;
 pub use tools::{
-    BashSandboxMode, ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsScratchConfig,
-    ToolsWriteConfig, WritablePath,
+    BashSandboxMode, DefaultPermissionMode, ToolsBashConfig, ToolsConfig, ToolsOutputConfig,
+    ToolsScratchConfig, ToolsWriteConfig, WritablePath,
 };
 pub use top::Config;
 pub use values::{

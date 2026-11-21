@@ -12,9 +12,11 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinError;
 use tracing::warn;
 
-use assistd_config::Config;
+use assistd_config::{Config, DefaultPermissionMode, ToolsConfig};
 use assistd_embed::EmbedError;
-use assistd_ipc::{Event, EventBody, Request, RequestBody, Role, TaskRequest, WakeWordOp};
+use assistd_ipc::{
+    Event, EventBody, PermissionMode, Request, RequestBody, Role, TaskRequest, WakeWordOp,
+};
 use assistd_llm::{LlmError, LlmHealthProbe};
 use assistd_memory::{MemoryError, PersistedRole};
 use assistd_tools::{SafetyJudge, TurnContext};
@@ -553,6 +555,15 @@ fn mcp_service(subsystems: &Subsystems, bus: EventBus) -> McpService {
 async fn replied(reply: impl Future<Output = ()>) -> Result<(), DispatchError> {
     reply.await;
     Ok(())
+}
+
+/// The mode `tools` starts a chat window in and runs spoken turns in.
+fn default_permission_mode(tools: &ToolsConfig) -> PermissionMode {
+    match tools.effective_default_mode() {
+        DefaultPermissionMode::Manual => PermissionMode::Manual,
+        DefaultPermissionMode::AcceptEdits => PermissionMode::AcceptEdits,
+        DefaultPermissionMode::Auto => PermissionMode::Auto,
+    }
 }
 
 fn wire_role(role: PersistedRole) -> Role {
