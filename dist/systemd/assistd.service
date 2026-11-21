@@ -10,6 +10,7 @@ ExecStart=%h/.cargo/bin/assistd daemon
 Restart=on-failure
 RestartSec=5s
 KillSignal=SIGTERM
+KillMode=mixed
 TimeoutStopSec=15s
 # Allow llama-server --mlock to pin the CPU-side model weights. Without
 # this, the kernel's default RLIMIT_MEMLOCK (8 MiB on most distros) means
