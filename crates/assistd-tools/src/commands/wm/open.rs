@@ -1,11 +1,12 @@
 //! `wm open`: the command line that launches an installed application as
-//! the user, through the compositor.
+//! the user, through the compositor, to open a file when none is named.
 
 use std::borrow::Cow;
 
 use assistd_utils::path::expand_tilde_from_env;
 use assistd_wm::{ExecCommand, UnquotableCommand, WorkspaceId};
 
+use super::default_app::{DefaultAppError, default_app};
 use super::desktop_entry::{DesktopEntry, EntryError, Targets};
 use crate::chain::Word;
 use crate::command::Hint;
@@ -25,12 +26,21 @@ const TERMINALS: &[(&str, &[&str])] = &[
     ("xterm", &["-e"]),
 ];
 
-/// `wm open [--workspace <ws>] [--cwd <dir>] <app> [target...]`.
+/// What a launch names first: an application by desktop id, or a file for
+/// its default application.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Subject {
+    App(String),
+    File(String),
+}
+
+/// `wm open [--workspace <ws>] [--cwd <dir>] <app|file> [target...]`.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct OpenArgs {
     pub(super) workspace: Option<WorkspaceId>,
     cwd: Option<String>,
-    pub(super) app: String,
+    pub(super) subject: Subject,
+    /// Every file or URL the application is handed, a [`Subject::File`] first.
     targets: Vec<String>,
 }
 
@@ -56,15 +66,23 @@ impl OpenArgs {
                         "'{flag}' is not an option, or is missing its value"
                     ));
                 }
+                [file, ..] if names_path(&file.text) => {
+                    return Ok(Self {
+                        workspace,
+                        cwd,
+                        subject: Subject::File(file.text.clone()),
+                        targets: rest.iter().map(|target| target.text.clone()).collect(),
+                    });
+                }
                 [app, targets @ ..] => {
                     return Ok(Self {
                         workspace,
                         cwd,
-                        app: app.text.clone(),
+                        subject: Subject::App(app.text.clone()),
                         targets: targets.iter().map(|target| target.text.clone()).collect(),
                     });
                 }
-                [] => return Err("no application named".to_string()),
+                [] => return Err("no application or file named".to_string()),
             }
         }
     }
@@ -81,6 +99,8 @@ impl OpenArgs {
 pub(super) enum OpenError {
     #[error(transparent)]
     Entry(#[from] EntryError),
+    #[error(transparent)]
+    DefaultApp(#[from] DefaultAppError),
     #[error("{0} takes no files or URLs")]
     NoTargets(String),
     #[error("{0} is a terminal emulator, which wm open starts without a command")]
@@ -118,6 +138,15 @@ impl OpenError {
                  under ~/.local/share/applications"
                     .into(),
             ),
+            Self::DefaultApp(DefaultAppError::NotAFile(_)) => (
+                Hint::Use,
+                "the absolute or ~/ path of an existing file".into(),
+            ),
+            Self::DefaultApp(_) => (
+                Hint::Use,
+                "wm open <app> <file>, naming the desktop id of an application that opens it"
+                    .into(),
+            ),
             Self::NoTargets(_) | Self::OneTarget(_) => (Hint::Use, "fewer files, or none".into()),
             Self::TerminalCommand(_) => (
                 Hint::Use,
@@ -149,10 +178,14 @@ pub(super) struct PreparedLaunch {
 }
 
 impl PreparedLaunch {
-    /// Find the entry `args` names and prepare it; reads the filesystem,
-    /// so it blocks.
+    /// Find the entry `args` names, or the default one for its file, and
+    /// prepare it; reads the filesystem, so it blocks.
     pub(super) fn find(args: &OpenArgs) -> Result<Self, OpenError> {
-        Self::new(DesktopEntry::find(&args.app)?, args)
+        let entry = match &args.subject {
+            Subject::App(id) => DesktopEntry::find(id)?,
+            Subject::File(file) => default_app(&expand_tilde_from_env(file))?,
+        };
+        Self::new(entry, args)
     }
 
     /// The shell command line that runs `entry` as `args` asks.
@@ -175,6 +208,11 @@ impl PreparedLaunch {
             opens_url,
         })
     }
+}
+
+/// Whether `word` is a file rather than a desktop id, which holds no `/`.
+fn names_path(word: &str) -> bool {
+    word.starts_with('/') || word.starts_with("~/")
 }
 
 fn resolve_targets(entry: &DesktopEntry, raw: &[String]) -> Result<Vec<String>, OpenError> {

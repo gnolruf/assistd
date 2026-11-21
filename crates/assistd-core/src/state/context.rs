@@ -20,12 +20,20 @@ const PAST_SESSIONS_HEADER: &str =
 const MAX_WINDOW_FIELD_CHARS: usize = 200;
 const SPOKEN_REPLY_NOTE: &str = "Delivery: your reply is read aloud to the user, so write it \
      to be heard, as one side of a conversation. Use short spoken sentences, one idea at a time, \
-     with no Markdown, lists, tables or code. Give the answer first, then stop. When there is \
-     detail that does not suit speech, such as code, a table, a long list or a long explanation, \
-     say in a sentence what it is and offer to put it on screen; write it out only once the \
-     user accepts. Before a tool call that may take a while, such as starting a sub-agent, \
-     reading a document, or searching files or the web, first say in one short sentence what \
-     you are about to do, so the user is not left in silence.\n";
+     with no Markdown, lists, tables or code. Give the answer first, then stop. Before a tool \
+     call that may take a while, such as starting a sub-agent, reading a document, or searching \
+     files or the web, first say in one short sentence what you are about to do, so the user is \
+     not left in silence.";
+const SPOKEN_DETAIL_OFFERED: &str = " When there is detail that does not suit speech, such as \
+     code, a table, a long list or a long explanation, say in a sentence what it is and offer to \
+     put it on screen; write it out only once the user accepts.\n";
+const SPOKEN_DETAIL_SHOWN: &str = " When there is detail that does not suit speech, such as \
+     code, a table, a long list or a long explanation, do not read it out and do not put it in \
+     your reply: write it to a file in the scratch directory, in whatever format suits it \
+     (Markdown, HTML, CSV, an image), open that file on the user's screen with `wm open <file>`, \
+     and say in a sentence what you put on screen. The user is asked before the window opens, \
+     so do not ask first. When the user had you change existing files or data and a sentence \
+     cannot describe the change, open the changed file the same way instead of describing it.\n";
 const VOICE_APPROVALS_HEADLESS: &str = "Approvals: the user asked by voice and this turn is \
      headless: no screen shows them a confirmation prompt.";
 const VOICE_APPROVALS_EDITS_UNASKED: &str =
@@ -114,13 +122,19 @@ impl TurnService {
         ))
     }
 
-    /// How to phrase a reply that is read aloud. `None` when speech is muted or has
+    /// How to phrase a reply that is read aloud, and where its unspeakable detail goes: a
+    /// file opened on screen with a compositor connected. `None` when speech is muted or has
     /// no output, or `voice.synthesis.conversational` is off.
     pub(super) fn spoken_reply_note(&self) -> Option<String> {
         let speech = self.deps.voice.speech();
         let spoken = speech.enabled() && speech.output().is_ok();
+        let detail = if self.deps.window_manager.is_connected() {
+            SPOKEN_DETAIL_SHOWN
+        } else {
+            SPOKEN_DETAIL_OFFERED
+        };
         (spoken && self.deps.config.voice.synthesis.conversational)
-            .then(|| SPOKEN_REPLY_NOTE.to_string())
+            .then(|| format!("{SPOKEN_REPLY_NOTE}{detail}"))
     }
 
     /// Render the focused window as a context block. `None` when no
