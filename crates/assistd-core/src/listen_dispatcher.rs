@@ -149,6 +149,7 @@ async fn run_utterance_forwarder(
         }
     }
 
+    state.stop_turns();
     drain_join_set(&mut turns.running, "listen-triggered query").await;
 }
 

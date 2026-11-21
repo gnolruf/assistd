@@ -303,6 +303,7 @@ where
 
     drop(listener);
     let _ = drain_tx.send(true);
+    state.stop_turns();
     drain_join_set(&mut connections, "connection").await;
     Ok(())
 }
@@ -1144,51 +1145,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graceful_shutdown_waits_for_in_flight_stream() {
-        let pause = Duration::from_millis(50);
-        let slow_reply = ["d0", "d1", "d2"]
-            .into_iter()
-            .fold(Step::default(), |step, delta| {
-                step.saying(delta).pausing(pause)
-            });
-        let state = state_with_backend(scripted([slow_reply])).await;
+    async fn shutdown_interrupts_an_in_flight_turn_and_keeps_its_partial_reply() {
+        let backend = scripted([Step::reply("The answer is ").waiting_at(&Gate::new())]);
+        let state = state_with_backend(backend.clone()).await;
         let server = TestServer::start(&state).await;
         let (_write, mut reader) = open_connection(
             &server.path,
-            &[r#"{"type":"query","id":"s1","text":"go"}"#],
+            &[r#"{"type":"query","id":"s1","text":"why?"}"#],
             true,
         )
         .await;
-
         let first = read_event(&mut reader).await.expect("first Delta");
-        assert_eq!(first, delta("s1", "d0"));
+        assert_eq!(first, delta("s1", "The answer is "));
 
         let stopping = tokio::spawn(server.stop());
         let rest = read_until_terminal(&mut reader).await;
-        assert_eq!(rest, [delta("s1", "d1"), delta("s1", "d2"), done("s1")]);
-
-        stopping.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn graceful_shutdown_aborts_after_grace_timeout() {
-        let stuck = Step::reply("stuck").waiting_at(&Gate::new());
-        let state = state_with_backend(scripted([stuck])).await;
-        let server = TestServer::start(&state).await;
-        let (_write, mut reader) = open_connection(
-            &server.path,
-            &[r#"{"type":"query","id":"s2","text":"hang"}"#],
-            true,
-        )
-        .await;
-        read_event(&mut reader)
+        assert_eq!(rest.last(), Some(&done("s1")), "{rest:?}");
+        tokio::time::timeout(Duration::from_secs(2), stopping)
             .await
-            .expect("expected first Delta from the stuck step");
+            .expect("shutdown waited out the grace period on an interrupted turn")
+            .unwrap();
 
-        tokio::time::pause();
-        tokio::time::timeout(Duration::from_secs(10), server.stop())
-            .await
-            .expect("server did not exit within 10s of shutdown");
+        assert_eq!(
+            backend.seen().interrupted_replies,
+            ["The answer is\n\n[interrupted]"]
+        );
     }
 
     /// Collect subscriber events until the stream goes quiet for `idle`.
