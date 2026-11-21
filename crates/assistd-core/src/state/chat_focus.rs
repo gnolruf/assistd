@@ -39,6 +39,17 @@ struct ChatProcess {
     started_at: Option<u64>,
 }
 
+impl SlotState {
+    fn forget_dead_chat(&mut self) {
+        if self
+            .chat
+            .is_some_and(|chat| chat.process.is_some_and(|process| !process.is_alive()))
+        {
+            self.chat = None;
+        }
+    }
+}
+
 impl ChatProcess {
     fn of(pid: u32) -> Self {
         Self {
@@ -71,17 +82,19 @@ impl ChatFocusSlot {
         }
     }
 
+    /// Whether a live chat is open, focused or not, forgetting a chat whose process is gone.
+    pub(super) fn open(&self) -> bool {
+        let mut state = self.inner.lock();
+        state.forget_dead_chat();
+        state.chat.is_some()
+    }
+
     /// Whether a live chat has focus, forgetting a chat whose process is
     /// gone. `Some` carries the new value when it differs from the one
     /// last returned this way.
     fn refresh(&self) -> (bool, Option<bool>) {
         let mut state = self.inner.lock();
-        if state
-            .chat
-            .is_some_and(|chat| chat.process.is_some_and(|process| !process.is_alive()))
-        {
-            state.chat = None;
-        }
+        state.forget_dead_chat();
         let focused = state.chat.is_some_and(|chat| chat.focused);
         let changed = (focused != state.published).then_some(focused);
         state.published = focused;

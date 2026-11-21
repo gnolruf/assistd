@@ -42,6 +42,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         &[],
         &[
             setting("voice.mic_device"),
+            setting("voice.session_hold_secs"),
             setting("voice.transcription.model"),
             setting("voice.transcription.prefer_gpu"),
             setting("voice.transcription.threads"),

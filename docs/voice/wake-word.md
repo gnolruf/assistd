@@ -97,6 +97,17 @@ of it.
 reply opens a new window, so a back-and-forth can continue hands-free.
 Set `follow_up_ms = 0` to require the phrase every time.
 
+**Sessions.** With no chat window open, a spoken conversation ends in
+two stages. When the follow-up window closes, the listener wants the
+phrase again but the assistant still remembers what was said. Once
+`voice.session_hold_secs` (default 16) have passed since the reply
+finished, the assistant moves on: the next thing you say, by phrase or push-to-talk,
+begins a new session. The old one is kept and can be resumed from the
+chat. While a chat window is open, spoken prompts stay in the session
+it shows. A restarted daemon also begins a new session for the first
+spoken prompt. Set `session_hold_secs = 0` to keep every spoken
+prompt in the active session.
+
 **Push-to-talk** takes the mic from the listener while held. Anything
 the listener had captured but not yet acted on is dropped, and the
 conversation ends: no follow-up window opens until you say the phrase

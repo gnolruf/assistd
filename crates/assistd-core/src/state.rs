@@ -45,6 +45,7 @@ pub(crate) mod memory_handlers;
 pub(crate) mod memory_stack;
 pub(crate) mod presence_handlers;
 pub(crate) mod readiness;
+mod session_lapse;
 pub(crate) mod status_service;
 pub(crate) mod subscribe;
 pub(crate) mod subsystems;

@@ -1110,6 +1110,17 @@ new one. The listener reports `ListenPhase` (`Off`, `Armed`, `Capturing`)
 and a `WakeWordDetected` event on the bus. The listener keeps running
 while presence sleeps, and a command wakes the model like any other query.
 
+A session talked to by voice with no chat open ends in two stages. The
+follow-up window closing is the first: the listener wants the phrase again.
+`SessionLapse` times the second: `voice.session_hold_secs` after the last
+user turn ends, speech included, a spoken prompt (wake word or push-to-talk) no
+longer continues the active session. `TurnService` then begins a new unsaved
+session for that turn (`BranchService::begin_session_for_turn`), as `/new`
+does, before the prompt is saved. A chat window that is open, focused or not
+(`ChatFocusSlot::open`), keeps spoken prompts in the session it shows. The
+time is kept in memory, so the first spoken prompt after a daemon start
+begins a new session too. With the key at `0` no spoken prompt begins one.
+
 A cpal stream error that ends the stream (the device was unplugged) fails the
 capture reading it: a push-to-talk recording errors, and the listener goes
 `Off`. When listening loses the mic that way, or cannot open it, the worker
