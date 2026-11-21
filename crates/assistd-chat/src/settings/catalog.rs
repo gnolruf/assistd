@@ -75,6 +75,7 @@ pub(crate) const SECTIONS: &[Section] = &[
             setting("voice.synthesis.voice"),
             setting("voice.synthesis.family"),
             setting("voice.synthesis.speaker_id"),
+            setting("voice.synthesis.conversational"),
             setting("voice.synthesis.output_device"),
             setting("voice.synthesis.length_scale"),
             setting("voice.synthesis.model_cache_dir"),
@@ -177,10 +178,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         "Notifications",
         enable("notifications.enabled"),
         &[],
-        &[
-            setting("notifications.auto_hide_ms"),
-            setting("notifications.brief_when_away"),
-        ],
+        &[setting("notifications.auto_hide_ms")],
     ),
     section(
         Tab::General,

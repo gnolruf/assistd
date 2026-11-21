@@ -404,6 +404,9 @@ pub struct SynthesisConfig {
     /// Output device as listed by `aplay -L` (e.g. `"pipewire"`). `None`
     /// uses the audio host's default, which may be a raw ALSA card.
     pub output_device: Option<String>,
+    /// Ask the model to phrase a reply that will be read aloud as short
+    /// spoken sentences and to say what it is about to do before slow work.
+    pub conversational: bool,
 }
 
 impl DescribeSettings for SynthesisConfig {
@@ -436,6 +439,10 @@ impl DescribeSettings for SynthesisConfig {
             advanced
         ),
         output_device => ("speaker device", "Output device as listed by aplay -L; unset uses the default"),
+        conversational => (
+            "conversational replies",
+            "Ask for short spoken sentences, and a word before slow work, while replies are read aloud"
+        ),
     }
 }
 
@@ -454,6 +461,7 @@ impl Default for SynthesisConfig {
             max_sentence_chars: bounded(400),
             partial_flush_ms: 750,
             output_device: None,
+            conversational: true,
         }
     }
 }

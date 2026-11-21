@@ -18,9 +18,14 @@ const SAVED_MEMORIES_HEADER: &str = "Saved memories from earlier sessions. Treat
 const PAST_SESSIONS_HEADER: &str =
     "Possibly related past chats; read one with reminisce, session=<id>:\n";
 const MAX_WINDOW_FIELD_CHARS: usize = 200;
-const BRIEF_REPLY_NOTE: &str = "Delivery: the user asked by voice and is away from the chat; \
-     the reply appears as a desktop notification and may be spoken. Answer in one to three short \
-     plain sentences, without Markdown, lists or code blocks, unless they ask for detail.\n";
+const SPOKEN_REPLY_NOTE: &str = "Delivery: your reply is read aloud to the user, so write it \
+     to be heard, as one side of a conversation. Use short spoken sentences, one idea at a time, \
+     with no Markdown, lists, tables or code. Give the answer first, then stop. When there is \
+     detail that does not suit speech, such as code, a table, a long list or a long explanation, \
+     say in a sentence what it is and offer to put it on screen; write it out only once the \
+     user accepts. Before a tool call that may take a while, such as starting a sub-agent, \
+     reading a document, or searching files or the web, first say in one short sentence what \
+     you are about to do, so the user is not left in silence.\n";
 const VOICE_APPROVALS_HEADLESS: &str = "Approvals: the user asked by voice and this turn is \
      headless: no screen shows them a confirmation prompt.";
 const VOICE_APPROVALS_EDITS_UNASKED: &str =
@@ -109,15 +114,13 @@ impl TurnService {
         ))
     }
 
-    /// The brief-reply instruction for a voice turn while no live chat has
-    /// focus, unless `notifications.brief_when_away` is off.
-    pub(super) fn brief_reply_note(
-        &self,
-        origin: &TurnOrigin,
-        chat_focused: bool,
-    ) -> Option<String> {
-        (origin.is_voice() && !chat_focused && self.deps.config.notifications.brief_when_away)
-            .then(|| BRIEF_REPLY_NOTE.to_string())
+    /// How to phrase a reply that is read aloud. `None` when speech is muted or has
+    /// no output, or `voice.synthesis.conversational` is off.
+    pub(super) fn spoken_reply_note(&self) -> Option<String> {
+        let speech = self.deps.voice.speech();
+        let spoken = speech.enabled() && speech.output().is_ok();
+        (spoken && self.deps.config.voice.synthesis.conversational)
+            .then(|| SPOKEN_REPLY_NOTE.to_string())
     }
 
     /// Render the focused window as a context block. `None` when no

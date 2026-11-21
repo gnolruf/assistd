@@ -50,11 +50,14 @@ impl SpeechPipeline {
         (pipeline, rx)
     }
 
-    /// The sentences `event` completes; a discarded step's unspoken text is dropped.
+    /// The sentences `event` completes, the unfinished one included when the step ends in
+    /// tool calls or the turn is done; a discarded step's unspoken text is dropped.
     fn sentences_of(&mut self, event: &LlmEvent) -> Vec<String> {
         match event {
             LlmEvent::Delta { text } => self.sentences.push(text),
-            LlmEvent::Done => self.sentences.finish().into_iter().collect(),
+            LlmEvent::ToolCallsRequested { .. } | LlmEvent::Done => {
+                self.sentences.finish().into_iter().collect()
+            }
             LlmEvent::StepDiscarded => {
                 let _ = self.sentences.finish();
                 Vec::new()

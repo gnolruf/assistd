@@ -408,7 +408,7 @@ mod tests {
         let hand_edited = format!("{}\n[memory]\nenabled = false\n", document.document);
         fs::write(&path, &hand_edited).unwrap();
         document
-            .set("notifications.brief_when_away", &toml::Value::from(false))
+            .set("voice.synthesis.conversational", &toml::Value::from(false))
             .unwrap();
         assert!(matches!(
             document.save(),

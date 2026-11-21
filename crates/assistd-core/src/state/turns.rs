@@ -189,9 +189,8 @@ impl TurnService {
         let _turn_in_flight = self.session_lapse.turn();
 
         let (current_session, persist) = self.open_persistence_turn(&text).await;
-        let chat_focused = self.refresh_chat_focus(&id);
-        self.assemble_transient_context(&text, &origin, chat_focused)
-            .await;
+        self.refresh_chat_focus(&id);
+        self.assemble_transient_context(&text, &origin).await;
 
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
@@ -329,12 +328,7 @@ impl TurnService {
             .await
     }
 
-    async fn assemble_transient_context(
-        &self,
-        text: &str,
-        origin: &TurnOrigin,
-        chat_focused: bool,
-    ) {
+    async fn assemble_transient_context(&self, text: &str, origin: &TurnOrigin) {
         let semantic = if self.recalls_past_context() {
             match self.build_semantic_context(text).await {
                 Ok(block) => block,
@@ -353,8 +347,8 @@ impl TurnService {
         let window = self.build_window_context().await;
         let mode = default_permission_mode(&self.deps.config.tools);
         let approvals = voice_approvals_note(origin, mode);
-        let brief = self.brief_reply_note(origin, chat_focused);
-        if let Some(block) = combine_context_blocks([semantic, window, approvals, brief])
+        let delivery = self.spoken_reply_note();
+        if let Some(block) = combine_context_blocks([semantic, window, approvals, delivery])
             && let Err(e) = self.deps.llm.set_transient_context(block).await
         {
             debug!(

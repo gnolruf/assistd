@@ -761,7 +761,7 @@ pub(crate) fn scripted(steps: impl IntoIterator<Item = Step>, reply: &str) -> Ar
     Arc::new(ScriptedBackend::new(steps).then_replying(reply))
 }
 
-/// Sleeps before returning, spanning the partial-flush window.
+/// Returns after `ms`, standing in for slow work.
 #[derive(Debug)]
 struct SleepTool {
     ms: u64,
@@ -790,7 +790,7 @@ impl assistd_tools::Tool for SleepTool {
 }
 
 #[tokio::test(start_paused = true)]
-async fn dispatch_query_tool_call_inhibits_idle_flush() {
+async fn dispatch_query_speaks_narration_when_its_tool_call_starts() {
     let recorder = MockSpeechRecorder::new();
     let backend = scripted(
         [Step::tool_calls(vec![ToolCall {
@@ -798,12 +798,12 @@ async fn dispatch_query_tool_call_inhibits_idle_flush() {
             name: "sleep".into(),
             arguments: serde_json::json!({}),
         }])
-        .saying("Half a ")],
+        .saying("Let me check")],
         "done.",
     );
     let mut tools = ToolRegistry::new();
     tools.register(SleepTool { ms: 300 });
-    let mut config = config_with_partial_flush(50);
+    let mut config = config_with_partial_flush(0);
     config.voice.synthesis.max_sentence_chars = assistd_config::defaults::bounded(400);
     let state = StateParts {
         config,
@@ -819,8 +819,8 @@ async fn dispatch_query_tool_call_inhibits_idle_flush() {
 
     assert_eq!(
         recorder.calls(),
-        ["Half a done."],
-        "idle flush fired during tool dispatch"
+        ["Let me check", "done."],
+        "narration waited for the text after its tool call"
     );
 }
 
