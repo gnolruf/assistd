@@ -164,8 +164,9 @@ impl<P: IpcProtocol> IpcBackend<P> {
     }
 
     /// Run one IPC call on the command socket under [`WM_IPC_TIMEOUT`].
-    /// A timeout or transport error drops the connection and wakes the
-    /// supervisor to reconnect.
+    /// Anything but a completed exchange (a timeout, a transport error, a
+    /// panic, or this future being dropped) drops the connection and wakes
+    /// the supervisor to reconnect.
     async fn with_conn<T, E: Into<TransportError>>(
         &self,
         op_label: &'static str,
@@ -176,14 +177,19 @@ impl<P: IpcProtocol> IpcBackend<P> {
         if !self.is_current(&conn) {
             return Err(WmError::Disconnected);
         }
-        let outcome = tokio::time::timeout(WM_IPC_TIMEOUT, op(&mut cmd)).await;
-        let err = match outcome {
-            Ok(Ok(value)) => return Ok(value),
-            Ok(Err(e)) => WmError::ipc(op_label, e),
-            Err(_) => WmError::Timeout(WM_IPC_TIMEOUT),
+        let mut exchange = ExchangeGuard {
+            backend: self,
+            conn: &conn,
+            completed: false,
         };
-        self.drop_failed_conn(&conn);
-        Err(err)
+        match tokio::time::timeout(WM_IPC_TIMEOUT, op(&mut cmd)).await {
+            Ok(Ok(value)) => {
+                exchange.completed = true;
+                Ok(value)
+            }
+            Ok(Err(e)) => Err(WmError::ipc(op_label, e)),
+            Err(_) => Err(WmError::Timeout(WM_IPC_TIMEOUT)),
+        }
     }
 
     async fn run_command(&self, payload: &str) -> WmResult<()> {
@@ -298,6 +304,22 @@ impl<P: IpcProtocol> WindowManager for IpcBackend<P> {
 
     fn is_connected(&self) -> bool {
         self.cmd.read().is_some()
+    }
+}
+
+/// Drops the connection it watches unless the exchange on it completed,
+/// so a request left half-written or a reply left half-read is never reused.
+struct ExchangeGuard<'a, P: IpcProtocol> {
+    backend: &'a IpcBackend<P>,
+    conn: &'a Arc<Mutex<P::Cmd>>,
+    completed: bool,
+}
+
+impl<P: IpcProtocol> Drop for ExchangeGuard<'_, P> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.backend.drop_failed_conn(self.conn);
+        }
     }
 }
 
@@ -514,6 +536,7 @@ mod tests {
         ) -> Result<Result<(), String>, TransportError> {
             match payload {
                 "break" => Err(std::io::Error::other("socket closed").into()),
+                "hang" => std::future::pending().await,
                 _ => Ok(Ok(())),
             }
         }
@@ -593,6 +616,31 @@ mod tests {
         let (_third_stream, events_rx) = mpsc::unbounded_channel();
         connections_tx.send(events_rx).unwrap();
         wait_until("the supervisor reconnects again", || backend.is_connected()).await;
+
+        shutdown_tx.send(true).unwrap();
+        supervisor.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_call_drops_the_connection() {
+        let (connections_tx, connections_rx) = mpsc::unbounded_channel();
+        let (_events_tx, events_rx) = mpsc::unbounded_channel();
+        connections_tx.send(events_rx).unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let protocol = FakeProtocol {
+            connections: Mutex::new(connections_rx),
+        };
+        let (backend, supervisor) = IpcBackend::start(protocol, shutdown_rx).await;
+
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(1), backend.run_command("hang")).await;
+        assert!(cancelled.is_err());
+        assert!(!backend.is_connected());
+
+        let (_second_stream, events_rx) = mpsc::unbounded_channel();
+        connections_tx.send(events_rx).unwrap();
+        wait_until("the supervisor reconnects", || backend.is_connected()).await;
+        backend.run_command("nop").await.unwrap();
 
         shutdown_tx.send(true).unwrap();
         supervisor.await.unwrap();
