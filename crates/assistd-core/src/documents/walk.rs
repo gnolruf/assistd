@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::io;
 use std::ops::{Bound, ControlFlow};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_config::DocumentsConfig;
@@ -89,6 +89,19 @@ impl IndexRoot {
         self.keeps_scans
     }
 
+    /// Whether no walk reaches `path`: it or a directory above it under the root is
+    /// hidden or matches a `documents.exclude` pattern. Reads nothing from disk.
+    pub(super) fn leaves_out(&self, path: &Path) -> bool {
+        let Ok(under_root) = path.strip_prefix(&self.path) else {
+            return false;
+        };
+        under_root.components().any(is_hidden)
+            || self
+                .excluded
+                .matched_path_or_any_parents(under_root, false)
+                .is_ignore()
+    }
+
     /// Hand `visit` what the walk makes of each entry in `scope` under the root
     /// until it breaks. Ignore files count from the root down, in or out of a git
     /// repository. Blocks on the filesystem.
@@ -157,6 +170,10 @@ pub(crate) fn root_unavailable(path: &Path) -> Option<String> {
 fn is_excluded(excluded: &Gitignore, entry: &DirEntry) -> bool {
     let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
     entry.depth() > 0 && excluded.matched(entry.path(), is_dir).is_ignore()
+}
+
+fn is_hidden(component: Component<'_>) -> bool {
+    component.as_os_str().as_encoded_bytes().starts_with(b".")
 }
 
 /// What a failed listing means for the pass: nothing when the entry vanished
@@ -271,5 +288,19 @@ mod tests {
         let (candidates, skipped) = walk(&WalkScope::Under(Arc::new(changed)));
         assert_eq!(candidates, [root.join("work/deep.md")]);
         assert_eq!(skipped, [SkipCause::Sensitive]);
+
+        for left_out in [
+            ".hidden.md",
+            ".obsidian/workspace.md",
+            ".git/objects/pack",
+            "drafts/idea.md",
+            "work/run.log",
+        ] {
+            assert!(index_root.leaves_out(&root.join(left_out)), "{left_out}");
+        }
+        for reached in ["plan.md", "work/deep.md", "work", "deleted.md"] {
+            assert!(!index_root.leaves_out(&root.join(reached)), "{reached}");
+        }
+        assert!(!index_root.leaves_out(&root));
     }
 }

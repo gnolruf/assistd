@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use notify::event::{ModifyKind, RenameMode};
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{mpsc, watch};
 use tracing::{error, warn};
 
@@ -189,10 +189,10 @@ fn watch_changes(
     lost: watch::Sender<Option<String>>,
 ) -> notify::Result<RecommendedWatcher> {
     let watched = Watched::of(path);
-    let root = watched.root().to_path_buf();
+    let root = entered_through_links(watched.root());
     let mode = watched.mode();
-    let mut watcher =
-        notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
+    let mut watcher = RecommendedWatcher::new(
+        move |event: notify::Result<notify::Event>| match event {
             Ok(event) if removes(&event, watched.root()) => {
                 lost.send_replace(Some("the path was removed or moved".into()));
             }
@@ -203,9 +203,17 @@ fn watch_changes(
             Err(e) => {
                 lost.send_replace(Some(e.to_string()));
             }
-        })?;
+        },
+        Config::default().with_follow_symlinks(false),
+    )?;
     watcher.watch(&root, mode)?;
     Ok(watcher)
+}
+
+/// `root` spelled with a trailing separator, which has a watch that follows no symlink
+/// still enter a root that is one.
+pub(crate) fn entered_through_links(root: &Path) -> PathBuf {
+    root.join("")
 }
 
 /// Whether `event` removes or moves away `root` itself, which ends a watch on it.
@@ -314,5 +322,34 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(*lost.borrow(), None);
+    }
+
+    #[tokio::test]
+    async fn a_watched_tree_is_entered_through_a_link_to_it_but_not_through_links_inside_it() {
+        let parent = tempfile::tempdir().unwrap();
+        let (tree, outside) = (parent.path().join("tree"), parent.path().join("outside"));
+        std::fs::create_dir_all(tree.join("nested")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, tree.join("nested/linked")).unwrap();
+        let link_to_tree = parent.path().join("link-to-tree");
+        std::os::unix::fs::symlink(&tree, &link_to_tree).unwrap();
+        let (changes_tx, mut changes) = mpsc::channel(CHANGE_BUFFER);
+        let (lost_tx, _lost) = watch::channel(None);
+        let _watcher = watch_changes_off_runtime(link_to_tree, changes_tx, lost_tx)
+            .await
+            .unwrap();
+
+        std::fs::write(outside.join("unwatched.txt"), "text").unwrap();
+        let behind_the_link = tokio::time::timeout(Duration::from_millis(300), changes.recv());
+        assert!(behind_the_link.await.is_err(), "the link was followed");
+
+        for watched in ["top.txt", "nested/deep.txt"] {
+            std::fs::write(tree.join(watched), "text").unwrap();
+            tokio::time::timeout(Duration::from_secs(5), changes.recv())
+                .await
+                .unwrap_or_else(|_| panic!("the change to {watched} was not reported"))
+                .unwrap();
+            while changes.try_recv().is_ok() {}
+        }
     }
 }
