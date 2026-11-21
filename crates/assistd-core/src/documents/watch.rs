@@ -7,13 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_tools::policy::on_blocking_pool;
-use notify::{ErrorKind, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, ErrorKind, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 use super::indexer::DocumentIndex;
 use super::walk::{IndexRoot, WalkScope};
-use crate::tasks::path_watch::removes;
+use crate::tasks::path_watch::{entered_through_links, removes};
 
 /// How long changes are gathered after the first one before they are indexed, so
 /// a file saved in several writes is read once.
@@ -57,17 +57,25 @@ struct WatchedRoot {
 }
 
 impl WatchedRoot {
-    /// Take in one event of the watch. Reads change nothing, so they are dropped.
+    /// Take in one event of the watch. Reads change nothing and no walk reaches a
+    /// hidden or excluded path, so those are dropped.
     fn record(&self, event: notify::Result<notify::Event>) {
-        let mut reported = self.reported.lock();
         match event {
-            Err(error) => reported.stopped = Some(watch_failure(&error)),
-            Ok(event) if event.need_rescan() => reported.lost_changes = true,
+            Err(error) => self.reported.lock().stopped = Some(watch_failure(&error)),
+            Ok(event) if event.need_rescan() => self.reported.lock().lost_changes = true,
             Ok(event) if matches!(event.kind, EventKind::Access(_)) => return,
             Ok(event) if removes(&event, self.root.path()) => {
-                reported.stopped = Some("the folder was removed or moved".to_owned());
+                self.reported.lock().stopped = Some("the folder was removed or moved".to_owned());
             }
-            Ok(event) => event.paths.into_iter().for_each(|path| reported.hold(path)),
+            Ok(event) => {
+                let mut walked = event.paths;
+                walked.retain(|path| !self.root.leaves_out(path));
+                if walked.is_empty() {
+                    return;
+                }
+                let mut reported = self.reported.lock();
+                walked.into_iter().for_each(|path| reported.hold(path));
+            }
         }
         self.wake.notify_one();
     }
@@ -147,11 +155,15 @@ impl RootWatches {
     }
 }
 
-/// An inotify watch on `watched`'s root and every directory under it, reporting to
-/// `watched`. Blocks on the filesystem while it adds one watch per directory.
+/// An inotify watch on `watched`'s root and every directory under it that no symlink
+/// leads to, reporting to `watched`. Blocks on the filesystem while it adds one watch
+/// per directory.
 fn watch_recursively(watched: Arc<WatchedRoot>) -> notify::Result<RecommendedWatcher> {
-    let root = watched.root.path().to_path_buf();
-    let mut watcher = notify::recommended_watcher(move |event| watched.record(event))?;
+    let root = entered_through_links(watched.root.path());
+    let mut watcher = RecommendedWatcher::new(
+        move |event| watched.record(event),
+        Config::default().with_follow_symlinks(false),
+    )?;
     watcher.watch(&root, RecursiveMode::Recursive)?;
     Ok(watcher)
 }
