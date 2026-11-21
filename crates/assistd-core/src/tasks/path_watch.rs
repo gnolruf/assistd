@@ -27,6 +27,55 @@ enum WatchEnd {
     Lost(String),
 }
 
+/// What is watched for a trigger's path, and which changes there count.
+enum Watched {
+    /// A directory and everything under it.
+    Tree(PathBuf),
+    /// One file, seen through a watch on `parent` so that a save which replaces the
+    /// file is still seen; `file` is the trigger's path with symlinks resolved.
+    File { parent: PathBuf, file: PathBuf },
+}
+
+impl Watched {
+    /// A path that is not a directory is watched as a file, whether or not it exists.
+    fn of(path: &Path) -> Self {
+        if path.is_dir() {
+            return Self::Tree(path.to_path_buf());
+        }
+        let file = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        match file.parent() {
+            Some(parent) => Self::File {
+                parent: parent.to_path_buf(),
+                file,
+            },
+            None => Self::Tree(file),
+        }
+    }
+
+    /// The directory the inotify watch sits on, whose removal ends the watch.
+    fn root(&self) -> &Path {
+        match self {
+            Self::Tree(root) | Self::File { parent: root, .. } => root,
+        }
+    }
+
+    fn mode(&self) -> RecursiveMode {
+        match self {
+            Self::Tree(_) => RecursiveMode::Recursive,
+            Self::File { .. } => RecursiveMode::NonRecursive,
+        }
+    }
+
+    /// Whether `event` is about what the trigger names; a rename counts for where it
+    /// lands, which is its last path.
+    fn concerns(&self, event: &notify::Event) -> bool {
+        match self {
+            Self::Tree(_) => true,
+            Self::File { file, .. } => event.paths.last() == Some(file),
+        }
+    }
+}
+
 impl TaskService {
     /// Fire `PathChanged` trigger `trigger` of task `task` once per burst of changes
     /// under its path, retrying with backoff whenever the watch fails or is lost, for
@@ -131,20 +180,23 @@ async fn watch_changes_off_runtime(
         .map_err(|e| notify::Error::generic(&e.to_string()))?
 }
 
-/// An inotify watch on `path` and everything under it, sending to `changes` on each
-/// change and why to `lost` once `path` itself is removed or moved, or the watch errs.
+/// An inotify watch on `path`, a directory with everything under it or a single file,
+/// sending to `changes` on each change and why to `lost` once the watched directory is
+/// removed or moved, or the watch errs.
 fn watch_changes(
     path: &Path,
     changes: mpsc::Sender<()>,
     lost: watch::Sender<Option<String>>,
 ) -> notify::Result<RecommendedWatcher> {
-    let root = path.to_path_buf();
+    let watched = Watched::of(path);
+    let root = watched.root().to_path_buf();
+    let mode = watched.mode();
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
-            Ok(event) if removes(&event, &root) => {
+            Ok(event) if removes(&event, watched.root()) => {
                 lost.send_replace(Some("the path was removed or moved".into()));
             }
-            Ok(event) if is_change(event.kind) => {
+            Ok(event) if is_change(event.kind) && watched.concerns(&event) => {
                 let _ = changes.try_send(());
             }
             Ok(_) => {}
@@ -152,7 +204,7 @@ fn watch_changes(
                 lost.send_replace(Some(e.to_string()));
             }
         })?;
-    watcher.watch(path, RecursiveMode::Recursive)?;
+    watcher.watch(&root, mode)?;
     Ok(watcher)
 }
 
@@ -237,5 +289,30 @@ mod tests {
             .await
             .expect("the removal was not reported")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_save_that_replaces_the_watched_file_is_a_change_and_keeps_the_watch() {
+        let parent = tempfile::tempdir().unwrap();
+        let watched = parent.path().join("notes.txt");
+        std::fs::write(&watched, "old").unwrap();
+        let (changes_tx, mut changes) = mpsc::channel(CHANGE_BUFFER);
+        let (lost_tx, lost) = watch::channel(None);
+        let _watcher = watch_changes_off_runtime(watched.clone(), changes_tx, lost_tx)
+            .await
+            .unwrap();
+
+        for contents in ["new", "newer"] {
+            let saved = parent.path().join("notes.txt.tmp");
+            std::fs::write(&saved, contents).unwrap();
+            while changes.try_recv().is_ok() {}
+            std::fs::rename(&saved, &watched).unwrap();
+
+            tokio::time::timeout(Duration::from_secs(5), changes.recv())
+                .await
+                .expect("the save was not reported")
+                .unwrap();
+        }
+        assert_eq!(*lost.borrow(), None);
     }
 }
