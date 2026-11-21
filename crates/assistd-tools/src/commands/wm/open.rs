@@ -30,7 +30,7 @@ const TERMINALS: &[(&str, &[&str])] = &[
 pub(super) struct OpenArgs {
     pub(super) workspace: Option<WorkspaceId>,
     cwd: Option<String>,
-    app: String,
+    pub(super) app: String,
     targets: Vec<String>,
 }
 

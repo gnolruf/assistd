@@ -115,6 +115,14 @@ A no, an unclear answer or silence cancels the request, and after
 a question you did not answer the command's later requests are
 cancelled without being asked. Nothing is asked while speech is muted.
 
+When a command will need several approvals, the assistant can plan it
+first and ask once: "I'll update the changelog and publish the crate. I
+need to run cargo, and reach crates.io. Shall I go ahead?" A yes approves
+the things it named for that command only. Say what to change ("yes, but
+skip publishing") and it revises the plan and asks again; a no or
+silence stops the work. Anything it did not name, and anything touching
+a sensitive path, is still asked about on its own.
+
 **Sleep.** Listening keeps running while presence is `Sleeping`. A
 command wakes the model like any other query. The first reply is slower
 because the model has to load. If the GPU lacks room for the model

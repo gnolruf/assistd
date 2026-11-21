@@ -4,7 +4,7 @@
 use std::fmt::{Display, Write};
 use std::sync::Arc;
 
-use assistd_ipc::ConfirmSource;
+use assistd_ipc::{ConfirmSource, PlannedAction};
 use assistd_wm::{Layout, OutputInfo, ResizeDir, WindowId, WindowManager, WmError, WorkspaceId};
 use async_trait::async_trait;
 
@@ -147,7 +147,7 @@ impl WmCommand {
             } else {
                 Risk::Routine
             },
-            unattended: unattended_launch(launch, &key),
+            unattended: unattended_launch(launch, &key, args),
             source: ConfirmSource::Main,
         };
         if has_targets {
@@ -423,10 +423,17 @@ async fn layout(wm: &dyn WindowManager, args: &[Word]) -> Result<CommandOutput, 
 }
 
 /// Opening a URL is egress, which no mode approves; the safety judge may settle any other launch.
-fn unattended_launch(launch: &PreparedLaunch, key: &str) -> Unattended {
+fn unattended_launch(launch: &PreparedLaunch, key: &str, args: &OpenArgs) -> Unattended {
     if launch.opens_url {
         return Unattended::Never;
     }
+    let grantable = if args.has_targets_or_cwd() {
+        Vec::new()
+    } else {
+        vec![PlannedAction::App {
+            desktop_entry: args.app.clone(),
+        }]
+    };
     Unattended::Judged(JudgeContext {
         class: JudgedClass::Launch,
         cwd: None,
@@ -435,6 +442,7 @@ fn unattended_launch(launch: &PreparedLaunch, key: &str) -> Unattended {
              approved",
             launch.entry.name
         ),
+        grantable,
     })
 }
 

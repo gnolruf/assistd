@@ -311,7 +311,7 @@ impl RelayTool {
             .deps
             .runner
             .run(
-                subagent_prompt(&step.role, &quarantine),
+                subagent_prompt(&step.role, &quarantine, turn.granted_hosts().as_deref()),
                 task,
                 self.subagent_tools(&quarantine, gate),
                 self.answer_file(),
@@ -697,12 +697,19 @@ fn step_schema(roles: &Roles) -> Value {
     })
 }
 
-fn subagent_prompt(role: &Role, quarantine: &Quarantine) -> String {
+/// The prompt of a sub-agent in `role`; `spoken_hosts` are the web hosts granted to a turn
+/// whose user is asked out loud about every other one.
+fn subagent_prompt(
+    role: &Role,
+    quarantine: &Quarantine,
+    spoken_hosts: Option<&[String]>,
+) -> String {
     let world = match role.reach {
         Reach::Web => format!(
             "You can search the web and fetch pages with `web`, the only command that reaches \
-             the network. Files handed to you, if any, are in {} (read-only).",
-            quarantine.input_dir().display()
+             the network. Files handed to you, if any, are in {} (read-only).{}",
+            quarantine.input_dir().display(),
+            spoken_hosts.map(spoken_hosts_note).unwrap_or_default()
         ),
         Reach::Files => format!(
             "The files handed to you are in {} (read-only). You have no network.",
@@ -713,6 +720,24 @@ fn subagent_prompt(role: &Role, quarantine: &Quarantine) -> String {
         "{SUBAGENT_PROMPT} {} {world} Your home directory {} is yours to write in.",
         role.brief,
         quarantine.home_dir().display()
+    )
+}
+
+/// What a web sub-agent of a headless turn is told about fetching: `granted` hosts are read
+/// freely, and any other costs the user a spoken question.
+fn spoken_hosts_note(granted: &[String]) -> String {
+    let approved = if granted.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " The user already approved these sites for this work, so read them first: {}.",
+            granted.join(", ")
+        )
+    };
+    format!(
+        " Searching is free, but the user is interrupted and asked out loud before a page is \
+         fetched from any site not yet approved.{approved} Fetch from another site only when \
+         the task cannot be answered well without it, and stop looking once you can answer."
     )
 }
 

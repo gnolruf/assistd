@@ -284,6 +284,30 @@ impl PathGuards {
             .map(|effect| effect.path.as_str())
     }
 
+    /// The canonical paths `effects` change outside `scope`; `None` when one is inside
+    /// `excluded` or cannot be resolved. Blocks on the filesystem.
+    pub(crate) fn changes_outside_scope(
+        &self,
+        effects: &[Effect],
+        scope: &[PathBuf],
+        excluded: &[PathBuf],
+    ) -> Option<Vec<PathBuf>> {
+        let mut outside = Vec::new();
+        for effect in effects
+            .iter()
+            .filter(|effect| effect.action != Action::Read)
+        {
+            let path = self.resolve(effect)?;
+            if excluded.iter().any(|dir| path.starts_with(dir)) {
+                return None;
+            }
+            if !scope.iter().any(|dir| admits_edit(dir, &path)) {
+                outside.push(path);
+            }
+        }
+        Some(outside)
+    }
+
     /// The canonical path `effect` lands on, following a final symlink unless it deletes the
     /// link itself; `None` when `~` or the working directory is unknown.
     fn resolve(&self, effect: &Effect) -> Option<PathBuf> {

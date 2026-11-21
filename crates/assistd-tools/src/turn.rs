@@ -176,6 +176,21 @@ impl TurnContext {
         self.lane.as_ref()
     }
 
+    /// Whether the turn's prompts are asked out loud.
+    pub fn asks_aloud(&self) -> bool {
+        self.router
+            .as_ref()
+            .is_some_and(|router| router.asks_aloud())
+    }
+
+    /// The web hosts the user granted to the turn out loud; `None` when its prompts are not
+    /// asked out loud.
+    pub fn granted_hosts(&self) -> Option<Vec<String>> {
+        self.router
+            .as_ref()
+            .and_then(|router| router.granted_hosts())
+    }
+
     /// Whether the turn is planning.
     pub fn planning(&self) -> bool {
         self.router.as_ref().is_some_and(|router| router.planning())

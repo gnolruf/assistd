@@ -682,6 +682,42 @@ reading, muted or unavailable speech and silence all cancel the call, and after
 a question nobody answered the turn's later prompts are denied without being
 asked.
 
+A headless turn that expects to need more than one approval can collect them
+in one question. Its agent (`Planner::headless_turn_agent`) carries the same
+two plan-mode tools as a typed turn, with different behaviour: `enter_plan_mode`
+starts the turn planning without asking, since planning runs nothing that asks,
+and `exit_plan_mode` takes a one-sentence summary and a list of actions in the
+vocabulary refine uses (`PlannedAction`: program, web host, MCP tool, app,
+write directory) in place of a Markdown plan. `ActionCheck` checks each: one
+that cannot work on this machine sends the plan back unasked, and one that
+already runs unasked is left out of the question. The rest are spoken through
+`ConfirmRouter::propose_grant` as the summary and "I need to edit files in X,
+run cargo, and reach docs.rs. Shall I go ahead?", every action named, and the
+answer is heard and read exactly as a prompt's is. Confirm leaves plan mode and
+grants the actions to that turn (`TurnGrant`); nothing is approved for good.
+Instruct keeps the turn planning and hands the agent what was said, to revise
+the plan and ask again. Deny or silence keeps the turn planning, so nothing
+that asks can run, and tells the agent to stop.
+
+A later prompt runs unasked when the grant covers everything it needs, which
+each request states in `JudgeContext::grantable`. A program granted without a
+subcommand covers every run of it, and with one only that subcommand. A web
+host is covered by its exact name alone. A write directory covers what an edit
+scope directory would: paths below it, none behind a hidden entry. Prompts no
+mode approves unasked are never covered and still ask one at a time: a
+sensitive path, a fetch after local reads or over plain HTTP, a write too long
+to show, a launch with files or a URL, and a script whose programs the
+classifier cannot name. So does anything the plan did not list.
+
+Web research is the case the grant is mostly for, since every new host asks.
+The headless turn's context note tells the agent to enter plan mode before
+researching, run `web search` (which planning runs unasked) to find the sites
+worth reading, and list each host. The grant sits on the turn's router, so it
+covers the fetches of a `web_research` sub-agent too. `RelayTool` adds to that
+sub-agent's prompt the hosts granted so far (`TurnContext::granted_hosts`) and
+that any other host costs the user a spoken question, to be fetched only when
+the task cannot be answered well without it.
+
 A query connection starts in manual mode, where every prompt goes to the
 client. Besides allowing once, allowing for good where that is offered, and
 denying, a prompt can be answered with a message for the agent

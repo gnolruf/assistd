@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assistd_config::McpServerName;
-use assistd_ipc::Attachment;
 use assistd_ipc::attachment::MAX_IMAGE_BYTES;
+use assistd_ipc::{Attachment, PlannedAction};
 use assistd_tools::{
     ApprovalGate, ConfirmSource, ConfirmationRequest, ImageMime, JudgeContext, JudgedClass,
     MCP_TOOL_NAME_PREFIX, Risk, Summary, Tool, ToolError, ToolOutput, TurnContext, Unattended,
@@ -83,6 +83,9 @@ impl McpToolAdapter {
                         "it calls the MCP tool `{name}`, which is not yet approved, with these \
                          JSON arguments"
                     ),
+                    grantable: vec![PlannedAction::McpTool {
+                        name: name.to_string(),
+                    }],
                 }),
                 source: ConfirmSource::Main,
             })

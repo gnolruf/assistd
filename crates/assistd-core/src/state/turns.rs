@@ -371,10 +371,14 @@ impl TurnService {
         ))
     }
 
-    /// The agent of `turn` under `plan`: one that can move through plan mode unless it is off.
+    /// The agent of `turn` under `plan`: one that can move through plan mode unless it is off,
+    /// and for a headless turn one whose plan is put to the user out loud.
     fn query_agent(&self, turn: &TurnContext, plan: PlanMode) -> Agent {
         let llm = self.deps.llm.clone();
         let tools = self.deps.tools.snapshot();
+        if turn.asks_aloud() {
+            return self.deps.planner.headless_turn_agent(turn, llm, &tools);
+        }
         if !plan.is_off() {
             return self.deps.planner.user_turn_agent(turn, llm, &tools);
         }

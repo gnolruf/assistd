@@ -28,10 +28,12 @@ use crate::agent::{Agent, AgentSpec};
 
 mod draft;
 mod recommend;
+mod spoken;
 mod switch;
 
 use draft::RefinementDraft;
 use recommend::recommended_mode;
+use spoken::{EnterSpokenPlanTool, ProposeSpokenPlanTool};
 use switch::{EnterPlanModeTool, ExitPlanModeTool};
 
 /// Opens the note rendered at the tail of the history on every step of a planning turn.
@@ -52,6 +54,11 @@ const USER_TURN_PLAN_ENDING: &str = "If something about the work is unclear, ask
      a reply. The user accepts it there, and you then carry it out, or tells you what to \
      change.";
 
+/// Ends the note of a headless turn while it plans.
+const SPOKEN_PLAN_ENDING: &str = "Once you know enough, call exit_plan_mode with a one-sentence \
+     summary and the actions the work needs approved; do not describe the plan as a reply. \
+     The user answers out loud, and you then carry it out, stop, or change it as they say.";
+
 /// Appended to a planning tool's result when something in it was refused for asking.
 const REFUSED_NOTE: &str = "\n[plan mode: this needed approval, so it was refused and did not \
      run. Note the step, and the approval it needs, for your plan instead.]";
@@ -67,13 +74,15 @@ const REFINE_INSTRUCTION: &str = "This work will run unattended, with nobody to 
 /// How the plan is laid out, after the refine instruction.
 const PLAN_LAYOUT: &str = "`summary` says in a few lines \
      what the work will do. `steps` lists the steps in order, each with a `description` and \
-     the `actions` it needs approved to run without asking. An action's `kind` is `program` \
+     the `actions` it needs approved to run without asking.";
+
+/// How an anticipated action is named.
+const ACTION_KINDS: &str = "An action's `kind` is `program` \
      to run a program that is not read-only (`target` is its name, and `subcommand` its \
      subcommand for a program such as git that is approved per subcommand), `web_host` to \
      reach a web host (`target` is the host name), `mcp_tool` to call an MCP tool (`target` \
      is its full name), `app` to launch an app (`target` is its desktop entry id), or \
-     `write` to change files (`target` is the absolute directory they are in). A step that \
-     needs no approval has no actions.";
+     `write` to change files (`target` is the absolute directory they are in).";
 
 /// What a planning turn is asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +193,30 @@ impl Planner {
             .with_planning_tools(Arc::new(planning))
     }
 
+    /// An agent for the headless turn `turn` over `backend`. It acts with `acting` and a tool
+    /// that starts it planning unasked; while it plans, it is offered the planning tools and
+    /// one that puts the plan to the user out loud.
+    pub fn headless_turn_agent(
+        &self,
+        turn: &TurnContext,
+        backend: Arc<dyn TurnBackend>,
+        acting: &ToolRegistry,
+    ) -> Agent {
+        let mut acting = acting.clone();
+        acting.register(EnterSpokenPlanTool);
+        let mut planning = ToolRegistry::clone(&self.tools.registry);
+        planning.register(ProposeSpokenPlanTool {
+            checks: self.tools.checks.clone(),
+            catalog: Arc::clone(&self.catalog),
+        });
+        self.agents
+            .agent(
+                PlanModeBackend::new(backend, SPOKEN_PLAN_ENDING, turn.clone()),
+                Arc::new(acting),
+            )
+            .with_planning_tools(Arc::new(planning))
+    }
+
     /// Every tool a user turn over `acting` may have called, acting or planning.
     pub(crate) fn user_turn_tools(acting: &ToolRegistry) -> ToolRegistry {
         let mut tools = acting.clone();
@@ -208,7 +241,10 @@ impl Planner {
         let exploring = Arc::clone(&backend) as Arc<dyn TurnBackend>;
         self.explore(exploring, ask, request_id, tx, &cancel)
             .await?;
-        let instruction = format!("{REFINE_INSTRUCTION} {PLAN_LAYOUT}");
+        let instruction = format!(
+            "{REFINE_INSTRUCTION} {PLAN_LAYOUT} {ACTION_KINDS} A step that needs no approval \
+             has no actions."
+        );
         let draft: RefinementDraft = draft_of(
             backend.as_ref(),
             instruction,

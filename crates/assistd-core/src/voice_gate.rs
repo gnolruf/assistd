@@ -24,6 +24,9 @@ const ANSWER_GRACE: Duration = Duration::from_secs(5);
 /// How long the model may take to read an answer before it counts as a refusal.
 const READING_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Names a plan's question in the log, where a prompt's is named by its tool.
+const PLAN_ASKER: &str = "plan";
+
 const CONFIRM: &str = "Confirm";
 const DENY: &str = "Deny";
 const INSTRUCT: &str = "Instruct";
@@ -139,25 +142,22 @@ impl VoiceConfirmationGate {
             }
         }
     }
-}
 
-#[async_trait]
-impl VoiceGate for VoiceConfirmationGate {
-    async fn ask_aloud(&self, req: &ConfirmationRequest) -> SpokenAnswer {
+    /// Speak `question`, asked for `asker`, and read what the user says to it.
+    async fn asked(&self, asker: &str, question: String) -> SpokenAnswer {
         let speech = self.voice.speech();
         let output = match speech.output() {
             Ok(output) if speech.enabled() => output,
             Ok(_) => {
-                warn!(target: "assistd::policy", tool = %req.tool, "not asked: speech is muted");
+                warn!(target: "assistd::policy", %asker, "not asked: speech is muted");
                 return SpokenAnswer::Unanswered;
             }
             Err(why) => {
-                warn!(target: "assistd::policy", tool = %req.tool, %why, "not asked: no speech");
+                warn!(target: "assistd::policy", %asker, %why, "not asked: no speech");
                 return SpokenAnswer::Unanswered;
             }
         };
-        let question = spoken_question(&req.summary);
-        info!(target: "assistd::policy", tool = %req.tool, %question, "asking out loud");
+        info!(target: "assistd::policy", %asker, %question, "asking out loud");
         let heard = self.heard_answer(output.as_ref(), question);
         match timeout(CONFIRM_TIMEOUT, heard).await {
             Ok(Some(said)) => {
@@ -166,6 +166,17 @@ impl VoiceGate for VoiceConfirmationGate {
             }
             Ok(None) | Err(_) => SpokenAnswer::Unanswered,
         }
+    }
+}
+
+#[async_trait]
+impl VoiceGate for VoiceConfirmationGate {
+    async fn ask_aloud(&self, req: &ConfirmationRequest) -> SpokenAnswer {
+        self.asked(&req.tool, spoken_question(&req.summary)).await
+    }
+
+    async fn propose_aloud(&self, proposal: &str) -> SpokenAnswer {
+        self.asked(PLAN_ASKER, speakable(proposal)).await
     }
 }
 
@@ -207,15 +218,19 @@ async fn until(deadline: Option<Instant>) {
     }
 }
 
-/// The question that asks for `summary` out loud: no backticks, and nothing in brackets.
+/// The question that asks for `summary` out loud.
 fn spoken_question(summary: &Summary) -> String {
-    let question = match &summary.why {
+    speakable(&match &summary.why {
         Some(why) => format!("Allow {}? {why}", summary.what),
         None => format!("Allow {}?", summary.what),
-    };
+    })
+}
+
+/// `text` as speech can say it: no backticks, and nothing in brackets.
+fn speakable(text: &str) -> String {
     let mut bracket_depth = 0_usize;
-    let mut spoken = String::with_capacity(question.len());
-    for character in question.chars() {
+    let mut spoken = String::with_capacity(text.len());
+    for character in text.chars() {
         match character {
             '(' => {
                 bracket_depth += 1;

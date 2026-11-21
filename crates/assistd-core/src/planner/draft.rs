@@ -16,7 +16,7 @@ const SUMMARY_MAX_CHARS: usize = 800;
 const PROMPT_MAX_CHARS: usize = MAX_TASK_PROMPT_BYTES / 4;
 const STEPS_MAX_ITEMS: usize = 16;
 const DESCRIPTION_MAX_CHARS: usize = 400;
-const ACTIONS_MAX_ITEMS: usize = 8;
+pub(super) const ACTIONS_MAX_ITEMS: usize = 8;
 const TARGET_MAX_CHARS: usize = 300;
 const SUBCOMMAND_MAX_CHARS: usize = 64;
 
@@ -47,7 +47,7 @@ struct DraftStep {
 /// An anticipated action as the model names it: a kind and the one thing it applies to.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DraftAction {
+pub(super) struct DraftAction {
     kind: DraftKind,
     target: String,
     subcommand: Option<String>,
@@ -66,26 +66,16 @@ enum DraftKind {
 impl PlanDraft {
     /// The JSON schema the plan request is held to by grammar.
     pub(super) fn schema() -> Map<String, Value> {
-        let text = |max_chars: usize| json!({"type": "string", "maxLength": max_chars});
-        let action = json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "kind": {
-                    "type": "string",
-                    "enum": ["program", "web_host", "mcp_tool", "app", "write"]
-                },
-                "target": text(TARGET_MAX_CHARS),
-                "subcommand": text(SUBCOMMAND_MAX_CHARS)
-            },
-            "required": ["kind", "target"]
-        });
         let step = json!({
             "type": "object",
             "additionalProperties": false,
             "properties": {
                 "description": text(DESCRIPTION_MAX_CHARS),
-                "actions": {"type": "array", "items": action, "maxItems": ACTIONS_MAX_ITEMS}
+                "actions": {
+                    "type": "array",
+                    "items": DraftAction::schema(),
+                    "maxItems": ACTIONS_MAX_ITEMS
+                }
             },
             "required": ["description", "actions"]
         });
@@ -153,6 +143,23 @@ impl RefinementDraft {
 }
 
 impl DraftAction {
+    /// The JSON schema of one anticipated action.
+    pub(super) fn schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["program", "web_host", "mcp_tool", "app", "write"]
+                },
+                "target": text(TARGET_MAX_CHARS),
+                "subcommand": text(SUBCOMMAND_MAX_CHARS)
+            },
+            "required": ["kind", "target"]
+        })
+    }
+
     fn into_action(self) -> PlannedAction {
         let target = self.target.trim().to_string();
         match self.kind {
@@ -178,8 +185,8 @@ impl DraftAction {
 }
 
 /// `actions`, each once, with what `checks` finds wrong with it and whether the work's
-/// `permissions` let it run unasked.
-fn anticipated(
+/// `permissions` let it run unasked. Blocks on the filesystem.
+pub(super) fn anticipated(
     actions: Vec<DraftAction>,
     checks: &ActionCheck,
     tools: &ToolRegistry,
@@ -199,4 +206,8 @@ fn anticipated(
             action,
         })
         .collect()
+}
+
+fn text(max_chars: usize) -> Value {
+    json!({"type": "string", "maxLength": max_chars})
 }
