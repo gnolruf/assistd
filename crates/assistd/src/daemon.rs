@@ -29,17 +29,17 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use documents_init::{DocumentsService, DocumentsStartup};
+use background_service::BackgroundService;
+use documents_init::DocumentsStartup;
 use embed_init::{EmbeddingHandles, EmbeddingService, EmbeddingStages, EmbeddingStartup};
 use mcp_init::{McpFleet, McpService};
 use memory_init::MemorySubsystem;
 use search_init::{SearchService, SearchStartup};
 use shutdown::{DaemonShutdown, IntakeTasks, ShutdownStages, spawn_signal_handler};
 use tools_init::ToolDeps;
-use voice_init::VoiceService;
 use warmup::Warmup;
 
-mod background_start;
+mod background_service;
 mod documents_init;
 mod embed_init;
 mod mcp_init;
@@ -238,10 +238,10 @@ struct BackgroundStarts {
 
 struct BackgroundServices {
     warmup: JoinHandle<()>,
-    voice: VoiceService,
+    voice: BackgroundService<()>,
     embed: EmbeddingService,
     search: SearchService,
-    documents: DocumentsService,
+    documents: BackgroundService<()>,
     mcp: McpService,
 }
 
@@ -262,14 +262,14 @@ fn spawn_background_starts(
         },
         stages.intake.subscribe(),
     );
-    let voice = VoiceService::spawn(
+    let voice = voice_init::spawn(
         state.clone(),
         model_settled_rx.clone(),
         stages.voice.subscribe(),
     );
-    let embed = starts
-        .embed
-        .map_or_else(EmbeddingService::disabled, |startup| {
+    let embed = starts.embed.map_or_else(
+        || BackgroundService::disabled(embed_init::SUBSYSTEM),
+        |startup| {
             startup.spawn(
                 state.clone(),
                 model_settled_rx,
@@ -278,17 +278,16 @@ fn spawn_background_starts(
                     server: stages.embed_server.subscribe(),
                 },
             )
-        });
-    let search = starts
-        .search
-        .map_or_else(SearchService::disabled, |startup| {
-            startup.spawn(state.clone(), stages.search.subscribe())
-        });
-    let documents = starts
-        .documents
-        .map_or_else(DocumentsService::disabled, |startup| {
-            startup.spawn(state.clone(), stages.tools.subscribe())
-        });
+        },
+    );
+    let search = starts.search.map_or_else(
+        || BackgroundService::disabled(search_init::SUBSYSTEM),
+        |startup| startup.spawn(state.clone(), stages.search.subscribe()),
+    );
+    let documents = starts.documents.map_or_else(
+        || BackgroundService::disabled(documents_init::SUBSYSTEM),
+        |startup| startup.spawn(state.clone(), stages.tools.subscribe()),
+    );
     let mcp = starts
         .mcp
         .map_or_else(McpService::disabled, |fleet| fleet.spawn(state.mcp.host()));

@@ -6,46 +6,26 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use assistd_core::{AppState, Component, spawn_supervised};
+use assistd_core::AppState;
 use assistd_utils::readiness::Readiness;
 use assistd_voice::worker::{VoiceWorkerSpec, supervise};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use tracing::info;
 
 use super::SELF_EXE;
+use super::background_service::{BackgroundService, publish_changes};
 
 /// The hidden subcommand the worker runs as.
 const WORKER_SUBCOMMAND: &str = "voice-worker";
 
-/// The background task that runs the voice worker.
-pub(super) struct VoiceService {
-    task: JoinHandle<()>,
-}
-
-impl VoiceService {
-    /// Start the worker once `model_settled` flips, and stop it when
-    /// `shutdown` does.
-    pub(super) fn spawn(
-        state: Arc<AppState>,
-        model_settled: watch::Receiver<bool>,
-        shutdown: watch::Receiver<bool>,
-    ) -> Self {
-        let task = spawn_supervised(
-            "voice_worker",
-            Component::Voice,
-            run(state, model_settled, shutdown),
-        );
-        Self { task }
-    }
-
-    /// Wait for the worker to stop. The `voice` shutdown stage must already
-    /// have flipped.
-    pub(super) async fn shutdown(self) {
-        if let Err(e) = self.task.await {
-            tracing::error!("voice worker task failed: {e}");
-        }
-    }
+/// Start the worker once `model_settled` flips, and stop it when `shutdown`
+/// does.
+pub(super) fn spawn(
+    state: Arc<AppState>,
+    model_settled: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
+) -> BackgroundService<()> {
+    BackgroundService::spawn("voice worker", run(state, model_settled, shutdown))
 }
 
 async fn run(
@@ -82,27 +62,8 @@ async fn run(
     let changes = voice.subscribe_readiness();
     tokio::join!(
         supervise(spec, Arc::clone(voice), shutdown.clone()),
-        publish_changes(&state, changes, shutdown),
+        publish_changes(changes, shutdown, |()| publish_readiness(&state)),
     );
-}
-
-async fn publish_changes(
-    state: &AppState,
-    mut changes: watch::Receiver<()>,
-    mut shutdown: watch::Receiver<bool>,
-) {
-    loop {
-        tokio::select! {
-            biased;
-            _ = shutdown.wait_for(|stop| *stop) => return,
-            changed = changes.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-                publish_readiness(state);
-            }
-        }
-    }
 }
 
 fn publish_readiness(state: &AppState) {
