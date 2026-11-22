@@ -1,7 +1,7 @@
 //! Document indexing: the extraction worker's launch in a reader sandbox over the
 //! index roots, the passes that walk those roots into the index, the watches that
-//! have changed files indexed between them, the gate on embedding what they store,
-//! and the transcription of pages that have no text.
+//! have changed files indexed between them, and the transcription of pages that
+//! have no text.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,6 @@ use assistd_config::{Config, DocumentsConfig};
 use assistd_documents::WorkerCommand;
 use assistd_tools::{ReaderProgram, ReaderSandbox, ReaderSandboxError, SandboxInfo, ToolsDisabled};
 
-pub(crate) mod embed_gate;
 mod indexer;
 mod pass;
 mod transcribe;
@@ -23,7 +22,7 @@ pub(crate) use walk::root_unavailable;
 pub use indexer::{DocumentIndex, IndexPasses, IndexProgress, PassProgress, remove_dropped_roots};
 pub use pass::{IndexDeps, MAX_DOCUMENT_CHUNKS, PassCounts, PassEnd, RootPass, SkipCause};
 pub use transcribe::{
-    PageTranscription, TranscriptionDeps, TranscriptionRun, transcribe_while_drowsy,
+    PageTranscription, TranscriptionDeps, TranscriptionRun, transcribe_while_permitted,
 };
 
 /// Where the daemon's program looks for its own shared libraries, under the

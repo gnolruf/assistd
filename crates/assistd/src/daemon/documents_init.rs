@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use assistd_config::Config;
 use assistd_core::{
     AppState, BorrowedModel, DocumentIndex, DocumentsUnavailable, IndexDeps, IndexPasses,
-    TranscriptionDeps, remove_dropped_roots, transcribe_while_drowsy,
+    TranscriptionDeps, Work, remove_dropped_roots, transcribe_while_permitted,
 };
 use assistd_documents::{Extractor, WorkerCommand, supervise};
 use assistd_ipc::{ComponentReadiness, StartupComponent};
@@ -145,6 +145,7 @@ async fn run(startup: DocumentsStartup, state: Arc<AppState>, shutdown: watch::R
         store: Arc::clone(&state.memory.document_store),
         extractor: Arc::clone(extractor),
         presence: Arc::clone(&state.subsystems.presence),
+        permit: state.permit(Work::PageTranscription),
         model: ocr.model,
         transcriber: ocr.transcriber,
         control: ocr.control,
@@ -170,7 +171,7 @@ async fn transcribe_pages(
     shutdown: watch::Receiver<bool>,
 ) {
     if let Some(deps) = transcription {
-        transcribe_while_drowsy(deps, index, shutdown).await;
+        transcribe_while_permitted(deps, index, shutdown).await;
     }
 }
 

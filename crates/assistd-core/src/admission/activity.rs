@@ -7,12 +7,30 @@ use std::num::NonZeroU32;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use assistd_config::TaskInterruption;
-use assistd_ipc::{InteractionHold, LaneHolder, SuspendReason, TaskRunId};
+use assistd_config::{Config, TaskInterruption};
+use assistd_ipc::{Component, InteractionHold, LaneHolder, SuspendReason, TaskRunId};
 
 use super::interaction::InteractionState;
 use super::lanes::{MAIN_LANE, changed_or_pending};
 use crate::presence::SettledPresence;
+
+/// A class of background work that waits until the machine is free for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Work {
+    /// Embedding the chunks of indexed documents.
+    DocumentEmbedding,
+    /// Reading pages that have no text with the OCR model.
+    PageTranscription,
+}
+
+impl Work {
+    pub(super) fn component(self) -> Component {
+        match self {
+            Work::DocumentEmbedding => Component::Embed,
+            Work::PageTranscription => Component::Documents,
+        }
+    }
+}
 
 /// Who is using the model: the user's interaction, the task run on each lane that one
 /// holds, the number of lanes, and presence's settled state.
@@ -25,6 +43,21 @@ pub(crate) struct Activity {
 }
 
 impl Activity {
+    /// Whether `work` may run now. Document embedding may outside the user's interaction,
+    /// a task run and a sleep for the GPU, and during each one `[documents]` embeds
+    /// during; page transcription may while presence has settled in `Drowsy`.
+    pub(crate) fn permits(&self, work: Work, config: &Config) -> bool {
+        match work {
+            Work::DocumentEmbedding => {
+                let documents = &config.documents;
+                (documents.embed_during_interaction || !self.interaction_open())
+                    && (documents.embed_during_tasks || !self.task_running())
+                    && (documents.embed_during_gpu_sleep || !self.asleep_for_gpu())
+            }
+            Work::PageTranscription => self.presence == SettledPresence::Drowsy,
+        }
+    }
+
     /// Why waiting task runs may not start: a sleep for the GPU first, then the user's
     /// interaction on the model's only lane; `None` when they may.
     pub(crate) fn waiting_runs_held(&self) -> Option<SuspendReason> {
@@ -162,6 +195,7 @@ impl ActivityWatch {
 mod tests {
     use std::time::Duration;
 
+    use assistd_config::DocumentsConfig;
     use chrono::{DateTime, Utc};
 
     use super::*;
@@ -284,6 +318,80 @@ mod tests {
         ];
         for (name, activity, expected) in cases {
             assert_eq!(rules(&activity), expected, "{name}");
+        }
+    }
+
+    /// Whether document chunks may be embedded under `documents` while idle, in the
+    /// user's interaction as it talks and goes quiet, in a task run and in a GPU sleep.
+    fn embedding_permitted(documents: DocumentsConfig) -> [bool; 5] {
+        let config = Config {
+            documents,
+            ..Config::default()
+        };
+        let active = SettledPresence::Active;
+        let gpu_sleep = SettledPresence::Sleeping(SleepCause::GpuBusy);
+        [
+            activity(InteractionState::Idle, &[], 1, active),
+            activity(TALKING, &[], 1, active),
+            activity(quiet(Utc::now()), &[], 2, active),
+            activity(InteractionState::Idle, &[(1, RUN)], 2, active),
+            activity(InteractionState::Idle, &[], 1, gpu_sleep),
+        ]
+        .map(|activity| activity.permits(Work::DocumentEmbedding, &config))
+    }
+
+    #[test]
+    fn document_embedding_is_refused_in_each_busy_state_except_the_ones_config_embeds_during() {
+        let defaults = DocumentsConfig::default();
+        let cases = [
+            (defaults.clone(), [true, false, false, false, false]),
+            (
+                DocumentsConfig {
+                    embed_during_interaction: true,
+                    ..defaults.clone()
+                },
+                [true, true, true, false, false],
+            ),
+            (
+                DocumentsConfig {
+                    embed_during_tasks: true,
+                    ..defaults.clone()
+                },
+                [true, false, false, true, false],
+            ),
+            (
+                DocumentsConfig {
+                    embed_during_gpu_sleep: true,
+                    ..defaults
+                },
+                [true, false, false, false, true],
+            ),
+        ];
+        for (documents, permitted) in cases {
+            assert_eq!(
+                embedding_permitted(documents.clone()),
+                permitted,
+                "{documents:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn page_transcription_is_permitted_only_while_settled_drowsy() {
+        let config = Config::default();
+        let cases = [
+            (SettledPresence::Drowsy, true),
+            (SettledPresence::Active, false),
+            (SettledPresence::Sleeping(SleepCause::Idle), false),
+            (SettledPresence::Sleeping(SleepCause::GpuBusy), false),
+        ];
+        for (presence, permitted) in cases {
+            let activity = activity(InteractionState::Idle, &[], 1, presence);
+            assert_eq!(
+                activity.permits(Work::PageTranscription, &config),
+                permitted,
+                "{presence:?}"
+            );
         }
     }
 }

@@ -25,6 +25,7 @@ mod vision;
 mod voice_gate;
 mod vram;
 
+pub use admission::activity::Work;
 pub use agent::{Agent, AgentSpec};
 pub use build_tools::{
     BuildToolsDeps, BuildToolsError, BuiltTools, build_tools, mcp_tool_approvals,
@@ -35,7 +36,7 @@ pub use documents::{
     DocumentIndex, DocumentsUnavailable, IndexDeps, IndexPasses, IndexProgress,
     MAX_DOCUMENT_CHUNKS, PageTranscription, PassCounts, PassEnd, PassProgress, RootPass, SkipCause,
     TranscriptionDeps, TranscriptionRun, document_indexing, remove_dropped_roots, system_prompt,
-    transcribe_while_drowsy,
+    transcribe_while_permitted,
 };
 pub use recovery::{
     Component, StatusSeverity, drain_join_set, install_panic_hook, spawn_supervised,

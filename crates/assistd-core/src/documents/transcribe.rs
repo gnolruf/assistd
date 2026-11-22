@@ -1,4 +1,4 @@
-//! Page transcription: while the daemon is `Drowsy`, the OCR model borrows the idle
+//! Page transcription: while its permit holds, the OCR model borrows the drowsy
 //! llama-server and reads the pages that wait for it, one rendered image at a time.
 
 use std::fmt::Display;
@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_documents::{Extractor, ExtractorError, RenderedPage};
-use assistd_ipc::PresenceState;
 use assistd_llm::{LlamaServerControl, PageTranscriber, TranscribeError, Transcription};
 use assistd_memory::{DocumentStore, MemoryError, PageReading, WaitingPage};
 use assistd_utils::readiness::NotReady;
@@ -18,7 +17,7 @@ use tracing::{debug, info, warn};
 use super::indexer::DocumentIndex;
 use crate::presence::{BorrowedModel, PresenceError, PresenceManager};
 
-/// How long a run that stopped early is left alone, the daemon still `Drowsy`,
+/// How long a run that stopped early is left alone, its permit still held,
 /// before the next one starts.
 const RETRY_DELAY: Duration = Duration::from_secs(300);
 
@@ -86,6 +85,8 @@ pub struct TranscriptionDeps {
     pub store: Arc<dyn DocumentStore>,
     pub extractor: Arc<Extractor>,
     pub presence: Arc<PresenceManager>,
+    /// Whether pages may be transcribed now.
+    pub permit: watch::Receiver<bool>,
     pub model: BorrowedModel,
     pub transcriber: PageTranscriber,
     /// Says whether the server still has the OCR model loaded.
@@ -212,10 +213,10 @@ impl TranscriptionDeps {
 }
 
 /// Until `shutdown` flips, read the waiting pages with the OCR model whenever the
-/// daemon is `Drowsy` and again when the store signals that more wait. Pages that
+/// permit holds and again when the store signals that more wait. Pages that
 /// failed before wait again, and a run that stops
 /// early is retried in five minutes. The store's database must stay open meanwhile.
-pub async fn transcribe_while_drowsy(
+pub async fn transcribe_while_permitted(
     deps: TranscriptionDeps,
     index: &DocumentIndex,
     mut shutdown: watch::Receiver<bool>,
@@ -225,13 +226,13 @@ pub async fn transcribe_while_drowsy(
     }
     let status = index.transcription();
     let pages_to_transcribe = deps.store.pages_to_transcribe();
-    let mut presence = deps.presence.subscribe();
+    let mut permit = deps.permit.clone();
     loop {
         tokio::select! {
             biased;
             _ = shutdown.wait_for(|stop| *stop) => return,
-            drowsy = presence.wait_for(|state| *state == PresenceState::Drowsy) => {
-                if drowsy.is_err() {
+            permitted = permit.wait_for(|permitted| *permitted) => {
+                if permitted.is_err() {
                     return;
                 }
             }
@@ -248,7 +249,7 @@ pub async fn transcribe_while_drowsy(
         tokio::select! {
             biased;
             _ = shutdown.wait_for(|stop| *stop) => return,
-            _ = presence.changed() => {}
+            _ = permit.changed() => {}
             () = pages_to_transcribe.notified(), if !stopped_early => {}
             () = tokio::time::sleep(RETRY_DELAY), if stopped_early => {}
         }

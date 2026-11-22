@@ -26,6 +26,7 @@ use self::turns::TurnDeps;
 use self::voice_handlers::HeardPrompt;
 use crate::PresenceError;
 use crate::admission::TurnAdmission;
+use crate::admission::activity::Work;
 use crate::agent::AgentSpec;
 use crate::bus::{EventBus, EventSink};
 use crate::judge::{BackendJudgeModel, safety_judge};
@@ -315,6 +316,11 @@ impl AppState {
     pub fn safety_judge(&self) -> Option<SafetyJudge> {
         let model = BackendJudgeModel::new(Arc::clone(&self.subsystems.llm));
         safety_judge(&self.config, model)
+    }
+
+    /// Watch whether `work` may run now, kept current until every receiver is dropped.
+    pub fn permit(&self, work: Work) -> watch::Receiver<bool> {
+        self.turns.deps.admission.permit(work)
     }
 
     /// Cancel every user turn, queued or running, as an interrupt does, and every one
