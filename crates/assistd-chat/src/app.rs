@@ -22,7 +22,7 @@ use tokio::task::{JoinError, JoinSet};
 
 use super::input::InputLine;
 use super::output::OutputPane;
-use super::selection::Selection;
+use super::selection::{Selection, numbered};
 use super::settings::SettingsPanel;
 use super::tasks::TasksPanel;
 use super::text_editor::{EditorShape, TextEditor};
@@ -224,7 +224,7 @@ pub(super) struct ConfirmationPrompt {
 }
 
 impl ConfirmationPrompt {
-    /// A prompt with "No" selected, so a stray Enter denies.
+    /// A prompt with the message row selected, so a stray Enter denies.
     pub(super) fn new(confirm_id: String, request: ConfirmationRequest) -> Self {
         Self::answered_to(confirm_id, request, AnswerTo::Reply)
     }
@@ -251,8 +251,18 @@ impl ConfirmationPrompt {
             scroll: 0,
             message: String::new(),
         };
-        prompt.selected = Selection::at(prompt.choices().len() - 2);
+        prompt.select_message_row();
         prompt
+    }
+
+    /// The answer numbered `digit`; the message row's number selects it instead.
+    fn numbered_answer(&mut self, digit: char) -> Option<ConfirmChoice> {
+        let choice = numbered(self.choices(), digit)?;
+        if choice == ConfirmChoice::Tell {
+            self.select_message_row();
+            return None;
+        }
+        Some(choice)
     }
 
     fn select_message_row(&mut self) {
