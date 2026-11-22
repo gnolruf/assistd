@@ -20,6 +20,10 @@ all-features = true
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
+# Unmaintained crates are reported wherever they sit in the graph, which is
+# what the ignores below for transitive ones assume. Set here because the
+# default differs between cargo-deny releases.
+unmaintained = "all"
 ignore = [
     # zbus 5's split-out crates, merged into zbus 6. ksni (tray) still pins
     # zbus 5; drop these once a ksni release moves to zbus 6.
@@ -157,6 +161,36 @@ skip = [
     # while tokio-macros, tracing-attributes, zbus, darling and icu still
     # pull syn 2. Drops out as those crates bump.
     { name = "syn", version = "2" },
+    # The workspace is on sha2 0.11, as are zip and pdf_oxide; oauth2 5 is
+    # still on sha2 0.10 and the digest stack beneath it.
+    { name = "sha2", version = "0.10" },
+    { name = "digest", version = "0.10" },
+    { name = "block-buffer", version = "0.10" },
+    { name = "crypto-common", version = "0.1" },
+    { name = "cpufeatures", version = "0.2" },
+    # The workspace is on parking_lot 0.13; tokio, crossterm and
+    # string_cache are still on 0.12.
+    { name = "parking_lot", version = "0.12" },
+    { name = "parking_lot_core", version = "0.9" },
+    { name = "lock_api", version = "0.4" },
+    # quantette (via ratatui-image's icy_sixel) is on rand 0.9; rmcp is on
+    # rand 0.10.
+    { name = "rand", version = "0.9" },
+    { name = "rand_core", version = "0.9" },
+    # croner is on strum 0.27; ratatui is on 0.28.
+    { name = "strum", version = "0.27" },
+    { name = "strum_macros", version = "0.27" },
+    # image's tiff decoder is on fax 0.2 and weezl 0.1; pdf_oxide uses the
+    # newer release of each directly.
+    { name = "fax", version = "0.2" },
+    { name = "weezl", version = "0.1" },
+    # Both inside pdf_oxide: subsetter's skrifa and write-fonts are on
+    # read-fonts 0.39, harfrust on 0.43.
+    { name = "read-fonts", version = "0.39" },
+    { name = "font-types", version = "0.11" },
+    # sherpa-onnx-sys's build script unpacks its archive with bzip2 0.4;
+    # zip is on 0.6.
+    { name = "bzip2", version = "0.4" },
 ]
 
 # ---------------------------------------------------------------------------
