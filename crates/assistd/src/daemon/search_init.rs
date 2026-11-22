@@ -14,9 +14,9 @@ use assistd_utils::readiness::{Readiness, ReadinessCell};
 use tokio::sync::watch;
 use tracing::info;
 
-use super::background_start::BackgroundStart;
+use super::background_service::BackgroundService;
 
-const SUBSYSTEM: &str = "web search";
+pub(super) const SUBSYSTEM: &str = "web search";
 
 /// What starting the SearXNG instance in the background needs.
 pub(super) struct SearchStartup {
@@ -24,9 +24,7 @@ pub(super) struct SearchStartup {
 }
 
 /// The background start, joined at shutdown for the instance it brought up.
-pub(super) struct SearchService {
-    startup: BackgroundStart<ChildServer>,
-}
+pub(super) type SearchService = BackgroundService<Option<ChildServer>>;
 
 impl SearchStartup {
     /// Start the instance and record its readiness once it settles. Gives up
@@ -37,7 +35,7 @@ impl SearchStartup {
         shutdown: watch::Receiver<bool>,
     ) -> SearchService {
         let panicked_state = Arc::clone(&state);
-        let startup = BackgroundStart::spawn(
+        BackgroundService::spawn_marking(
             SUBSYSTEM,
             async move { start_and_record(self, &state, shutdown).await },
             move || {
@@ -46,26 +44,7 @@ impl SearchStartup {
                     Readiness::Unavailable("startup panicked".into()),
                 );
             },
-        );
-        SearchService { startup }
-    }
-}
-
-impl SearchService {
-    pub(super) fn disabled() -> Self {
-        Self {
-            startup: BackgroundStart::disabled(SUBSYSTEM),
-        }
-    }
-
-    /// Wait for the background start to stop, then stop the instance. The
-    /// `search` shutdown stage must already have flipped.
-    pub(super) async fn shutdown(self) {
-        if let Some(server) = self.startup.join().await
-            && let Err(e) = server.shutdown().await
-        {
-            tracing::warn!("search-server shutdown error: {e:#}");
-        }
+        )
     }
 }
 
@@ -107,6 +86,16 @@ async fn start_and_record(
     };
     record_readiness(state, readiness);
     server
+}
+
+/// Wait for the background start to stop, then stop the instance. The `search`
+/// shutdown stage must already have flipped.
+pub(super) async fn shutdown(service: SearchService) {
+    if let Some(server) = service.join().await.flatten()
+        && let Err(e) = server.shutdown().await
+    {
+        tracing::warn!("search-server shutdown error: {e:#}");
+    }
 }
 
 fn record_readiness(state: &AppState, readiness: Readiness<ChildServerStatus>) {

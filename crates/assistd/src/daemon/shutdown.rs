@@ -12,12 +12,11 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout_at};
 use tracing::info;
 
-use super::documents_init::DocumentsService;
-use super::embed_init::EmbeddingService;
+use super::background_service::BackgroundService;
+use super::embed_init::{self, EmbeddingService};
 use super::mcp_init::McpService;
 use super::memory_init::MemorySubsystem;
-use super::search_init::SearchService;
-use super::voice_init::VoiceService;
+use super::search_init::{self, SearchService};
 use super::wm_init::WindowSubsystem;
 
 /// Whole-teardown budget, leaving systemd's 15 s `TimeoutStopSec` room to
@@ -72,10 +71,10 @@ pub(super) struct DaemonShutdown {
     pub(super) task_runner: Arc<TaskRunner>,
     pub(super) presence: Arc<PresenceManager>,
     pub(super) memory: MemorySubsystem,
-    pub(super) voice: VoiceService,
+    pub(super) voice: BackgroundService<()>,
     pub(super) embed: EmbeddingService,
     pub(super) search: SearchService,
-    pub(super) documents: DocumentsService,
+    pub(super) documents: BackgroundService<()>,
     pub(super) window: WindowSubsystem,
     pub(super) mcp: McpService,
     pub(super) intake_tasks: IntakeTasks,
@@ -92,11 +91,19 @@ impl DaemonShutdown {
         deadline
             .bound("intake tasks", join_intake_tasks(self.intake_tasks))
             .await;
-        stop_task_runs(&self.task_runner, deadline).await;
-        drain_persistence(&self.state, deadline).await;
+        deadline
+            .bound_capped("task runs", TASK_RUN_STOP_BUDGET, self.task_runner.stop())
+            .await;
+        deadline
+            .bound_capped(
+                "persistence drain",
+                PERSISTENCE_DRAIN_BUDGET,
+                self.state.finish_persistence(),
+            )
+            .await;
 
         stages.voice.send_replace(true);
-        deadline.bound("voice worker", self.voice.shutdown()).await;
+        deadline.bound("voice worker", self.voice.join()).await;
 
         stages.llm.send_replace(true);
         if let Some(Err(e)) = deadline.bound("presence", self.presence.shutdown()).await {
@@ -108,12 +115,16 @@ impl DaemonShutdown {
         tokio::join!(
             deadline.bound("window manager", self.window.shutdown()),
             deadline.bound("MCP servers", self.mcp.shutdown()),
-            deadline.bound("web search", self.search.shutdown()),
-            deadline.bound("extraction worker", self.documents.shutdown()),
+            deadline.bound("web search", search_init::shutdown(self.search)),
+            deadline.bound("extraction worker", self.documents.join()),
             deadline.bound(
                 "embedding",
-                self.embed
-                    .shutdown(&stages.embed_worker, &stages.embed_server, deadline.at),
+                embed_init::shutdown(
+                    self.embed,
+                    &stages.embed_worker,
+                    &stages.embed_server,
+                    deadline.at,
+                ),
             ),
         );
         self.memory.shutdown().await;
@@ -133,18 +144,20 @@ impl TeardownDeadline {
         }
     }
 
-    /// The earlier of the deadline and `budget` from now.
-    fn capped(self, budget: Duration) -> Instant {
-        self.at.min(Instant::now() + budget)
-    }
-
     /// Run `stage`, abandoning it with a warning at the deadline.
     async fn bound<F: Future>(self, stage: &'static str, work: F) -> Option<F::Output> {
-        let outcome = timeout_at(self.at, work).await.ok();
-        if outcome.is_none() {
-            tracing::warn!("{stage} did not stop before the shutdown deadline; abandoning it");
-        }
-        outcome
+        bound_until(self.at, stage, work).await
+    }
+
+    /// Run `stage`, abandoning it with a warning after `budget` or at the
+    /// deadline, whichever comes first.
+    async fn bound_capped<F: Future>(
+        self,
+        stage: &'static str,
+        budget: Duration,
+        work: F,
+    ) -> Option<F::Output> {
+        bound_until(self.at.min(Instant::now() + budget), stage, work).await
     }
 }
 
@@ -200,29 +213,10 @@ async fn join_intake_tasks(tasks: IntakeTasks) {
     }
 }
 
-async fn stop_task_runs(task_runner: &TaskRunner, deadline: TeardownDeadline) {
-    if timeout_at(deadline.capped(TASK_RUN_STOP_BUDGET), task_runner.stop())
-        .await
-        .is_err()
-    {
-        tracing::warn!(
-            target: "assistd::tasks",
-            "task runs did not stop in time at shutdown; abandoning them"
-        );
+async fn bound_until<F: Future>(until: Instant, stage: &'static str, work: F) -> Option<F::Output> {
+    let outcome = timeout_at(until, work).await.ok();
+    if outcome.is_none() {
+        tracing::warn!("{stage} did not stop in time at shutdown; abandoning it");
     }
-}
-
-/// Wait for queued transcript writes and background persistence tasks,
-/// abandoning them after [`PERSISTENCE_DRAIN_BUDGET`] or at the deadline.
-async fn drain_persistence(state: &AppState, deadline: TeardownDeadline) {
-    let drained = timeout_at(
-        deadline.capped(PERSISTENCE_DRAIN_BUDGET),
-        state.finish_persistence(),
-    );
-    if drained.await.is_err() {
-        tracing::warn!(
-            target: "assistd::memory",
-            "persistence drain timed out at shutdown; abandoning the remaining writes"
-        );
-    }
+    outcome
 }

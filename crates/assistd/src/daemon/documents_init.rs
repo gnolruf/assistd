@@ -9,9 +9,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use assistd_config::Config;
 use assistd_core::{
-    AppState, BorrowedModel, Component, DocumentIndex, DocumentsUnavailable, IndexDeps,
-    IndexPasses, TranscriptionDeps, remove_dropped_roots, spawn_supervised,
-    transcribe_while_drowsy,
+    AppState, BorrowedModel, DocumentIndex, DocumentsUnavailable, IndexDeps, IndexPasses,
+    TranscriptionDeps, remove_dropped_roots, transcribe_while_drowsy,
 };
 use assistd_documents::{Extractor, WorkerCommand, supervise};
 use assistd_ipc::{ComponentReadiness, StartupComponent};
@@ -20,10 +19,12 @@ use assistd_tools::{SandboxInfo, ToolsDisabled};
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::readiness::NotReady;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use super::SELF_EXE;
+use super::background_service::{BackgroundService, publish_changes};
+
+pub(super) const SUBSYSTEM: &str = "document indexing";
 
 /// The hidden subcommand the worker runs as.
 const WORKER_SUBCOMMAND: &str = "extract-worker";
@@ -70,41 +71,15 @@ impl OcrModel {
     }
 }
 
-/// The background task that runs the extraction worker and the index passes, or
-/// none when document indexing is off.
-pub(super) struct DocumentsService {
-    task: Option<JoinHandle<()>>,
-}
-
 impl DocumentsStartup {
-    /// Run the worker and the passes until `shutdown` flips.
+    /// Run the worker and the passes until `shutdown` flips. The memory database
+    /// must stay open until the service is joined.
     pub(super) fn spawn(
         self,
         state: Arc<AppState>,
         shutdown: watch::Receiver<bool>,
-    ) -> DocumentsService {
-        let task = spawn_supervised(
-            "document_indexing",
-            Component::Documents,
-            run(self, state, shutdown),
-        );
-        DocumentsService { task: Some(task) }
-    }
-}
-
-impl DocumentsService {
-    pub(super) fn disabled() -> Self {
-        Self { task: None }
-    }
-
-    /// Wait for the worker and the pass under way to stop. Their shutdown stage
-    /// must already have flipped, and the memory database must still be open.
-    pub(super) async fn shutdown(self) {
-        if let Some(task) = self.task
-            && let Err(e) = task.await
-        {
-            tracing::error!("document indexing task failed: {e}");
-        }
+    ) -> BackgroundService<()> {
+        BackgroundService::spawn(SUBSYSTEM, run(self, state, shutdown))
     }
 }
 
@@ -180,7 +155,9 @@ async fn run(startup: DocumentsStartup, state: Arc<AppState>, shutdown: watch::R
     let index = &state.subsystems.document_index;
     tokio::join!(
         supervise(worker, Arc::clone(extractor), shutdown.clone()),
-        publish_changes(&state, changes, shutdown.clone()),
+        publish_changes(changes, shutdown.clone(), |readiness| {
+            publish_readiness(&state, readiness.clone());
+        }),
         state.documents.broadcast_activity(shutdown.clone()),
         transcribe_pages(transcription, index, shutdown.clone()),
         passes.run(deps, index, shutdown),
@@ -199,25 +176,10 @@ async fn transcribe_pages(
     }
 }
 
-async fn publish_changes(
-    state: &AppState,
-    mut changes: watch::Receiver<Result<(), NotReady>>,
-    mut shutdown: watch::Receiver<bool>,
-) {
-    loop {
-        tokio::select! {
-            biased;
-            _ = shutdown.wait_for(|stop| *stop) => return,
-            changed = changes.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-                let readiness = ComponentReadiness::from(changes.borrow_and_update().clone());
-                info!("document indexing: {readiness}");
-                state
-                    .status
-                    .publish_readiness(StartupComponent::DocumentIndexing, readiness);
-            }
-        }
-    }
+fn publish_readiness(state: &AppState, readiness: Result<(), NotReady>) {
+    let readiness = ComponentReadiness::from(readiness);
+    info!("document indexing: {readiness}");
+    state
+        .status
+        .publish_readiness(StartupComponent::DocumentIndexing, readiness);
 }

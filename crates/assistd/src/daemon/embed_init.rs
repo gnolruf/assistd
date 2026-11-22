@@ -21,9 +21,9 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::info;
 
-use super::background_start::BackgroundStart;
+use super::background_service::BackgroundService;
 
-const SUBSYSTEM: &str = "embedding";
+pub(super) const SUBSYSTEM: &str = "embedding";
 
 /// Longest the worker gets at shutdown to finish the batch it is embedding.
 const EMBED_DRAIN_BUDGET: Duration = Duration::from_secs(10);
@@ -50,13 +50,11 @@ pub(super) struct EmbeddingStages {
 }
 
 /// The background start, joined at shutdown for what it brought up.
-pub(super) struct EmbeddingService {
-    startup: BackgroundStart<RunningEmbedding>,
-}
+pub(super) type EmbeddingService = BackgroundService<Option<RunningEmbedding>>;
 
 /// The server and, when its client probe passed, the worker embedding
 /// rows missing an embedding.
-struct RunningEmbedding {
+pub(super) struct RunningEmbedding {
     server: ChildServer,
     worker: Option<EmbedWorker>,
 }
@@ -78,7 +76,7 @@ impl EmbeddingStartup {
         stages: EmbeddingStages,
     ) -> EmbeddingService {
         let panicked_state = Arc::clone(&state);
-        let startup = BackgroundStart::spawn(
+        BackgroundService::spawn_marking(
             SUBSYSTEM,
             async move { start_and_record(self, &state, model_settled, stages).await },
             move || {
@@ -88,41 +86,32 @@ impl EmbeddingStartup {
                     .set(Readiness::Unavailable("startup panicked".into()));
                 publish_readiness(&panicked_state);
             },
-        );
-        EmbeddingService { startup }
+        )
     }
 }
 
-impl EmbeddingService {
-    pub(super) fn disabled() -> Self {
-        Self {
-            startup: BackgroundStart::disabled(SUBSYSTEM),
-        }
-    }
-
-    /// Let the worker finish its batch while the server is still up, abandoning
-    /// it after [`EMBED_DRAIN_BUDGET`] or at `deadline`, then stop the server. A
-    /// start still under way is cancelled. The memory database must still be open.
-    pub(super) async fn shutdown(
-        self,
-        worker_shutdown: &watch::Sender<bool>,
-        server_shutdown: &watch::Sender<bool>,
-        deadline: Instant,
-    ) {
-        worker_shutdown.send_replace(true);
-        if !self.startup.is_finished() {
-            server_shutdown.send_replace(true);
-        }
-        let Some(RunningEmbedding { server, worker }) = self.startup.join().await else {
-            return;
-        };
-        if let Some(worker) = worker {
-            join_worker_within_budget(worker, deadline).await;
-        }
+/// Let the worker finish its batch while the server is still up, abandoning
+/// it after [`EMBED_DRAIN_BUDGET`] or at `deadline`, then stop the server. A
+/// start still under way is cancelled. The memory database must still be open.
+pub(super) async fn shutdown(
+    service: EmbeddingService,
+    worker_shutdown: &watch::Sender<bool>,
+    server_shutdown: &watch::Sender<bool>,
+    deadline: Instant,
+) {
+    worker_shutdown.send_replace(true);
+    if !service.is_finished() {
         server_shutdown.send_replace(true);
-        if let Err(e) = server.shutdown().await {
-            tracing::warn!("embed-server shutdown error: {e:#}");
-        }
+    }
+    let Some(RunningEmbedding { server, worker }) = service.join().await.flatten() else {
+        return;
+    };
+    if let Some(worker) = worker {
+        join_worker_within_budget(worker, deadline).await;
+    }
+    server_shutdown.send_replace(true);
+    if let Err(e) = server.shutdown().await {
+        tracing::warn!("embed-server shutdown error: {e:#}");
     }
 }
 
