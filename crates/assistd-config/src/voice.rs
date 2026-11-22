@@ -308,7 +308,8 @@ impl From<SttEncoder> for String {
     }
 }
 
-/// A wake phrase: one to six words of letters and apostrophes.
+/// A wake phrase: one to six words of letters and apostrophes, held with a
+/// single space between words whatever whitespace it was written with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct WakePhrase(String);
@@ -337,12 +338,12 @@ impl TryFrom<String> for WakePhrase {
     type Error = WakePhraseError;
 
     fn try_from(phrase: String) -> Result<Self, Self::Error> {
-        let words = phrase.split_whitespace().count();
-        let letters_only = phrase
-            .chars()
-            .all(|c| c.is_alphabetic() || c.is_whitespace() || c == '\'');
-        if (1..=MAX_WAKE_PHRASE_WORDS).contains(&words) && letters_only {
-            Ok(Self(phrase))
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        let letters_only = words
+            .iter()
+            .all(|word| word.chars().all(|c| c.is_alphabetic() || c == '\''));
+        if (1..=MAX_WAKE_PHRASE_WORDS).contains(&words.len()) && letters_only {
+            Ok(Self(words.join(" ")))
         } else {
             Err(WakePhraseError(phrase))
         }
@@ -490,5 +491,11 @@ mod tests {
                 "threshold = {bad} must be refused"
             );
         }
+    }
+
+    #[test]
+    fn wake_phrase_words_are_joined_by_single_spaces() {
+        let phrase: WakePhrase = " hey\tthere \n jarvis ".parse().expect("phrase parses");
+        assert_eq!(phrase.as_str(), "hey there jarvis");
     }
 }
