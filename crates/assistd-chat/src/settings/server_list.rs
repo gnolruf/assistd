@@ -4,7 +4,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::super::selection::Selection;
-use super::server_form::{FormAction, ServerEntry, ServerForm};
+use super::form::{Form, FormAction};
+use super::server_form::{ServerEntry, ServerFields, ServerForm};
 
 /// What the panel should do after a key in the server list.
 pub(crate) enum ServerListAction {
@@ -123,7 +124,7 @@ impl ServerList {
     }
 
     fn open_form(&mut self, server: Option<&toml::Value>) {
-        self.state = ServerListState::Form(Box::new(ServerForm::new(server)));
+        self.state = ServerListState::Form(Box::new(Form::new(ServerFields::new(server))));
     }
 }
 

@@ -7,14 +7,17 @@ use assistd_ipc::{
     TaskId, TaskTrigger,
 };
 use chrono::{Local, NaiveDateTime, TimeDelta, Timelike};
-use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::selection::cycled;
+use crate::settings::{FieldValue, Form, FormFields};
 use crate::text_editor::{EditorShape, TextEditor};
 
 /// How an `At` time is typed and shown.
 pub(crate) const AT_FORMAT: &str = "%Y-%m-%d %H:%M";
 const DEFAULT_CRON: &str = "0 9 * * *";
+
+/// The form over one trigger's fields.
+pub(crate) type TriggerForm = Form<TriggerFields>;
 
 /// What starts a run, as the form's first field offers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,19 +104,11 @@ pub(crate) struct UpstreamChoice {
     pub name: String,
 }
 
-/// What a key in the form asks of the editor holding it.
-pub(super) enum FormAction {
-    Pending,
-    Apply(TaskTrigger),
-    Cancel,
-}
-
 /// A trigger being written: every kind's fields are kept, so switching kinds loses nothing.
-pub(crate) struct TriggerForm {
+pub(crate) struct TriggerFields {
     /// The trigger row this replaces; `None` adds one.
     pub replaces: Option<usize>,
     kind: TriggerKind,
-    focus: FormField,
     at: TextEditor,
     cron: TextEditor,
     missed: MissedFire,
@@ -122,13 +117,13 @@ pub(crate) struct TriggerForm {
     debounce: TextEditor,
     upstream: Option<TaskId>,
     outcome: FinishOutcome,
-    /// Why the last Enter could not make a trigger.
-    error: Option<String>,
+    /// The tasks the trigger may wait on.
+    upstreams: Vec<UpstreamChoice>,
 }
 
-impl TriggerForm {
-    /// A form for a new trigger, on a schedule.
-    pub(super) fn new() -> Self {
+impl TriggerFields {
+    /// A new trigger, on a schedule, that may wait on one of `upstreams`.
+    pub(super) fn new(upstreams: Vec<UpstreamChoice>) -> Self {
         let next_hour = Local::now().naive_local() + TimeDelta::hours(1);
         let at = next_hour
             .with_minute(0)
@@ -138,7 +133,6 @@ impl TriggerForm {
         Self {
             replaces: None,
             kind: TriggerKind::Schedule,
-            focus: FormField::Kind,
             at: line(at),
             cron: line(DEFAULT_CRON.to_string()),
             missed: MissedFire::default(),
@@ -147,18 +141,22 @@ impl TriggerForm {
             debounce: line(DEFAULT_PATH_DEBOUNCE_SECS.to_string()),
             upstream: None,
             outcome: FinishOutcome::default(),
-            error: None,
+            upstreams,
         }
     }
 
-    /// A form holding `trigger`, row `index` of the editor's triggers.
-    pub(super) fn editing(index: usize, trigger: &TaskTrigger) -> Self {
-        let mut form = Self {
+    /// `trigger`, row `index` of the editor's triggers.
+    pub(super) fn editing(
+        index: usize,
+        trigger: &TaskTrigger,
+        upstreams: Vec<UpstreamChoice>,
+    ) -> Self {
+        let mut fields = Self {
             replaces: Some(index),
-            ..Self::new()
+            ..Self::new(upstreams)
         };
-        form.load(trigger);
-        form
+        fields.load(trigger);
+        fields
     }
 
     fn load(&mut self, trigger: &TaskTrigger) {
@@ -203,34 +201,56 @@ impl TriggerForm {
         }
     }
 
-    pub(crate) fn focus(&self) -> FormField {
-        self.focus
+    fn event(&self, event: TaskEvent) -> Result<TaskTrigger, String> {
+        Ok(TaskTrigger::Event {
+            event,
+            cooldown_secs: seconds(&self.cooldown, "cooldown")?,
+        })
     }
+}
 
-    pub(crate) fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
+impl FormFields for TriggerFields {
+    type Field = FormField;
+    type Output = TaskTrigger;
 
     /// The kind, then the fields the kind takes.
-    pub(crate) fn fields(&self) -> Vec<FormField> {
+    fn fields(&self) -> Vec<FormField> {
         std::iter::once(FormField::Kind)
             .chain(self.kind.fields().iter().copied())
             .collect()
     }
 
-    /// The text editor behind `field`; `None` for a field picked from choices.
-    pub(crate) fn text_field(&self, field: FormField) -> Option<&TextEditor> {
+    fn label(field: FormField) -> &'static str {
+        field.label()
+    }
+
+    fn value(&self, field: FormField) -> FieldValue<'_> {
         match field {
-            FormField::At => Some(&self.at),
-            FormField::Cron => Some(&self.cron),
-            FormField::Cooldown => Some(&self.cooldown),
-            FormField::Path => Some(&self.path),
-            FormField::Debounce => Some(&self.debounce),
-            FormField::Kind | FormField::Missed | FormField::Upstream | FormField::Outcome => None,
+            FormField::Kind => FieldValue::Choice(self.kind.label()),
+            FormField::At => FieldValue::Text(&self.at),
+            FormField::Cron => FieldValue::Text(&self.cron),
+            FormField::Missed => FieldValue::Choice(match self.missed {
+                MissedFire::RunOnce => "run once on return",
+                MissedFire::Skip => "skip",
+            }),
+            FormField::Cooldown => FieldValue::Text(&self.cooldown),
+            FormField::Path => FieldValue::Text(&self.path),
+            FormField::Debounce => FieldValue::Text(&self.debounce),
+            FormField::Upstream => FieldValue::Choice(
+                self.upstreams
+                    .iter()
+                    .find(|task| Some(task.id) == self.upstream)
+                    .map_or("(none)", |task| &task.name),
+            ),
+            FormField::Outcome => FieldValue::Choice(match self.outcome {
+                FinishOutcome::Succeeded => "succeeds",
+                FinishOutcome::Failed => "fails",
+                FinishOutcome::Either => "succeeds or fails",
+            }),
         }
     }
 
-    fn text_field_mut(&mut self, field: FormField) -> Option<&mut TextEditor> {
+    fn text_mut(&mut self, field: FormField) -> Option<&mut TextEditor> {
         match field {
             FormField::At => Some(&mut self.at),
             FormField::Cron => Some(&mut self.cron),
@@ -241,56 +261,8 @@ impl TriggerForm {
         }
     }
 
-    /// The value a choice field shows.
-    pub(crate) fn choice_text(&self, field: FormField, tasks: &[UpstreamChoice]) -> String {
+    fn cycle(&mut self, field: FormField, forward: bool) {
         match field {
-            FormField::Kind => self.kind.label().to_string(),
-            FormField::Missed => match self.missed {
-                MissedFire::RunOnce => "run once on return".into(),
-                MissedFire::Skip => "skip".into(),
-            },
-            FormField::Upstream => self
-                .upstream
-                .and_then(|id| tasks.iter().find(|task| task.id == id))
-                .map_or_else(|| "(none)".to_string(), |task| task.name.clone()),
-            FormField::Outcome => match self.outcome {
-                FinishOutcome::Succeeded => "succeeds".into(),
-                FinishOutcome::Failed => "fails".into(),
-                FinishOutcome::Either => "succeeds or fails".into(),
-            },
-            FormField::At
-            | FormField::Cron
-            | FormField::Cooldown
-            | FormField::Path
-            | FormField::Debounce => String::new(),
-        }
-    }
-
-    /// ↑/↓ and Tab move between fields, ←/→ change a choice, typing edits a text field,
-    /// Enter makes the trigger and Esc drops the form. `tasks` are the tasks it may wait on.
-    pub(super) fn on_key(&mut self, ev: KeyEvent, tasks: &[UpstreamChoice]) -> FormAction {
-        match ev.code {
-            KeyCode::Up | KeyCode::BackTab => self.move_focus(false),
-            KeyCode::Down | KeyCode::Tab => self.move_focus(true),
-            KeyCode::Left if self.text_field(self.focus).is_none() => self.cycle(false, tasks),
-            KeyCode::Right if self.text_field(self.focus).is_none() => self.cycle(true, tasks),
-            KeyCode::Enter => return self.apply(),
-            KeyCode::Esc => return FormAction::Cancel,
-            _ => {
-                if let Some(editor) = self.text_field_mut(self.focus) {
-                    editor.on_key(ev);
-                }
-            }
-        }
-        FormAction::Pending
-    }
-
-    fn move_focus(&mut self, forward: bool) {
-        self.focus = cycled(&self.fields(), self.focus, forward);
-    }
-
-    fn cycle(&mut self, forward: bool, tasks: &[UpstreamChoice]) {
-        match self.focus {
             FormField::Kind => self.kind = cycled(&TriggerKind::ALL, self.kind, forward),
             FormField::Missed => {
                 self.missed = cycled(
@@ -308,7 +280,7 @@ impl TriggerForm {
                 self.outcome = cycled(&outcomes, self.outcome, forward);
             }
             FormField::Upstream => {
-                let ids: Vec<TaskId> = tasks.iter().map(|task| task.id).collect();
+                let ids: Vec<TaskId> = self.upstreams.iter().map(|task| task.id).collect();
                 self.upstream = match self.upstream {
                     Some(id) if ids.contains(&id) => Some(cycled(&ids, id, forward)),
                     _ => ids.first().copied(),
@@ -322,18 +294,7 @@ impl TriggerForm {
         }
     }
 
-    fn apply(&mut self) -> FormAction {
-        match self.trigger() {
-            Ok(trigger) => FormAction::Apply(trigger),
-            Err(message) => {
-                self.error = Some(message);
-                FormAction::Pending
-            }
-        }
-    }
-
-    /// The trigger the fields describe, or why they describe none.
-    fn trigger(&self) -> Result<TaskTrigger, String> {
+    fn output(&self) -> Result<TaskTrigger, String> {
         Ok(match self.kind {
             TriggerKind::Manual => TaskTrigger::Manual,
             TriggerKind::At => TaskTrigger::At {
@@ -362,13 +323,6 @@ impl TriggerForm {
             })?,
         })
     }
-
-    fn event(&self, event: TaskEvent) -> Result<TaskTrigger, String> {
-        Ok(TaskTrigger::Event {
-            event,
-            cooldown_secs: seconds(&self.cooldown, "cooldown")?,
-        })
-    }
 }
 
 fn line(text: String) -> TextEditor {
@@ -392,7 +346,8 @@ mod tests {
     use chrono::NaiveDate;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{FormAction, TriggerForm, UpstreamChoice};
+    use super::{TriggerFields, UpstreamChoice};
+    use crate::settings::{Form, FormAction};
 
     fn enter() -> KeyEvent {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
@@ -434,12 +389,11 @@ mod tests {
             name: "backup".into(),
         }];
         for trigger in triggers {
-            let mut form = TriggerForm::editing(0, &trigger);
-            match form.on_key(enter(), &upstreams) {
+            let mut form = Form::new(TriggerFields::editing(0, &trigger, upstreams.to_vec()));
+            match form.on_key(enter()) {
                 FormAction::Apply(applied) => assert_eq!(applied, trigger),
-                FormAction::Pending | FormAction::Cancel => {
-                    panic!("{trigger:?} did not apply: {:?}", form.error());
-                }
+                FormAction::Refused(reason) => panic!("{trigger:?} was refused: {reason}"),
+                FormAction::Pending | FormAction::Cancel => panic!("{trigger:?} did not apply"),
             }
         }
     }

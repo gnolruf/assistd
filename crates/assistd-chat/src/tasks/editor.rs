@@ -10,10 +10,10 @@ use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::prompt_box::{PromptBox, RunPermissions};
-use super::trigger_form::{FormAction, TriggerForm, UpstreamChoice};
+use super::trigger_form::{TriggerFields, TriggerForm, UpstreamChoice};
 use super::{Outbox, PendingOp};
 use crate::selection::{Selection, cycled};
-use crate::settings::{ListAction, ListEditor};
+use crate::settings::{Form, FormAction, ListAction, ListEditor};
 use crate::text_editor::{EditAction, EditorShape, TextEditor};
 
 /// One row of the editor, in display order.
@@ -352,7 +352,7 @@ impl TaskEditor {
         outbox: &mut Outbox,
     ) -> EditorAction {
         match &mut self.mode {
-            EditorMode::Browse => return self.on_browse_key(ev, outbox),
+            EditorMode::Browse => return self.on_browse_key(ev, upstreams, outbox),
             EditorMode::Name(editor) => match editor.on_key(ev) {
                 EditAction::Apply => {
                     self.name = editor.text().trim().to_string();
@@ -396,14 +396,19 @@ impl TaskEditor {
                 let action = list.on_key(ev, &entries);
                 self.apply_host_action(action);
             }
-            EditorMode::Trigger(form) => match form.on_key(ev, upstreams) {
+            EditorMode::Trigger(form) => match form.on_key(ev) {
                 FormAction::Apply(trigger) => {
-                    let replaces = form.replaces;
+                    let replaces = form.fields().replaces;
+                    self.error = None;
                     self.mode = EditorMode::Browse;
                     self.place_trigger(replaces, trigger, outbox);
                 }
-                FormAction::Cancel => self.mode = EditorMode::Browse,
-                FormAction::Pending => {}
+                FormAction::Cancel => {
+                    self.error = None;
+                    self.mode = EditorMode::Browse;
+                }
+                FormAction::Pending => self.error = None,
+                FormAction::Refused(reason) => self.error = Some(reason),
             },
             EditorMode::Unsaved => return self.on_unsaved_key(ev, outbox),
             EditorMode::SavingToClose { .. } => {
@@ -451,7 +456,12 @@ impl TaskEditor {
     /// ↑/↓ move, Enter or Space opens the row, ←/→ change the mode, Delete or Backspace
     /// removes a trigger and Ctrl+D deletes the saved task, each after asking, Ctrl+S saves,
     /// and Esc leaves, asking first when something is unsaved.
-    fn on_browse_key(&mut self, ev: KeyEvent, outbox: &mut Outbox) -> EditorAction {
+    fn on_browse_key(
+        &mut self,
+        ev: KeyEvent,
+        upstreams: &[UpstreamChoice],
+        outbox: &mut Outbox,
+    ) -> EditorAction {
         let control = ev.modifiers.contains(KeyModifiers::CONTROL);
         match ev.code {
             KeyCode::Char('s') if control => {
@@ -467,7 +477,7 @@ impl TaskEditor {
             KeyCode::Left | KeyCode::Right if self.selected_row() == EditorRow::Mode => {
                 self.cycle_permission(ev.code == KeyCode::Right);
             }
-            KeyCode::Enter | KeyCode::Char(' ') => return self.open_row(),
+            KeyCode::Enter | KeyCode::Char(' ') => return self.open_row(upstreams),
             KeyCode::Delete | KeyCode::Backspace => {
                 if let EditorRow::Trigger(index) = self.selected_row() {
                     self.mode = EditorMode::ConfirmRemoveTrigger(index);
@@ -478,7 +488,8 @@ impl TaskEditor {
         EditorAction::Stay
     }
 
-    fn open_row(&mut self) -> EditorAction {
+    /// Opens the selected row for editing; a trigger's form offers `upstreams` to wait on.
+    fn open_row(&mut self, upstreams: &[UpstreamChoice]) -> EditorAction {
         match self.selected_row() {
             EditorRow::Name => {
                 self.mode = EditorMode::Name(TextEditor::new(self.name.clone(), EditorShape::Line));
@@ -498,10 +509,14 @@ impl TaskEditor {
             }
             EditorRow::Enabled => self.enabled = !self.enabled,
             EditorRow::Trigger(index) => {
-                let form = TriggerForm::editing(index, &self.triggers[index].trigger);
-                self.mode = EditorMode::Trigger(Box::new(form));
+                let trigger = &self.triggers[index].trigger;
+                let fields = TriggerFields::editing(index, trigger, upstreams.to_vec());
+                self.mode = EditorMode::Trigger(Box::new(Form::new(fields)));
             }
-            EditorRow::AddTrigger => self.mode = EditorMode::Trigger(Box::new(TriggerForm::new())),
+            EditorRow::AddTrigger => {
+                let fields = TriggerFields::new(upstreams.to_vec());
+                self.mode = EditorMode::Trigger(Box::new(Form::new(fields)));
+            }
         }
         EditorAction::Stay
     }

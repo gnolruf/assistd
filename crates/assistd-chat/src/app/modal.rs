@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
 use super::{AnswerTo, App, ConfirmAnswer, ConfirmChoice, ConfirmationPrompt, ConfirmationRequest};
+use crate::choice_list::ChoiceKey;
 
 /// Script rows one PgUp/PgDn moves an expanded prompt.
 const PROMPT_SCROLL_STEP: usize = 10;
@@ -124,56 +125,28 @@ impl App {
         });
     }
 
-    /// Arrows move the selection and Enter answers. On the message row, where the prompt
-    /// opens, every character typed is the message for the agent; on the others a choice's
-    /// number answers. Esc or Ctrl+C denies, and Tab and PgUp/PgDn expand and scroll the
-    /// script.
+    /// The choice list takes the keys that pick an answer or type the message for the agent;
+    /// Tab and PgUp/PgDn expand and scroll the script.
     pub(super) fn on_confirmation_key(&mut self, ev: KeyEvent) {
         let Some(prompt) = self.confirmation.as_mut() else {
             return;
         };
-        let choices = prompt.choices();
-        let on_message_row = prompt.selected.index() + 1 == choices.len();
-        let answer = match ev.code {
-            KeyCode::Esc => Some(ConfirmChoice::Deny),
-            KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(ConfirmChoice::Deny)
-            }
-            KeyCode::Enter => choices.get(prompt.selected.index()).copied(),
-            KeyCode::Backspace if on_message_row => {
-                prompt.message.pop();
-                None
-            }
-            KeyCode::Char(typed) if on_message_row => {
-                prompt.message.push(typed);
-                None
-            }
-            KeyCode::Char(digit) => prompt.numbered_answer(digit),
-            KeyCode::Up => {
-                prompt.selected.previous();
-                None
-            }
-            KeyCode::Down => {
-                prompt.selected.next(choices.len());
-                None
-            }
-            KeyCode::Tab => {
-                prompt.expanded = !prompt.expanded;
-                prompt.scroll = 0;
-                None
-            }
-            KeyCode::PageUp => {
-                prompt.scroll = prompt.scroll.saturating_sub(PROMPT_SCROLL_STEP);
-                None
-            }
-            KeyCode::PageDown => {
-                prompt.scroll = prompt.scroll.saturating_add(PROMPT_SCROLL_STEP);
-                None
-            }
-            _ => None,
-        };
-        if let Some(choice) = answer {
-            self.resolve_confirmation(choice);
+        match prompt.choices.on_key(ev) {
+            ChoiceKey::Answered(choice) => self.resolve_confirmation(choice),
+            ChoiceKey::Taken => {}
+            ChoiceKey::Passed => match ev.code {
+                KeyCode::Tab => {
+                    prompt.expanded = !prompt.expanded;
+                    prompt.scroll = 0;
+                }
+                KeyCode::PageUp => {
+                    prompt.scroll = prompt.scroll.saturating_sub(PROMPT_SCROLL_STEP);
+                }
+                KeyCode::PageDown => {
+                    prompt.scroll = prompt.scroll.saturating_add(PROMPT_SCROLL_STEP);
+                }
+                _ => {}
+            },
         }
     }
 }
