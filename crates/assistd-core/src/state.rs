@@ -262,7 +262,7 @@ impl AppState {
             voice_gate,
             window_manager: Arc::clone(&subsystems.window_manager),
             embedder: Arc::clone(&memory.embedder),
-            semantic: Arc::clone(&memory.semantic),
+            recall: Arc::clone(&memory.recall),
             embedding_cfg: memory.embedding_cfg.clone(),
             session_ctx: Arc::clone(&session_ctx),
             admission: Arc::clone(&admission),

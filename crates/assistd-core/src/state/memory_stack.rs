@@ -7,7 +7,10 @@ use tokio::sync::Notify;
 
 use assistd_config::EmbeddingConfig;
 use assistd_embed::EmbedderHandle;
-use assistd_memory::{MemoryStore, NoSemanticStore, SemanticStore, TaskStore, TranscriptStore};
+use assistd_memory::{
+    DocumentStore, EmbeddingQueue, MemoryStore, NoSemanticStore, RecallStore, SemanticStore,
+    TaskStore, TranscriptStore,
+};
 use assistd_tools::MemoryOps;
 use assistd_utils::readiness::Readiness;
 
@@ -20,7 +23,9 @@ pub struct MemoryStack {
     pub tasks: Arc<TaskStore>,
     pub memory_ops: Arc<MemoryOps>,
     pub embedder: Arc<EmbedderHandle>,
-    pub semantic: Arc<dyn SemanticStore>,
+    pub recall: Arc<dyn RecallStore>,
+    pub embedding_queue: Arc<dyn EmbeddingQueue>,
+    pub document_store: Arc<dyn DocumentStore>,
     /// Wakes the embedding worker after a write leaves rows to embed.
     pub embed_wake: Arc<Notify>,
     pub embedding_cfg: EmbeddingConfig,
@@ -44,7 +49,9 @@ impl MemoryStack {
             embedder: Arc::new(EmbedderHandle::new(Readiness::Unavailable(
                 "embedding not configured".into(),
             ))),
-            semantic: Arc::new(NoSemanticStore),
+            recall: Arc::new(NoSemanticStore),
+            embedding_queue: Arc::new(NoSemanticStore),
+            document_store: Arc::new(NoSemanticStore),
             embed_wake: Arc::default(),
             embedding_cfg,
         }
@@ -56,9 +63,11 @@ impl MemoryStack {
         self
     }
 
-    /// Replace the semantic store.
+    /// Replace all three parts of the semantic store with `semantic`.
     pub fn with_semantic(mut self, semantic: Arc<dyn SemanticStore>) -> Self {
-        self.semantic = semantic;
+        self.recall = semantic.clone();
+        self.embedding_queue = semantic.clone();
+        self.document_store = semantic;
         self
     }
 

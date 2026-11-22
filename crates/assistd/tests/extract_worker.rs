@@ -8,7 +8,7 @@ use std::time::Duration;
 use assistd_config::DocumentsConfig;
 use assistd_core::{DocumentIndex, IndexDeps, PassEnd, RootPass, SkipCause};
 use assistd_documents::{Extraction, Extractor, SkipReason, supervise};
-use assistd_memory::{SemanticStore, SqliteHandle, SqliteSemanticStore};
+use assistd_memory::{DocumentStore, RecallStore, SqliteHandle, SqliteSemanticStore};
 use assistd_tools::{
     Protected, SandboxInfo, SandboxRequest, SharedDirs, ToolSandbox, probe_sandbox,
 };

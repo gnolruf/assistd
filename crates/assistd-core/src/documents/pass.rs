@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_documents::{Extraction, Extractor, ExtractorError, SkipReason, renders_pages};
-use assistd_memory::{EmptyPages, FileStamp, IndexPass, MemoryError, SemanticStore};
+use assistd_memory::{DocumentStore, EmptyPages, FileStamp, IndexPass, MemoryError};
 use assistd_tools::policy::{PathGuards, on_blocking_pool};
 use assistd_utils::readiness::NotReady;
 use chrono::{DateTime, Utc};
@@ -110,7 +110,7 @@ pub struct RootPass {
 /// What a pass reads from and writes to.
 #[derive(Debug, Clone)]
 pub struct IndexDeps {
-    pub store: Arc<dyn SemanticStore>,
+    pub store: Arc<dyn DocumentStore>,
     pub extractor: Arc<Extractor>,
     /// Wakes the embedding worker after a document leaves chunks to embed.
     pub embed_wake: Arc<Notify>,

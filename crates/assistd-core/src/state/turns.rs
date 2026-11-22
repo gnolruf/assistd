@@ -14,7 +14,7 @@ use assistd_config::{Config, EmbeddingConfig};
 use assistd_embed::EmbedderHandle;
 use assistd_ipc::{Attachment, Event, EventBody, ImageAttachment, PlanMode};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent};
-use assistd_memory::{PersistedMessage, SemanticStore, SessionId};
+use assistd_memory::{PersistedMessage, RecallStore, SessionId};
 use assistd_tools::{ConfirmRouter, HostReads, ToolCatalog, TurnContext, VoiceGate};
 use assistd_voice::VoiceManager;
 use assistd_wm::WindowManager;
@@ -115,7 +115,7 @@ pub(super) struct TurnDeps {
     pub(super) voice_gate: Arc<VoiceConfirmationGate>,
     pub(super) window_manager: Arc<dyn WindowManager>,
     pub(super) embedder: Arc<EmbedderHandle>,
-    pub(super) semantic: Arc<dyn SemanticStore>,
+    pub(super) recall: Arc<dyn RecallStore>,
     pub(super) embedding_cfg: EmbeddingConfig,
     pub(super) session_ctx: Arc<SessionContext>,
     pub(super) admission: Arc<TurnAdmission>,

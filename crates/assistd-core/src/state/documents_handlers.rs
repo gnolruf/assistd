@@ -16,7 +16,9 @@ use assistd_ipc::{
     DocumentSkipReason, Event, EventBody, PageTranscriptionState, PageTranscriptionStatus,
     SkippedFiles,
 };
-use assistd_memory::{DocumentHit, IndexRootCounts, MemoryError, SemanticStore};
+use assistd_memory::{
+    DocumentHit, DocumentStore, EmbeddingQueue, IndexRootCounts, MemoryError, RecallStore,
+};
 use assistd_tools::policy::on_blocking_pool;
 use assistd_utils::readiness::NotReady;
 
@@ -43,7 +45,9 @@ pub struct DocumentsService {
     extractor: Arc<Extractor>,
     index: Arc<DocumentIndex>,
     embedder: Arc<EmbedderHandle>,
-    semantic: Arc<dyn SemanticStore>,
+    recall: Arc<dyn RecallStore>,
+    embedding_queue: Arc<dyn EmbeddingQueue>,
+    store: Arc<dyn DocumentStore>,
     activity: watch::Sender<DocumentActivity>,
     bus: EventBus,
 }
@@ -60,7 +64,9 @@ impl DocumentsService {
             extractor: Arc::clone(&subsystems.documents),
             index: Arc::clone(&subsystems.document_index),
             embedder: Arc::clone(&memory.embedder),
-            semantic: Arc::clone(&memory.semantic),
+            recall: Arc::clone(&memory.recall),
+            embedding_queue: Arc::clone(&memory.embedding_queue),
+            store: Arc::clone(&memory.document_store),
             activity: watch::Sender::default(),
             bus,
         }
@@ -105,7 +111,7 @@ impl DocumentsService {
         if matches!(self.embedder.readiness(), Err(NotReady::Unavailable(_))) {
             return 0;
         }
-        match self.semantic.count_missing().await {
+        match self.embedding_queue.count_missing().await {
             Ok(missing) => missing.document_chunks,
             Err(error) => {
                 debug!(
@@ -139,7 +145,7 @@ impl DocumentsService {
         tx: EventSink,
     ) -> Result<(), DispatchError> {
         let stored = self
-            .semantic
+            .store
             .index_root_counts()
             .await
             .context("document status failed")?;
@@ -177,7 +183,7 @@ impl DocumentsService {
     /// How many pages wait for the OCR model or failed, whether a run is under way
     /// or can ever start, and why the last one stopped early.
     async fn transcription_status(&self) -> Result<PageTranscriptionStatus, MemoryError> {
-        let counts = self.semantic.count_transcriptions().await?;
+        let counts = self.store.count_transcriptions().await?;
         let last_run = self.index.transcription().last_run();
         let state = if self.config.documents.ocr_model().is_none() {
             PageTranscriptionState::NoModel
@@ -283,7 +289,7 @@ impl DocumentsService {
         };
         let query_vector = embedder.embed_query(&query).await.context("embed failed")?;
         let hits = self
-            .semantic
+            .recall
             .search_documents(query, query_vector, limit as usize)
             .await
             .context("document search failed")?;

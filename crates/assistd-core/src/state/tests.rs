@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::num::NonZeroU32;
 use std::ops::{Deref, Range};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -24,12 +24,10 @@ use assistd_llm::{
     ToolCall,
 };
 use assistd_memory::{
-    AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkSource, DocumentHit, DocumentText,
-    Embedding, EmbeddingHit, EmbeddingSpace, EmptyPages, FileStamp, HistoryRow, HistoryScope,
-    IndexPass, IndexRootCounts, MemoryHit, MemoryId, MemoryStore, MessageId, MessageKind,
-    NoSemanticStore, PageReading, PersistedMessage, PersistedRole, PersistedToolCall,
-    SemanticStore, SessionId, SessionScope, SqliteHandle, SqliteTranscriptStore, TaskStore,
-    TranscriptStore, TranscriptionCounts, UnindexedRows, WaitingPage,
+    AdjacentChunks, BranchId, ChunkId, ChunkLocator, DocumentHit, DocumentText, EmbeddingHit,
+    HistoryRow, HistoryScope, MemoryHit, MemoryId, MemoryStore, MessageId, MessageKind,
+    NoSemanticStore, PersistedMessage, PersistedRole, PersistedToolCall, RecallStore, SessionId,
+    SessionScope, SqliteHandle, SqliteTranscriptStore, TaskStore, TranscriptStore,
 };
 use assistd_tools::{
     Approval, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, OutputCap, PresentSpec, RunTool,

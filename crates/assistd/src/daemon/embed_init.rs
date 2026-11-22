@@ -11,7 +11,8 @@ use assistd_embed::{
 };
 use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_memory::{
-    EmbeddingSpace, NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore,
+    EmbeddingQueue, EmbeddingSpace, NoSemanticStore, SemanticStore, SqliteHandle,
+    SqliteSemanticStore,
 };
 use assistd_utils::child_server::{ApiKey, ChildServer};
 use assistd_utils::readiness::Readiness;
@@ -242,7 +243,7 @@ async fn adopt_space_then_serve(
         server_args: startup.config.custom_args.clone().into(),
         document_prefix: startup.config.document_prefix.clone(),
     };
-    if let Err(reason) = adopt_space(state.memory.semantic.as_ref(), &space).await {
+    if let Err(reason) = adopt_space(state.memory.embedding_queue.as_ref(), &space).await {
         tracing::warn!("embedding: {reason}; semantic search disabled this run");
         state
             .memory
@@ -262,7 +263,7 @@ fn serve_embedder(
     let (documents_gate_open, documents_gate) = state.status.document_embed_gate();
     let worker = spawn_embedder_task(
         embedder.clone(),
-        state.memory.semantic.clone(),
+        state.memory.embedding_queue.clone(),
         startup.embed_wake,
         documents_gate_open,
         worker_shutdown,
@@ -320,8 +321,8 @@ async fn start_server(
     }
 }
 
-async fn adopt_space(semantic: &dyn SemanticStore, space: &EmbeddingSpace) -> Result<(), String> {
-    match semantic.adopt_embedding_space(space).await {
+async fn adopt_space(queue: &dyn EmbeddingQueue, space: &EmbeddingSpace) -> Result<(), String> {
+    match queue.adopt_embedding_space(space).await {
         Ok(None) => Ok(()),
         Ok(Some(replaced)) => {
             info!(

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use assistd_embed::EmbedderHandle;
-use assistd_memory::{DocumentHit, DocumentText, MemoryError, SemanticStore};
+use assistd_memory::{DocumentHit, DocumentStore, DocumentText, MemoryError, RecallStore};
 use assistd_utils::path::expand_tilde_from_env;
 use assistd_utils::text::{collapse_whitespace, similarity_percent};
 
@@ -206,25 +206,28 @@ impl Excerpt {
 #[derive(Debug)]
 pub struct DocsCommand {
     embedder: Arc<EmbedderHandle>,
-    semantic: Arc<dyn SemanticStore>,
+    recall: Arc<dyn RecallStore>,
+    index: Arc<dyn DocumentStore>,
     default_hits: usize,
     search_bytes: usize,
     read_room: ReadRoom,
 }
 
 impl DocsCommand {
-    /// A command searching the documents in `semantic` with query vectors from
-    /// `embedder`, for `default_hits` of them unless asked otherwise, whose output
-    /// fits one result of `output`.
+    /// A command searching the documents in `recall`, which `index` counts, with query
+    /// vectors from `embedder`, for `default_hits` of them unless asked otherwise, whose
+    /// output fits one result of `output`.
     pub fn new(
         embedder: Arc<EmbedderHandle>,
-        semantic: Arc<dyn SemanticStore>,
+        recall: Arc<dyn RecallStore>,
+        index: Arc<dyn DocumentStore>,
         default_hits: usize,
         output: &PresentSpec,
     ) -> Self {
         Self {
             embedder,
-            semantic,
+            recall,
+            index,
             default_hits,
             search_bytes: SEARCH_OUTPUT_BYTES.min(output.max_bytes.saturating_sub(FOOTER_BYTES)),
             read_room: ReadRoom::within(output),
@@ -282,7 +285,7 @@ impl DocsCommand {
                 search_failed(format_args!("the query could not be embedded: {error}"))
             })?;
         let hits = self
-            .semantic
+            .recall
             .search_documents(request.query, query_vector, request.limit)
             .await
             .map_err(|error| index_unreadable(&error))?;
@@ -295,7 +298,7 @@ impl DocsCommand {
     }
 
     async fn nothing_found(&self) -> CommandError {
-        match self.semantic.count_document_chunks().await {
+        match self.index.count_document_chunks().await {
             Ok(0) => search_failed("no document is indexed yet"),
             Ok(_) => search_failed(
                 "no indexed document has been embedded yet, and none holds a word of the query",
@@ -340,7 +343,7 @@ impl DocsCommand {
         max_bytes: usize,
     ) -> Result<DocumentText, CommandError> {
         let wanted = start.byte..start.byte.saturating_add(max_bytes);
-        self.semantic
+        self.recall
             .document_text(path, start.page, wanted)
             .await
             .map_err(|error| index_unreadable(&error))?
@@ -668,7 +671,8 @@ mod tests {
             .await
             .unwrap();
         let embedder = EmbedderHandle::new(Readiness::Unavailable("disabled in config".into()));
-        let docs = DocsCommand::new(Arc::new(embedder), Arc::new(store), 5, &spec());
+        let store = Arc::new(store);
+        let docs = DocsCommand::new(Arc::new(embedder), store.clone(), store, 5, &spec());
         (docs, temp)
     }
 
