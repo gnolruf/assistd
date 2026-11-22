@@ -5,6 +5,7 @@ mod admission;
 pub mod agent;
 mod build_tools;
 pub mod bus;
+mod dir_watch;
 mod documents;
 pub mod gpu_monitor;
 pub mod idle_monitor;
