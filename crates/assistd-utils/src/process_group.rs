@@ -9,7 +9,7 @@ use rustix::io::Errno;
 use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// The process group a child spawned with `process_group(0)` leads. The id
 /// is fixed at spawn. Dropping it SIGKILLs every process still in the group,
@@ -57,18 +57,42 @@ impl ProcessGroup {
     }
 
     /// Give `child`, the group's leader, `grace` to exit by itself, then
-    /// SIGTERM the group and, `grace` later, SIGKILL it. Returns once the
-    /// leader is reaped; `name` is what the log calls the child.
+    /// [`Self::terminate`] it with `grace` again. Returns once the leader is
+    /// reaped; `name` is what the log calls the child.
     pub async fn stop_gracefully(mut self, mut child: Child, grace: Duration, name: &str) {
         if timeout(grace, self.reap_leader(&mut child)).await.is_ok() {
             return;
         }
         warn!(target: "assistd::process_group", "{name} still running; sending SIGTERM");
+        let _ = self.terminate(child, grace, name).await;
+    }
+
+    /// SIGTERM the group, wait up to `term_timeout` for `child`, its leader,
+    /// then SIGKILL whatever is left of the group. Returns once the leader is
+    /// reaped, or with the error of waiting for it; `name` is what the log
+    /// calls the child.
+    pub async fn terminate(
+        mut self,
+        mut child: Child,
+        term_timeout: Duration,
+        name: &str,
+    ) -> io::Result<()> {
         self.signal(Signal::TERM);
-        if timeout(grace, self.reap_leader(&mut child)).await.is_err() {
-            self.signal(Signal::KILL);
-            let _ = self.reap_leader(&mut child).await;
+        match timeout(term_timeout, self.reap_leader(&mut child)).await {
+            Ok(reaped) => {
+                let status = reaped?;
+                info!(target: "assistd::process_group", "{name} exited after SIGTERM: {status}");
+            }
+            Err(_) => {
+                warn!(
+                    target: "assistd::process_group",
+                    "{name} did not exit within {term_timeout:?}; sending SIGKILL",
+                );
+                self.signal(Signal::KILL);
+                let _ = self.reap_leader(&mut child).await;
+            }
         }
+        Ok(())
     }
 }
 

@@ -1,33 +1,25 @@
-//! Runs the voice worker as a child in its own process group, restarts it
-//! with backoff when it dies, and keeps the [`VoiceManager`] in step with it.
+//! Runs the voice worker under the shared pipe-worker supervisor and keeps
+//! the [`VoiceManager`] in step with it.
 
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use assistd_config::VoiceConfig;
-use assistd_utils::backoff::{RestartDecision, RestartPolicy};
-use assistd_utils::process_group::{ProcessGroup, set_parent_death_signal};
-use assistd_utils::readiness::Readiness;
-use rustix::process::Signal;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{mpsc, watch};
+use assistd_utils::pipe_worker::{self, PipeWorker};
+use assistd_utils::readiness::{NotReady, Readiness};
+use tokio::process::Command;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 use super::link::{Link, StartupReport};
-use super::protocol::{Startup, ToWorker, decode, encode};
+use super::protocol::{MAX_REPLY_LINE_BYTES, Startup, ToWorker, decode, encode};
 use super::proxy::{WorkerListener, WorkerVoiceInput, WorkerVoiceOutput};
 use crate::{VoiceCapture, VoiceManager, VoiceOutput};
-
-/// How long a worker whose stdin closed has to exit before SIGTERM, and
-/// again before SIGKILL.
-const EXIT_GRACE: Duration = Duration::from_secs(2);
 
 /// How to launch the voice worker, and the settings it builds its stack from.
 #[derive(Debug, Clone)]
@@ -37,13 +29,6 @@ pub struct VoiceWorkerSpec {
     pub config: VoiceConfig,
 }
 
-/// How a worker's session ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionEnd {
-    Died,
-    Shutdown,
-}
-
 /// The proxies handed out while a worker is up; the same ones across restarts.
 #[derive(Debug)]
 struct Proxies {
@@ -51,134 +36,82 @@ struct Proxies {
     output: Arc<dyn VoiceOutput>,
 }
 
-/// A spawned worker and its pipes.
-struct RunningWorker {
-    child: Child,
-    group: ProcessGroup,
-    stdin: ChildStdin,
-    stdout: Lines<BufReader<ChildStdout>>,
+/// The voice worker's process and the daemon's end of its pipes.
+struct VoiceWorker {
+    spec: VoiceWorkerSpec,
+    link: Arc<Link>,
+    voice: Arc<VoiceManager>,
+    proxies: Proxies,
+    /// Calls resuming listening on the running worker; aborted when it goes.
+    resumes: parking_lot::Mutex<JoinSet<()>>,
 }
 
-impl RunningWorker {
-    fn spawn(spec: &VoiceWorkerSpec) -> io::Result<Self> {
-        let mut command = Command::new(&spec.program);
-        command
-            .args(&spec.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .process_group(0);
-        set_parent_death_signal(&mut command);
-        let mut child = command.spawn()?;
-        let group = ProcessGroup::led_by(&child)
-            .ok_or_else(|| io::Error::other("spawned voice worker reported no pid"))?;
-        let stdin = child.stdin.take().expect("stdin piped");
-        let stdout = BufReader::new(child.stdout.take().expect("stdout piped")).lines();
-        Ok(Self {
-            child,
-            group,
-            stdin,
-            stdout,
-        })
-    }
-}
-
-/// One worker's run, from spawn to exit.
-struct Session<'a> {
-    link: &'a Link,
-    voice: &'a VoiceManager,
-    proxies: &'a Proxies,
-}
-
-impl Session<'_> {
-    async fn run(
-        &self,
-        worker: RunningWorker,
-        config: &VoiceConfig,
-        shutdown: &mut watch::Receiver<bool>,
-    ) -> SessionEnd {
-        let RunningWorker {
-            mut child,
-            mut group,
-            stdin,
-            mut stdout,
-        } = worker;
-        let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
-        let _ = outgoing.send(ToWorker::Configure {
-            config: Box::new(config.clone()),
-        });
-        let unresponsive = self.link.connect(outgoing);
-        let mut resumes = JoinSet::new();
-        let ended = tokio::select! {
-            Ok(()) = unresponsive => {
-                warn!(target: "assistd::voice::worker", "terminating the unresponsive voice worker");
-                SessionEnd::Died
-            }
-            () = write_messages(stdin, outgoing_rx) => SessionEnd::Died,
-            () = self.read_messages(&mut stdout, &mut resumes) => SessionEnd::Died,
-            status = group.reap_leader(&mut child) => {
-                warn!(target: "assistd::voice::worker", "voice worker exited: {status:?}");
-                SessionEnd::Died
-            }
-            _ = shutdown.wait_for(|stop| *stop) => SessionEnd::Shutdown,
-        };
-        match ended {
-            SessionEnd::Shutdown => {
-                group
-                    .stop_gracefully(child, EXIT_GRACE, "voice worker")
-                    .await;
-            }
-            SessionEnd::Died => {
-                group.signal(Signal::KILL);
-                let _ = group.reap_leader(&mut child).await;
-            }
-        }
-        ended
-    }
-
-    /// Mirror the worker's messages until its stdout closes.
-    async fn read_messages(
-        &self,
-        stdout: &mut Lines<BufReader<ChildStdout>>,
-        resumes: &mut JoinSet<()>,
-    ) {
-        loop {
-            let line = match stdout.next_line().await {
-                Ok(Some(line)) => line,
-                Ok(None) => return,
-                Err(e) => {
-                    warn!(target: "assistd::voice::worker", "voice worker stdout: {e}");
-                    return;
-                }
-            };
-            match decode(&line) {
-                Ok(message) => {
-                    if let Some(report) = self.link.receive(message) {
-                        self.record_startup(report, resumes);
-                    }
-                }
-                Err(e) => warn!(target: "assistd::voice::worker", "{e}; line ignored"),
-            }
-        }
-    }
-
+impl VoiceWorker {
     /// Hand out the proxies for a component that came up, resuming listening
     /// if it was on when capture went away.
-    fn record_startup(&self, report: StartupReport, resumes: &mut JoinSet<()>) {
+    fn record_startup(&self, report: StartupReport) {
         match report {
             StartupReport::Capture(startup) => {
                 let ready = startup == Startup::Ready;
                 self.voice
                     .set_capture(readiness_of(startup, self.proxies.capture.clone()));
                 if ready && self.link.listen_wanted.load(Ordering::SeqCst) {
-                    resumes.spawn(resume_listening(Arc::clone(&self.proxies.capture.listener)));
+                    let listener = Arc::clone(&self.proxies.capture.listener);
+                    self.resumes.lock().spawn(resume_listening(listener));
                 }
             }
             StartupReport::Speech(startup) => self
                 .voice
                 .set_speech(readiness_of(startup, Arc::clone(&self.proxies.output))),
         }
+    }
+}
+
+impl PipeWorker for VoiceWorker {
+    type Outgoing = ToWorker;
+
+    const NAME: &'static str = "voice worker";
+
+    const MAX_LINE_BYTES: usize = MAX_REPLY_LINE_BYTES;
+
+    const STARTUP_DEADLINE: Option<Duration> = None;
+
+    fn command(&self) -> io::Result<Command> {
+        let mut command = Command::new(&self.spec.program);
+        command.args(&self.spec.args);
+        Ok(command)
+    }
+
+    fn connect(&self, outgoing: mpsc::UnboundedSender<ToWorker>) -> oneshot::Receiver<()> {
+        let _ = outgoing.send(ToWorker::Configure {
+            config: Box::new(self.spec.config.clone()),
+        });
+        self.link.connect(outgoing)
+    }
+
+    fn encode(message: &ToWorker) -> String {
+        encode(message)
+    }
+
+    fn receive(&self, line: &[u8]) {
+        match decode(line) {
+            Ok(message) => {
+                if let Some(report) = self.link.receive(message) {
+                    self.record_startup(report);
+                }
+            }
+            Err(e) => warn!(target: "assistd::voice::worker", "{e}; line ignored"),
+        }
+    }
+
+    fn disconnect(&self) {
+        self.link.disconnect();
+        *self.resumes.lock() = JoinSet::new();
+    }
+
+    fn set_not_ready(&self, not_ready: NotReady) {
+        self.voice.set_capture(readiness_without(&not_ready));
+        self.voice.set_speech(readiness_without(&not_ready));
     }
 }
 
@@ -189,7 +122,7 @@ impl Session<'_> {
 pub async fn supervise(
     spec: VoiceWorkerSpec,
     voice: Arc<VoiceManager>,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) {
     let link = Arc::new(Link::new());
     let proxies = Proxies {
@@ -199,80 +132,14 @@ pub async fn supervise(
         },
         output: Arc::new(WorkerVoiceOutput(Arc::clone(&link))),
     };
-    let session = Session {
-        link: &link,
-        voice: &voice,
-        proxies: &proxies,
-    };
-    let mut policy = RestartPolicy::default();
-    loop {
-        let started = std::time::Instant::now();
-        let ended = match RunningWorker::spawn(&spec) {
-            Ok(worker) => {
-                let ended = session.run(worker, &spec.config, &mut shutdown).await;
-                policy.record_session_end(started.elapsed());
-                ended
-            }
-            Err(e) => {
-                warn!(target: "assistd::voice::worker", "failed to spawn the voice worker: {e}");
-                policy.record_spawn_failure();
-                SessionEnd::Died
-            }
-        };
-        link.disconnect();
-        if ended == SessionEnd::Shutdown {
-            return;
-        }
-        if !wait_to_restart(&mut policy, &voice, &mut shutdown).await {
-            return;
-        }
-    }
-}
-
-/// Sleep out the policy's delay, with `voice` `Starting` through a backoff
-/// and `Unavailable` through a slow retry; false when shutdown flips first.
-async fn wait_to_restart(
-    policy: &mut RestartPolicy,
-    voice: &VoiceManager,
-    shutdown: &mut watch::Receiver<bool>,
-) -> bool {
-    match policy.next_restart(std::time::Instant::now()) {
-        RestartDecision::Backoff { delay, failures } => {
-            info!(
-                target: "assistd::voice::worker",
-                "restarting the voice worker in {delay:?} ({failures} failed in a row)"
-            );
-            mark_starting(voice);
-            sleep_unless_shutdown(delay, shutdown).await
-        }
-        RestartDecision::SlowRetry { delay, cap } => {
-            let reason = format!(
-                "the voice worker {cap}; retrying every {} minutes",
-                delay.as_secs() / 60
-            );
-            warn!(target: "assistd::voice::worker", "{reason}");
-            voice.set_capture(Readiness::Unavailable(reason.as_str().into()));
-            voice.set_speech(Readiness::Unavailable(reason.into()));
-            let slept = sleep_unless_shutdown(delay, shutdown).await;
-            if slept {
-                mark_starting(voice);
-            }
-            slept
-        }
-    }
-}
-
-fn mark_starting(voice: &VoiceManager) {
-    voice.set_capture(Readiness::Starting);
-    voice.set_speech(Readiness::Starting);
-}
-
-/// False when `shutdown` flips before `delay` is over.
-async fn sleep_unless_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>) -> bool {
-    tokio::select! {
-        () = tokio::time::sleep(delay) => true,
-        _ = shutdown.wait_for(|stop| *stop) => false,
-    }
+    let worker = Arc::new(VoiceWorker {
+        spec,
+        link,
+        voice,
+        proxies,
+        resumes: parking_lot::Mutex::new(JoinSet::new()),
+    });
+    pipe_worker::supervise(worker, shutdown).await;
 }
 
 fn readiness_of<T>(startup: Startup, ready: T) -> Readiness<T> {
@@ -282,24 +149,16 @@ fn readiness_of<T>(startup: Startup, ready: T) -> Readiness<T> {
     }
 }
 
+fn readiness_without<T>(not_ready: &NotReady) -> Readiness<T> {
+    match not_ready {
+        NotReady::Starting => Readiness::Starting,
+        NotReady::Unavailable(reason) => Readiness::Unavailable(Arc::clone(reason)),
+    }
+}
+
 async fn resume_listening(listener: Arc<dyn crate::ContinuousListener>) {
     match listener.start().await {
         Ok(()) => info!(target: "assistd::voice::worker", "listening resumed"),
         Err(e) => warn!(target: "assistd::voice::worker", "failed to resume listening: {e}"),
-    }
-}
-
-/// Write each message to the worker's stdin; returns once the pipe fails.
-async fn write_messages(mut stdin: ChildStdin, mut messages: mpsc::UnboundedReceiver<ToWorker>) {
-    while let Some(message) = messages.recv().await {
-        let line = encode(&message);
-        let written = async {
-            stdin.write_all(line.as_bytes()).await?;
-            stdin.flush().await
-        };
-        if let Err(e) = written.await {
-            warn!(target: "assistd::voice::worker", "voice worker stdin: {e}");
-            return;
-        }
     }
 }

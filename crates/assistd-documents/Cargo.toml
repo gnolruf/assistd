@@ -13,10 +13,8 @@ html2text = { workspace = true }
 image = { workspace = true }
 num-traits = { workspace = true }
 office_oxide = { workspace = true }
-parking_lot = { workspace = true }
 pdf_oxide = { workspace = true }
 quick-xml = { workspace = true }
-rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

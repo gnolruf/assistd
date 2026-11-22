@@ -3,13 +3,12 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use assistd_utils::pipe_worker::{CallError, PendingReplies};
 use assistd_utils::readiness::NotReady;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
-use tracing::warn;
 
 use crate::protocol::{Extraction, FromWorker, RenderedPage, Request, SkipReason, Task};
 
@@ -25,15 +24,6 @@ pub enum ExtractorError {
     Exited,
 }
 
-/// The running worker's input queue and its request awaiting a reply.
-/// Dropping it fails that request with [`ExtractorError::Exited`].
-#[derive(Debug)]
-struct Connection {
-    outgoing: mpsc::UnboundedSender<Request>,
-    pending: Option<(u64, Awaited)>,
-    unresponsive: Option<oneshot::Sender<()>>,
-}
-
 /// Where the answer to the pending request goes, by the message that carries it.
 #[derive(Debug)]
 enum Awaited {
@@ -46,10 +36,9 @@ enum Awaited {
 #[derive(Debug)]
 pub struct Extractor {
     readiness: watch::Sender<Result<(), NotReady>>,
-    connection: parking_lot::Mutex<Option<Connection>>,
+    replies: PendingReplies<Request, Awaited>,
     /// Held for a whole request, so the worker reads one file at a time.
     turn: tokio::sync::Mutex<()>,
-    next_id: AtomicU64,
 }
 
 impl Extractor {
@@ -66,9 +55,8 @@ impl Extractor {
     fn with_readiness(readiness: Result<(), NotReady>) -> Self {
         Self {
             readiness: watch::channel(readiness).0,
-            connection: parking_lot::Mutex::new(None),
+            replies: PendingReplies::new("extraction worker"),
             turn: tokio::sync::Mutex::new(()),
-            next_id: AtomicU64::new(0),
         }
     }
 
@@ -134,63 +122,31 @@ impl Extractor {
     async fn answer<T>(
         &self,
         request: PendingRequest,
-        mut reply: oneshot::Receiver<T>,
+        reply: oneshot::Receiver<T>,
     ) -> Result<Option<T>, ExtractorError> {
         let _turn = self.turn.lock().await;
         self.readiness()?;
-        let id = self.send_request(request)?;
-        if let Ok(answered) = tokio::time::timeout(REQUEST_DEADLINE, &mut reply).await {
-            return answered.map(Some).map_err(|_| ExtractorError::Exited);
-        }
-        if self.abandon(id) {
-            return Ok(None);
-        }
-        reply.await.map(Some).map_err(|_| ExtractorError::Exited)
-    }
-
-    fn send_request(&self, request: PendingRequest) -> Result<u64, ExtractorError> {
         let PendingRequest {
             path,
             max_file_bytes,
             task,
             awaited,
         } = request;
-        let mut connection = self.connection.lock();
-        let connection = connection.as_mut().ok_or(ExtractorError::Exited)?;
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        connection.pending = Some((id, awaited));
-        let request = Request {
+        let request = |id| Request {
             id,
             path,
             max_file_bytes,
             task,
         };
-        connection
-            .outgoing
-            .send(request)
-            .map_err(|_| ExtractorError::Exited)?;
-        Ok(id)
-    }
-
-    /// Give up on request `id` and flag its worker unresponsive; false when the
-    /// request was already answered or its worker already gone.
-    fn abandon(&self, id: u64) -> bool {
-        let mut connection = self.connection.lock();
-        let Some(connection) = connection.as_mut() else {
-            return false;
-        };
-        if connection
-            .pending
-            .take_if(|(pending, _)| *pending == id)
-            .is_none()
-        {
-            return false;
+        let answered = self
+            .replies
+            .call(request, awaited, reply, Some(REQUEST_DEADLINE))
+            .await;
+        match answered {
+            Ok(answered) => Ok(Some(answered)),
+            Err(CallError::Unresponsive { .. }) => Ok(None),
+            Err(CallError::NotRunning | CallError::Exited) => Err(ExtractorError::Exited),
         }
-        warn!(target: "assistd::documents::worker", "extraction worker missed a request's deadline");
-        if let Some(unresponsive) = connection.unresponsive.take() {
-            let _ = unresponsive.send(());
-        }
-        true
     }
 
     pub(crate) fn set_readiness(&self, readiness: Result<(), NotReady>) {
@@ -207,19 +163,13 @@ impl Extractor {
         &self,
         outgoing: mpsc::UnboundedSender<Request>,
     ) -> oneshot::Receiver<()> {
-        let (unresponsive_tx, unresponsive_rx) = oneshot::channel();
-        *self.connection.lock() = Some(Connection {
-            outgoing,
-            pending: None,
-            unresponsive: Some(unresponsive_tx),
-        });
-        unresponsive_rx
+        self.replies.connect(outgoing)
     }
 
     /// The worker is gone: no worker is ready, and its pending request fails.
     pub(crate) fn disconnect(&self) {
         self.set_readiness(Err(NotReady::Starting));
-        self.connection.lock().take();
+        self.replies.disconnect();
     }
 
     /// Act on one message from the worker: it is ready, or it answered. An answer
@@ -228,28 +178,22 @@ impl Extractor {
         match message {
             FromWorker::Ready => self.set_readiness(Ok(())),
             FromWorker::Reply { id, extraction } => {
-                let awaited =
-                    self.take_pending(id, |awaited| matches!(awaited, Awaited::Extraction(_)));
+                let awaited = self
+                    .replies
+                    .take_if(id, |awaited| matches!(awaited, Awaited::Extraction(_)));
                 if let Some(Awaited::Extraction(reply)) = awaited {
                     let _ = reply.send(extraction.capped());
                 }
             }
             FromWorker::Rendered { id, page } => {
-                let awaited = self.take_pending(id, |awaited| matches!(awaited, Awaited::Page(_)));
+                let awaited = self
+                    .replies
+                    .take_if(id, |awaited| matches!(awaited, Awaited::Page(_)));
                 if let Some(Awaited::Page(reply)) = awaited {
                     let _ = reply.send(page.capped());
                 }
             }
         }
-    }
-
-    /// The pending request when it is `id` and `expects` the answer that arrived.
-    fn take_pending(&self, id: u64, expects: impl Fn(&Awaited) -> bool) -> Option<Awaited> {
-        let mut connection = self.connection.lock();
-        let pending = &mut connection.as_mut()?.pending;
-        pending
-            .take_if(|(pending, awaited)| *pending == id && expects(awaited))
-            .map(|(_, awaited)| awaited)
     }
 }
 

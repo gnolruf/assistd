@@ -1,6 +1,6 @@
 //! Helpers shared across the workspace: backoff and restarts, path, file, HTTP, text, binary sniffing,
-//! terminal-escaping and duration utilities, token counting, Hugging Face file IDs, readiness and child-server
-//! supervision.
+//! terminal-escaping and duration utilities, token counting, Hugging Face file IDs, readiness, and child-server and
+//! pipe-worker supervision.
 
 pub mod backoff;
 pub mod binary;
@@ -11,6 +11,7 @@ pub mod http;
 pub mod log_lines;
 pub mod net;
 pub mod path;
+pub mod pipe_worker;
 pub mod process_group;
 pub mod program;
 pub mod readiness;
