@@ -1,20 +1,17 @@
 //! Handlers for the `Memory*` variants of `Request`.
 
-use std::future::Future;
+use std::time::Duration;
 
-use tracing::warn;
-
-use assistd_embed::{BATCH_SIZE, Embedder, embed_rows};
-use assistd_ipc::{Event, EventBody, ReindexKind};
-use assistd_memory::{
-    ChunkLocator, ChunkSource, EmbeddingQueue, EmbeddingTarget, MemoryError, MemoryId,
-    SessionScope, UnindexedRows,
-};
+use assistd_ipc::{Event, EventBody};
+use assistd_memory::{ChunkLocator, MemoryId, SessionScope, UnindexedRows};
 use assistd_tools::DEFAULT_SEARCH_LIMIT;
 
 use super::memory_stack::MemoryStack;
 use super::{DispatchError, FailedStep, wire_role, wire_timestamp};
 use crate::bus::EventSink;
+
+/// How often a reindex request counts the rows still waiting.
+const REINDEX_COUNT_INTERVAL: Duration = Duration::from_secs(1);
 
 impl MemoryStack {
     pub(super) async fn handle_semantic_search(
@@ -151,168 +148,44 @@ impl MemoryStack {
         Ok(())
     }
 
-    /// Embed every memory and chunk lacking an embedding under the current
-    /// model, rows marked unembeddable included, streaming `ReindexProgress`.
-    /// Per-item failures are logged and counted as done.
+    /// Clear the refusal marks, wake the embedding worker, and stream the rows still
+    /// waiting as `ReindexProgress` until none is or the client leaves.
     pub(super) async fn handle_memory_reindex(
         &self,
         id: String,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let embedder = self.embedder.get().context("reindex failed")?;
-        let unindexed = self
-            .unindexed_rows_with_marks_cleared()
+        self.embedder.get().context("reindex failed")?;
+        self.embedding_queue
+            .clear_unembeddable()
             .await
-            .context("reindex: count missing rows")?;
-        let chunks_total = u32::try_from(
-            unindexed
-                .message_chunks
-                .saturating_add(unindexed.document_chunks),
-        )
-        .unwrap_or(u32::MAX);
-        let memories_total = u32::try_from(unindexed.memories).unwrap_or(u32::MAX);
-
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::ReindexProgress {
-                    kind: ReindexKind::Chunks,
-                    done: 0,
-                    total: chunks_total,
-                },
-            ))
-            .await;
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::ReindexProgress {
-                    kind: ReindexKind::Memories,
-                    done: 0,
-                    total: memories_total,
-                },
-            ))
-            .await;
-
-        let queue = self.embedding_queue.as_ref();
-        let embedder = embedder.as_ref();
-        let mut chunks = KindProgress::new(&id, &tx, ReindexKind::Chunks, chunks_total);
-        for source in [ChunkSource::Message, ChunkSource::Document] {
-            reindex_items(
-                embedder,
-                queue,
-                &mut chunks,
-                |after, limit| queue.chunks_missing_embedding(source, after, limit),
-                EmbeddingTarget::Chunk,
-            )
-            .await
-            .context("reindex: list missing chunks")?;
-        }
-        reindex_items(
-            embedder,
-            queue,
-            &mut KindProgress::new(&id, &tx, ReindexKind::Memories, memories_total),
-            |after, limit| queue.memories_missing_embedding(after, limit),
-            EmbeddingTarget::Memory,
-        )
-        .await
-        .context("reindex: list missing memories")?;
-
-        Ok(())
-    }
-
-    async fn unindexed_rows_with_marks_cleared(&self) -> Result<UnindexedRows, MemoryError> {
-        self.embedding_queue.clear_unembeddable().await?;
-        self.embedding_queue.count_missing().await
-    }
-}
-
-/// Progress through the `total` rows of one [`ReindexKind`], streamed
-/// to `tx` as `ReindexProgress` events.
-struct KindProgress<'a> {
-    id: &'a str,
-    tx: &'a EventSink,
-    kind: ReindexKind,
-    total: u32,
-    done: u32,
-}
-
-impl<'a> KindProgress<'a> {
-    fn new(id: &'a str, tx: &'a EventSink, kind: ReindexKind, total: u32) -> Self {
-        Self {
-            id,
-            tx,
-            kind,
-            total,
-            done: 0,
+            .context("reindex: clear refusal marks")?;
+        self.embed_wake.notify_one();
+        let mut reported = None;
+        loop {
+            let waiting = self
+                .embedding_queue
+                .count_missing()
+                .await
+                .context("reindex: count waiting rows")?;
+            if reported != Some(waiting) {
+                let body = EventBody::ReindexProgress {
+                    message_chunks: waiting.message_chunks,
+                    document_chunks: waiting.document_chunks,
+                    memories: waiting.memories,
+                };
+                if tx.send(Event::new(id.clone(), body)).await.is_err() {
+                    return Ok(());
+                }
+                reported = Some(waiting);
+            }
+            if waiting == UnindexedRows::default() {
+                return Ok(());
+            }
+            tokio::select! {
+                () = tx.closed() => return Ok(()),
+                () = tokio::time::sleep(REINDEX_COUNT_INTERVAL) => {}
+            }
         }
     }
-
-    fn remaining(&self) -> usize {
-        usize::try_from(self.total - self.done).unwrap_or(usize::MAX)
-    }
-
-    async fn advance(&mut self, rows: usize) {
-        self.done = self
-            .done
-            .saturating_add(u32::try_from(rows).unwrap_or(u32::MAX));
-        let _ = self
-            .tx
-            .send(Event::new(
-                self.id.to_string(),
-                EventBody::ReindexProgress {
-                    kind: self.kind,
-                    done: self.done,
-                    total: self.total,
-                },
-            ))
-            .await;
-    }
-}
-
-/// Embed and store rows until `progress` reaches its total, listed a page at a time
-/// in id order. Failed embeds and stores are logged; a listing failure aborts.
-async fn reindex_items<Id, L, LFut>(
-    embedder: &dyn Embedder,
-    queue: &dyn EmbeddingQueue,
-    progress: &mut KindProgress<'_>,
-    list: L,
-    to_target: fn(Id) -> EmbeddingTarget,
-) -> Result<(), MemoryError>
-where
-    Id: Copy,
-    L: Fn(Option<Id>, usize) -> LFut,
-    LFut: Future<Output = Result<Vec<(Id, String)>, MemoryError>>,
-{
-    let mut after = None;
-    while progress.remaining() > 0 {
-        let batch = list(after, progress.remaining().min(BATCH_SIZE)).await?;
-        let Some(&(last_id, _)) = batch.last() else {
-            break;
-        };
-        after = Some(last_id);
-        let row_count = batch.len();
-        let rows = batch
-            .into_iter()
-            .map(|(id, text)| (to_target(id), text))
-            .collect();
-        let embedded = embed_rows(embedder, rows).await;
-        if let Some(e) = embedded.deferred {
-            warn!(
-                target: "assistd::memory",
-                kind = progress.kind.as_str(),
-                error = %e,
-                "reindex: embedding failed; rows stay unindexed"
-            );
-        }
-        if let Err(e) = queue.store_embeddings(embedded.embeddings).await {
-            warn!(
-                target: "assistd::memory",
-                kind = progress.kind.as_str(),
-                error = %e,
-                "reindex: store embeddings failed"
-            );
-        }
-        progress.advance(row_count).await;
-    }
-    Ok(())
 }

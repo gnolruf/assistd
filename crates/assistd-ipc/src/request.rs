@@ -158,8 +158,8 @@ pub enum RequestBody {
         #[serde(default)]
         limit: u32,
     },
-    /// Embed every row lacking an embedding under the current model. Emits `ReindexProgress`es,
-    /// then `Done`.
+    /// Have the embedding worker retry the rows it marked as refused. Emits `ReindexProgress`es
+    /// until no row waits to be embedded, then `Done`.
     MemoryReindex,
     /// Report the document index and every index root. Emits `DocumentIndex`, one
     /// `DocumentRoot` per `documents.roots` entry, then `Done`.

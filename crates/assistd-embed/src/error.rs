@@ -1,7 +1,5 @@
 //! Embedding client errors.
 
-use std::sync::Arc;
-
 use assistd_utils::http::BodyError;
 use assistd_utils::readiness::NotReady;
 use thiserror::Error;
@@ -63,10 +61,6 @@ pub enum EmbedError {
     /// The server returned a vector holding a NaN or infinite component.
     #[error("embed server returned a vector with a non-finite component")]
     NonFinite,
-
-    /// The batch this input was part of failed for a reason not tied to any one input.
-    #[error("embed batch failed: {0}")]
-    BatchFailed(Arc<EmbedError>),
 }
 
 impl EmbedError {

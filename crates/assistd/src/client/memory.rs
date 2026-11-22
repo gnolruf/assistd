@@ -4,7 +4,7 @@
 use std::io::{self, Write};
 
 use anyhow::Result;
-use assistd_ipc::{EventBody, ReindexKind, Request, RequestBody};
+use assistd_ipc::{EventBody, Request, RequestBody};
 use assistd_utils::terminal_text::{escape_controls, escape_controls_single_line};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
@@ -45,12 +45,11 @@ pub(crate) enum MemoryAction {
     Forget { id: i64 },
     /// Remove `key` from the store. No-op if absent.
     Delete { key: String },
-    /// Re-embed every memory and transcript chunk that has no embedding under the
-    /// daemon's configured model, e.g. after a model swap or embedding outage.
-    /// Prints a progress line as each item completes.
+    /// Have the daemon retry the memories and chunks it marked as impossible to
+    /// embed, then wait until nothing is left to embed. Prints how many rows still
+    /// wait; interrupting stops the report, not the embedding.
     Reindex {
-        /// Suppress the per-item progress lines; print only the final
-        /// summary. Useful in scripts.
+        /// Print nothing while waiting. Useful in scripts.
         #[arg(long)]
         quiet: bool,
     },
@@ -86,7 +85,7 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
     let reindex_quiet = matches!(&args.action, MemoryAction::Reindex { quiet: true });
 
     let req = args.action.into_request(Uuid::new_v4().to_string());
-    let mut last_reindex_kind: Option<ReindexKind> = None;
+    let mut reindex_reported = false;
     run_one_shot(req, |event| {
         match &event.body {
             EventBody::SemanticHit { message_id, session_id, timestamp, role, content, similarity, .. } => {
@@ -132,10 +131,13 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
                 writeln!(io::stderr(), "no memory with id={id}")?;
                 std::process::exit(2);
             }
-            EventBody::ReindexProgress { kind, done, total } if !reindex_quiet => {
-                print_reindex_progress(*kind, *done, *total, &mut last_reindex_kind);
+            EventBody::ReindexProgress { message_chunks, document_chunks, memories }
+                if !reindex_quiet =>
+            {
+                reindex_reported = true;
+                print_reindex_progress(*message_chunks, *document_chunks, *memories);
             }
-            EventBody::Done if last_reindex_kind.is_some() && !reindex_quiet => {
+            EventBody::Done if reindex_reported => {
                 writeln!(io::stderr())?;
             }
             _ => {}
@@ -145,19 +147,13 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
     .await
 }
 
-/// Overwrite the stderr progress line in place, starting a new line when
-/// the reindex moves on to another kind.
-fn print_reindex_progress(
-    kind: ReindexKind,
-    done: u32,
-    total: u32,
-    last_kind: &mut Option<ReindexKind>,
-) {
+/// Overwrite the stderr progress line in place with the rows still waiting.
+fn print_reindex_progress(message_chunks: u64, document_chunks: u64, memories: u64) {
     let mut err = io::stderr();
-    if last_kind.is_some_and(|last| last != kind) {
-        let _ = writeln!(err);
-    }
-    *last_kind = Some(kind);
-    let _ = write!(err, "\rreindex {kind}: {done}/{total}");
+    let _ = write!(
+        err,
+        "\rreindex: {message_chunks} message chunks, {document_chunks} document chunks, \
+         {memories} memories waiting\x1b[K"
+    );
     let _ = err.flush();
 }

@@ -77,30 +77,6 @@ pub struct TurnStats {
     pub tokens: u64,
 }
 
-/// Which table a [`EventBody::ReindexProgress`] item belongs to.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ReindexKind {
-    Chunks,
-    Memories,
-}
-
-impl ReindexKind {
-    /// The wire spelling.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ReindexKind::Chunks => "chunks",
-            ReindexKind::Memories => "memories",
-        }
-    }
-}
-
-impl fmt::Display for ReindexKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad(self.as_str())
-    }
-}
-
 /// Daemon-to-client event, one JSON line: `id` beside the fields of `body`. A response stream
 /// ends with exactly one terminal [`EventBody::Done`] or [`EventBody::Error`]; a
 /// [`RequestBody::Subscribe`](crate::RequestBody::Subscribe) stream never ends.
@@ -254,11 +230,12 @@ pub enum EventBody {
     },
     /// Result of `MemoryForget`; `deleted: false` with no `key` means no row had that id.
     MemoryForgetResult { deleted: bool, key: Option<String> },
-    /// Per-item progress of a `MemoryReindex` run.
+    /// The rows still waiting to be embedded during a `MemoryReindex`, sent at first
+    /// and each time a count changes.
     ReindexProgress {
-        kind: ReindexKind,
-        done: u32,
-        total: u32,
+        message_chunks: u64,
+        document_chunks: u64,
+        memories: u64,
     },
     /// The document index as a whole, sent first in answer to `DocumentsStatus`.
     DocumentIndex {

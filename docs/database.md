@@ -368,8 +368,10 @@ resumed, saying which.
   A chunk or memory with no row here is pending, and the background
   embedding worker fills it in; a memory's vector is only stored if its
   value hasn't changed since it was read for embedding. A row with a
-  `NULL` vector marks text the model rejected, so the worker does not
-  retry it; `assistd memory reindex` clears those marks and tries again.
+  `NULL` vector marks text the model rejected, or that failed alone three
+  times while the server embedded other text, so the worker does not
+  retry it; `assistd memory reindex` clears those marks and wakes the
+  worker.
 - **`document_chunk_fts`**: an FTS5 index of the words of every document
   chunk, for the keyword half of a document search. It is contentless:
   a row carries its chunk's id and the index entries for the chunk's

@@ -71,7 +71,7 @@ flowchart TB
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `SemanticStore`, `TaskStore`.   | `ipc`                                                                            |
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
-| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs, binary-content sniffing, non-blocking regular-file open, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the chat-template token list and its neutraliser for text and JSON, terminal-safe escaping of daemon-supplied text, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, the `ChildServer` supervisor, and the `pipe_worker` supervisor and pending-reply map the extraction and voice workers run under. | none                                                                             |
+| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, the `backlog` loop that drains stored rows lacking their result, tilde expansion, `human_size`, Hugging Face file IDs, binary-content sniffing, non-blocking regular-file open, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the chat-template token list and its neutraliser for text and JSON, terminal-safe escaping of daemon-supplied text, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, the `ChildServer` supervisor, and the `pipe_worker` supervisor and pending-reply map the extraction and voice workers run under. | none                                                                             |
 | `assistd-voice`  | `VoiceInput` (Parakeet STT, Silero VAD and wake-phrase keyword spotting through sherpa-onnx) + `VoiceOutput` (sherpa-onnx TTS, played through rodio) + per-sentence `SpeakDecision` + the Hugging Face downloader that caches their models, run in a supervised `voice-worker` child behind daemon-side proxies. | `config`, `ipc`, `utils`                                                         |
 | `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`. | `config`, `utils`                                                                |
 
@@ -807,7 +807,18 @@ that is stored and `embedding.query_prefix` before a query; callers
 say which of the two a text is and never build a prefix. A pass cut short by the server or the database is retried with
 backoff, so nothing is dropped. A row the server rejects for its own
 content is marked and skipped until `assistd memory reindex` retries
-it. The server is started with `--batch-size 2048 --ubatch-size 2048`,
+it. A batch that fails for any other reason (a server error, a timeout,
+a response that does not decode) is sent again one input at a time. An
+input that then fails alone counts against its row only when the server
+shows that it still works, by embedding a later input of the batch or,
+failing that, a short fixed text; at three counts the row is marked
+like one the server rejects. The counts are kept in memory and a restart
+forgets them. When the server answers nothing, no row is counted and
+the pass stops for a retry. A pass moves past each batch whatever became
+of its rows, so a failing row never holds back the rows behind it.
+`assistd memory reindex` embeds nothing itself: it clears the marks,
+wakes the worker, and reports the rows still waiting until none is or
+the client leaves. The server is started with `--batch-size 2048 --ubatch-size 2048`,
 the tokens one input may hold, ahead of `embedding.custom_args`, which
 may set another count. llama-server's own 512 is too few: of 151,597
 document chunks in one index, 156 came to more, up to 600 tokens.
@@ -826,8 +837,9 @@ embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
 meantime stays pending and is embedded by a later pass.
 
-The worker keeps two backlogs. Message chunks and memories are few and
-feed recall, so every pass embeds them first and at once. Document chunks
+The worker is three backlogs on `assistd-utils`'s `backlog` loop, drained
+in one pass: message chunks, memories, then document chunks. The first
+two are few and feed recall, so every pass embeds them first and at once. Document chunks
 can number in the hundreds of thousands and the embedding server takes
 every CPU thread it is given, so each batch of them waits for a gate that
 `assistd-core` publishes: open unless the user's interaction is open (the
