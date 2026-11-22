@@ -770,7 +770,9 @@ One SQLite database (default: `~/.local/share/assistd/memory.db`)
 holds four schemas: a key/value `MemoryStore` for durable facts, a
 `TranscriptStore` for full per-session transcripts (with branching
 and undo), a `SemanticStore` for embedding-indexed chunks, and a
-`TaskStore` for saved tasks and their runs. Every
+`TaskStore` for saved tasks and their runs. The semantic store is three
+traits, `RecallStore`, `EmbeddingQueue` and `DocumentStore`, and each
+consumer holds only the ones it calls. Every
 write runs in order on the only read-write connection. Document vector
 scans, other vector scans and other reads each get their own read-only
 connection, so a long scan holds up neither a write, a history load

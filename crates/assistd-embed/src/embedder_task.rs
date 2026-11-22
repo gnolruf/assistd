@@ -5,7 +5,7 @@
 use std::future::{Future, pending};
 use std::sync::Arc;
 
-use assistd_memory::{ChunkSource, EmbeddingTarget, MemoryError, SemanticStore};
+use assistd_memory::{ChunkSource, EmbeddingQueue, EmbeddingTarget, MemoryError};
 use assistd_utils::backoff::backoff_delay;
 use thiserror::Error;
 use tokio::sync::{Notify, watch};
@@ -34,7 +34,7 @@ enum PassEnd {
 /// What the worker embeds with and into, and the signals it runs on.
 struct EmbedWorker {
     embedder: Arc<dyn Embedder>,
-    store: Arc<dyn SemanticStore>,
+    store: Arc<dyn EmbeddingQueue>,
     wake: Arc<Notify>,
     documents_gate: watch::Receiver<bool>,
     shutdown: watch::Receiver<bool>,
@@ -123,7 +123,7 @@ impl EmbedWorker {
 /// pass with backoff. It exits on `shutdown` between batches; `store`'s database must outlive it.
 pub fn spawn_embedder_task(
     embedder: Arc<dyn Embedder>,
-    store: Arc<dyn SemanticStore>,
+    store: Arc<dyn EmbeddingQueue>,
     wake: Arc<Notify>,
     documents_gate: watch::Receiver<bool>,
     shutdown: watch::Receiver<bool>,
@@ -166,7 +166,7 @@ async fn gate_open(gate: &mut watch::Receiver<bool>) {
 /// out, `shutdown` flips, or a page has rows left for a later attempt.
 async fn embed_missing_of_kind<Id, L, LFut>(
     embedder: &dyn Embedder,
-    store: &dyn SemanticStore,
+    store: &dyn EmbeddingQueue,
     shutdown: &watch::Receiver<bool>,
     list: L,
     to_target: fn(Id) -> EmbeddingTarget,
@@ -192,7 +192,7 @@ where
 /// left for a later attempt.
 async fn embed_page<Id>(
     embedder: &dyn Embedder,
-    store: &dyn SemanticStore,
+    store: &dyn EmbeddingQueue,
     page: Vec<(Id, String)>,
     to_target: fn(Id) -> EmbeddingTarget,
 ) -> Result<(), PassError> {
@@ -208,8 +208,6 @@ async fn embed_page<Id>(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::ops::Range;
-    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -217,10 +215,7 @@ mod tests {
     use async_trait::async_trait;
 
     use assistd_memory::{
-        AdjacentChunks, ChunkId, ChunkLocator, DocumentHit, DocumentText, Embedding, EmbeddingHit,
-        EmbeddingSpace, EmptyPages, FileStamp, IndexPass, IndexRootCounts, MemoryHit, MemoryId,
-        NoSemanticStore, PageReading, Result as MemoryResult, SessionScope, TranscriptionCounts,
-        UnindexedRows, WaitingPage,
+        ChunkId, Embedding, EmbeddingSpace, MemoryId, Result as MemoryResult, UnindexedRows,
     };
 
     /// The id of the first document chunk a [`Harness`] adds, above every message chunk's.
@@ -303,33 +298,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl SemanticStore for PendingStore {
-        async fn nearest_chunks(
-            &self,
-            _query_vector: Vec<f32>,
-            _top_k: usize,
-            _scope: SessionScope,
-        ) -> MemoryResult<Vec<EmbeddingHit>> {
-            Ok(Vec::new())
-        }
-        async fn search_documents(
-            &self,
-            _query: String,
-            _query_vector: Vec<f32>,
-            _top_k: usize,
-        ) -> MemoryResult<Vec<DocumentHit>> {
-            Ok(Vec::new())
-        }
-        async fn adjacent_chunks(&self, _locator: &ChunkLocator) -> MemoryResult<AdjacentChunks> {
-            Ok(AdjacentChunks::default())
-        }
-        async fn nearest_memories(
-            &self,
-            _query_vector: Vec<f32>,
-            _top_k: usize,
-        ) -> MemoryResult<Vec<MemoryHit>> {
-            Ok(Vec::new())
-        }
+    impl EmbeddingQueue for PendingStore {
         async fn adopt_embedding_space(
             &self,
             _space: &EmbeddingSpace,
@@ -377,77 +346,6 @@ mod tests {
         }
         async fn clear_unembeddable(&self) -> MemoryResult<u64> {
             Ok(0)
-        }
-        async fn begin_index_pass(&self, root: &Path) -> MemoryResult<IndexPass> {
-            NoSemanticStore.begin_index_pass(root).await
-        }
-        async fn changed_documents(
-            &self,
-            pass: IndexPass,
-            files: Vec<(PathBuf, FileStamp)>,
-        ) -> MemoryResult<Vec<(PathBuf, FileStamp)>> {
-            NoSemanticStore.changed_documents(pass, files).await
-        }
-        async fn index_document(
-            &self,
-            pass: IndexPass,
-            path: PathBuf,
-            stamp: FileStamp,
-            pages: Vec<String>,
-            empty_pages: EmptyPages,
-        ) -> MemoryResult<Vec<ChunkId>> {
-            NoSemanticStore
-                .index_document(pass, path, stamp, pages, empty_pages)
-                .await
-        }
-        async fn next_waiting_page(&self) -> MemoryResult<Option<WaitingPage>> {
-            NoSemanticStore.next_waiting_page().await
-        }
-        async fn store_page_reading(
-            &self,
-            page: WaitingPage,
-            reading: PageReading,
-        ) -> MemoryResult<Vec<ChunkId>> {
-            NoSemanticStore.store_page_reading(page, reading).await
-        }
-        async fn count_transcriptions(&self) -> MemoryResult<TranscriptionCounts> {
-            NoSemanticStore.count_transcriptions().await
-        }
-        async fn retry_failed_transcriptions(&self) -> MemoryResult<u64> {
-            NoSemanticStore.retry_failed_transcriptions().await
-        }
-        async fn finish_index_pass(&self, pass: IndexPass) -> MemoryResult<u64> {
-            NoSemanticStore.finish_index_pass(pass).await
-        }
-        async fn finish_index_pass_under(
-            &self,
-            pass: IndexPass,
-            paths: Vec<PathBuf>,
-        ) -> MemoryResult<u64> {
-            NoSemanticStore.finish_index_pass_under(pass, paths).await
-        }
-        async fn remove_document(&self, path: &Path) -> MemoryResult<bool> {
-            NoSemanticStore.remove_document(path).await
-        }
-        async fn index_roots(&self) -> MemoryResult<Vec<PathBuf>> {
-            NoSemanticStore.index_roots().await
-        }
-        async fn index_root_counts(&self) -> MemoryResult<Vec<IndexRootCounts>> {
-            NoSemanticStore.index_root_counts().await
-        }
-        async fn remove_index_root(&self, root: &Path) -> MemoryResult<u64> {
-            NoSemanticStore.remove_index_root(root).await
-        }
-        async fn count_document_chunks(&self) -> MemoryResult<u64> {
-            NoSemanticStore.count_document_chunks().await
-        }
-        async fn document_text(
-            &self,
-            path: &Path,
-            page: usize,
-            bytes: Range<usize>,
-        ) -> MemoryResult<Option<DocumentText>> {
-            NoSemanticStore.document_text(path, page, bytes).await
         }
     }
 

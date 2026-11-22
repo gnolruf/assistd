@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_config::{AbsoluteDir, DocumentsConfig};
-use assistd_memory::SemanticStore;
+use assistd_memory::DocumentStore;
 use assistd_tools::SandboxInfo;
 use assistd_tools::policy::{PathGuards, on_blocking_pool};
 use parking_lot::Mutex;
@@ -265,7 +265,7 @@ async fn index_whole_root(
 }
 
 /// Forget every stored index root that `roots` does not list, with its documents.
-pub async fn remove_dropped_roots(store: &dyn SemanticStore, roots: &[AbsoluteDir]) {
+pub async fn remove_dropped_roots(store: &dyn DocumentStore, roots: &[AbsoluteDir]) {
     let stored = match store.index_roots().await {
         Ok(stored) => stored,
         Err(error) => {

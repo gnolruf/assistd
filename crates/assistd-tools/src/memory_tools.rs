@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use assistd_embed::{Embedder, EmbedderHandle};
 use assistd_memory::{
-    ChunkLocator, EmbeddingHit, MemoryHit, SemanticStore, SessionId, SessionScope, TranscriptStore,
+    ChunkLocator, EmbeddingHit, MemoryHit, RecallStore, SessionId, SessionScope, TranscriptStore,
 };
 use async_trait::async_trait;
 use regex::Regex;
@@ -44,7 +44,7 @@ pub struct RememberTool {
     ops: Arc<MemoryOps>,
     embed_wake: Arc<Notify>,
     embedder: Arc<EmbedderHandle>,
-    semantic: Arc<dyn SemanticStore>,
+    semantic: Arc<dyn RecallStore>,
 }
 
 /// One validated `remember` call.
@@ -77,7 +77,7 @@ impl RememberTool {
         ops: Arc<MemoryOps>,
         embed_wake: Arc<Notify>,
         embedder: Arc<EmbedderHandle>,
-        semantic: Arc<dyn SemanticStore>,
+        semantic: Arc<dyn RecallStore>,
     ) -> Self {
         Self {
             ops,
@@ -211,7 +211,7 @@ impl Tool for RememberTool {
 #[derive(Debug)]
 pub struct ReminisceTool {
     embedder: Arc<EmbedderHandle>,
-    semantic: Arc<dyn SemanticStore>,
+    semantic: Arc<dyn RecallStore>,
     transcripts: Arc<dyn TranscriptStore>,
     current_session: watch::Receiver<SessionId>,
 }
@@ -249,7 +249,7 @@ impl ReminisceTool {
     /// in-context messages of the session `current_session` names at call time.
     pub fn new(
         embedder: Arc<EmbedderHandle>,
-        semantic: Arc<dyn SemanticStore>,
+        semantic: Arc<dyn RecallStore>,
         transcripts: Arc<dyn TranscriptStore>,
         current_session: watch::Receiver<SessionId>,
     ) -> Self {
@@ -540,15 +540,13 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolError> {
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        AdjacentChunks, BranchId, BranchSummary, ChunkId, ChunkSource, DocumentHit, DocumentText,
-        Embedding, EmbeddingSpace, EmbeddingTarget, EmptyPages, FileStamp, IndexPass,
-        IndexRootCounts, MemoryError, MemoryId, MemoryStore, NoSemanticStore, PageReading,
+        AdjacentChunks, BranchId, BranchSummary, DocumentHit, DocumentText, Embedding,
+        EmbeddingQueue, EmbeddingTarget, MemoryError, MemoryStore, NoSemanticStore,
         PersistedMessage, Seq, SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore,
-        TranscriptionCounts, UnindexedRows, WaitingPage,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -565,7 +563,7 @@ mod tests {
         )))
     }
 
-    fn no_semantic() -> Arc<dyn SemanticStore> {
+    fn no_semantic() -> Arc<dyn RecallStore> {
         Arc::new(NoSemanticStore)
     }
 
@@ -595,7 +593,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl SemanticStore for ScopeSpy {
+    impl RecallStore for ScopeSpy {
         async fn nearest_chunks(
             &self,
             _q: Vec<f32>,
@@ -626,106 +624,13 @@ mod tests {
         ) -> Result<Vec<MemoryHit>, MemoryError> {
             Ok(Vec::new())
         }
-        async fn adopt_embedding_space(
-            &self,
-            _space: &EmbeddingSpace,
-        ) -> Result<Option<EmbeddingSpace>, MemoryError> {
-            Ok(None)
-        }
-        async fn count_missing(&self) -> Result<UnindexedRows, MemoryError> {
-            Ok(UnindexedRows::default())
-        }
-        async fn memories_missing_embedding(
-            &self,
-            _after: Option<MemoryId>,
-            _limit: usize,
-        ) -> Result<Vec<(MemoryId, String)>, MemoryError> {
-            Ok(Vec::new())
-        }
-        async fn chunks_missing_embedding(
-            &self,
-            _source: ChunkSource,
-            _after: Option<ChunkId>,
-            _limit: usize,
-        ) -> Result<Vec<(ChunkId, String)>, MemoryError> {
-            Ok(Vec::new())
-        }
-        async fn store_embeddings(&self, _embeddings: Vec<Embedding>) -> Result<(), MemoryError> {
-            Ok(())
-        }
-        async fn clear_unembeddable(&self) -> Result<u64, MemoryError> {
-            Ok(0)
-        }
-        async fn begin_index_pass(&self, root: &Path) -> Result<IndexPass, MemoryError> {
-            NoSemanticStore.begin_index_pass(root).await
-        }
-        async fn changed_documents(
-            &self,
-            pass: IndexPass,
-            files: Vec<(PathBuf, FileStamp)>,
-        ) -> Result<Vec<(PathBuf, FileStamp)>, MemoryError> {
-            NoSemanticStore.changed_documents(pass, files).await
-        }
-        async fn index_document(
-            &self,
-            pass: IndexPass,
-            path: PathBuf,
-            stamp: FileStamp,
-            pages: Vec<String>,
-            empty_pages: EmptyPages,
-        ) -> Result<Vec<ChunkId>, MemoryError> {
-            NoSemanticStore
-                .index_document(pass, path, stamp, pages, empty_pages)
-                .await
-        }
-        async fn next_waiting_page(&self) -> Result<Option<WaitingPage>, MemoryError> {
-            NoSemanticStore.next_waiting_page().await
-        }
-        async fn store_page_reading(
-            &self,
-            page: WaitingPage,
-            reading: PageReading,
-        ) -> Result<Vec<ChunkId>, MemoryError> {
-            NoSemanticStore.store_page_reading(page, reading).await
-        }
-        async fn count_transcriptions(&self) -> Result<TranscriptionCounts, MemoryError> {
-            NoSemanticStore.count_transcriptions().await
-        }
-        async fn retry_failed_transcriptions(&self) -> Result<u64, MemoryError> {
-            NoSemanticStore.retry_failed_transcriptions().await
-        }
-        async fn finish_index_pass(&self, pass: IndexPass) -> Result<u64, MemoryError> {
-            NoSemanticStore.finish_index_pass(pass).await
-        }
-        async fn finish_index_pass_under(
-            &self,
-            pass: IndexPass,
-            paths: Vec<PathBuf>,
-        ) -> Result<u64, MemoryError> {
-            NoSemanticStore.finish_index_pass_under(pass, paths).await
-        }
-        async fn remove_document(&self, path: &Path) -> Result<bool, MemoryError> {
-            NoSemanticStore.remove_document(path).await
-        }
-        async fn index_roots(&self) -> Result<Vec<PathBuf>, MemoryError> {
-            NoSemanticStore.index_roots().await
-        }
-        async fn index_root_counts(&self) -> Result<Vec<IndexRootCounts>, MemoryError> {
-            NoSemanticStore.index_root_counts().await
-        }
-        async fn remove_index_root(&self, root: &Path) -> Result<u64, MemoryError> {
-            NoSemanticStore.remove_index_root(root).await
-        }
-        async fn count_document_chunks(&self) -> Result<u64, MemoryError> {
-            NoSemanticStore.count_document_chunks().await
-        }
         async fn document_text(
             &self,
-            path: &Path,
-            page: usize,
-            bytes: Range<usize>,
+            _path: &Path,
+            _page: usize,
+            _bytes: Range<usize>,
         ) -> Result<Option<DocumentText>, MemoryError> {
-            NoSemanticStore.document_text(path, page, bytes).await
+            Ok(None)
         }
     }
 

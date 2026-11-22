@@ -319,18 +319,18 @@ pub struct TranscriptionCounts {
 }
 
 /// One walk over an index root's files or over part of them, from
-/// [`SemanticStore::begin_index_pass`] to [`SemanticStore::finish_index_pass`] or
-/// [`SemanticStore::finish_index_pass_under`]. At most one pass per root runs at a time.
+/// [`DocumentStore::begin_index_pass`] to [`DocumentStore::finish_index_pass`] or
+/// [`DocumentStore::finish_index_pass_under`]. At most one pass per root runs at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexPass {
     pub(crate) root: i64,
     pub(crate) pass: i64,
 }
 
-/// Top-K vector retrieval over embedded chunks and memories, and the index of
-/// local documents with its search by vector and keyword.
+/// Top-K retrieval over embedded chunks, memories and documents, and reads of the
+/// text around a hit.
 #[async_trait]
-pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
+pub trait RecallStore: fmt::Debug + Send + Sync + 'static {
     /// Top-K messages in `scope` by their best chunk's cosine to the L2-normalised
     /// `query_vector`, each hit carrying that chunk's text. Messages outside `scope`
     /// are dropped before ranking, so never count toward `top_k`.
@@ -363,6 +363,20 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         top_k: usize,
     ) -> Result<Vec<MemoryHit>>;
 
+    /// The stored text of page `page`, counted from zero, of the document indexed at
+    /// `path`, within `bytes` of that page: narrowed to whole characters, and empty
+    /// past the page's end or the last page. `None` when none is indexed there.
+    async fn document_text(
+        &self,
+        path: &Path,
+        page: usize,
+        bytes: Range<usize>,
+    ) -> Result<Option<DocumentText>>;
+}
+
+/// The rows still to embed and the vectors stored for them, all in one embedding space.
+#[async_trait]
+pub trait EmbeddingQueue: fmt::Debug + Send + Sync + 'static {
     /// Record `space` as the one every stored vector is in. When a different space was
     /// recorded, drop every vector and unembeddable mark and return that space. Must
     /// complete before anything from `space` is stored or searched.
@@ -396,7 +410,12 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
 
     /// Clear every unembeddable mark, returning how many, so those rows are missing again.
     async fn clear_unembeddable(&self) -> Result<u64>;
+}
 
+/// The index of local documents: the passes over its roots that fill it, the pages
+/// waiting for transcription, and what it holds.
+#[async_trait]
+pub trait DocumentStore: fmt::Debug + Send + Sync + 'static {
     /// Start a pass over the files under index root `root`, registering the root
     /// when it is new.
     async fn begin_index_pass(&self, root: &Path) -> Result<IndexPass>;
@@ -464,24 +483,19 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
 
     /// How many chunks the stored documents are cut into.
     async fn count_document_chunks(&self) -> Result<u64>;
-
-    /// The stored text of page `page`, counted from zero, of the document indexed at
-    /// `path`, within `bytes` of that page: narrowed to whole characters, and empty
-    /// past the page's end or the last page. `None` when none is indexed there.
-    async fn document_text(
-        &self,
-        path: &Path,
-        page: usize,
-        bytes: Range<usize>,
-    ) -> Result<Option<DocumentText>>;
 }
+
+/// A store that is all three parts at once, as the daemon hands one to their consumers.
+pub trait SemanticStore: RecallStore + EmbeddingQueue + DocumentStore {}
+
+impl<S: RecallStore + EmbeddingQueue + DocumentStore> SemanticStore for S {}
 
 /// No-op store: writes are discarded and searches find nothing.
 #[derive(Debug)]
 pub struct NoSemanticStore;
 
 #[async_trait]
-impl SemanticStore for NoSemanticStore {
+impl RecallStore for NoSemanticStore {
     async fn nearest_chunks(
         &self,
         _query_vector: Vec<f32>,
@@ -508,6 +522,18 @@ impl SemanticStore for NoSemanticStore {
     ) -> Result<Vec<MemoryHit>> {
         Ok(Vec::new())
     }
+    async fn document_text(
+        &self,
+        _path: &Path,
+        _page: usize,
+        _bytes: Range<usize>,
+    ) -> Result<Option<DocumentText>> {
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl EmbeddingQueue for NoSemanticStore {
     async fn adopt_embedding_space(
         &self,
         _space: &EmbeddingSpace,
@@ -538,6 +564,10 @@ impl SemanticStore for NoSemanticStore {
     async fn clear_unembeddable(&self) -> Result<u64> {
         Ok(0)
     }
+}
+
+#[async_trait]
+impl DocumentStore for NoSemanticStore {
     async fn begin_index_pass(&self, _root: &Path) -> Result<IndexPass> {
         Ok(IndexPass { root: 0, pass: 0 })
     }
@@ -594,13 +624,5 @@ impl SemanticStore for NoSemanticStore {
     }
     async fn count_document_chunks(&self) -> Result<u64> {
         Ok(0)
-    }
-    async fn document_text(
-        &self,
-        _path: &Path,
-        _page: usize,
-        _bytes: Range<usize>,
-    ) -> Result<Option<DocumentText>> {
-        Ok(None)
     }
 }

@@ -156,19 +156,19 @@ pub(super) fn prepare(
 
 async fn run(startup: DocumentsStartup, state: Arc<AppState>, shutdown: watch::Receiver<bool>) {
     let roots = &state.config.documents.roots;
-    remove_dropped_roots(state.memory.semantic.as_ref(), roots).await;
+    remove_dropped_roots(state.memory.document_store.as_ref(), roots).await;
     let Some((worker, passes)) = startup.indexing else {
         return;
     };
     let extractor = &state.subsystems.documents;
     let changes = extractor.subscribe_readiness();
     let deps = IndexDeps {
-        store: Arc::clone(&state.memory.semantic),
+        store: Arc::clone(&state.memory.document_store),
         extractor: Arc::clone(extractor),
         embed_wake: Arc::clone(&state.memory.embed_wake),
     };
     let transcription = startup.ocr.map(|ocr| TranscriptionDeps {
-        store: Arc::clone(&state.memory.semantic),
+        store: Arc::clone(&state.memory.document_store),
         extractor: Arc::clone(extractor),
         presence: Arc::clone(&state.subsystems.presence),
         embed_wake: Arc::clone(&state.memory.embed_wake),

@@ -269,7 +269,8 @@ fn docs_command(
     config.documents.enabled.then(|| {
         DocsCommand::new(
             Arc::clone(embedder),
-            Arc::clone(semantic),
+            semantic.clone(),
+            semantic.clone(),
             config.embedding.top_k.get() as usize,
             output_cap.spec(),
         )

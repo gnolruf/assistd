@@ -1,4 +1,4 @@
-//! SQLite-backed [`SemanticStore`] over one embeddings table each for message
+//! SQLite-backed [`SemanticStore`](crate::SemanticStore) over one embeddings table each for message
 //! chunks, document chunks and memories, and a keyword index of document chunks.
 
 use std::collections::HashMap;
@@ -16,9 +16,10 @@ use rusqlite::{OptionalExtension, Params, Row, Transaction};
 
 use crate::{
     AdjacentChunks, ChunkId, ChunkLocator, ChunkSource, ContextChunk, DocumentHit, DocumentId,
-    DocumentText, Embedding, EmbeddingHit, EmbeddingSpace, EmbeddingTarget, EmptyPages, FileStamp,
-    IndexPass, IndexRootCounts, MemoryHit, MemoryId, MessageId, PageReading, Result, SemanticStore,
-    SessionId, SessionScope, TranscriptionCounts, UnindexedRows, WaitingPage,
+    DocumentStore, DocumentText, Embedding, EmbeddingHit, EmbeddingQueue, EmbeddingSpace,
+    EmbeddingTarget, EmptyPages, FileStamp, IndexPass, IndexRootCounts, MemoryHit, MemoryId,
+    MessageId, PageReading, RecallStore, Result, SessionId, SessionScope, TranscriptionCounts,
+    UnindexedRows, WaitingPage,
 };
 
 use super::connection::SqliteHandle;
@@ -133,7 +134,7 @@ const QUANTISED_STEPS: f32 = 127.0;
 /// Scores the stored vector BLOB against the query; `None` for a BLOB to skip.
 type ScoreBlob = fn(&[f32], &[u8]) -> Option<f32>;
 
-/// SQLite-backed [`SemanticStore`]: a linear scan of one source kind's vectors into a
+/// SQLite-backed [`SemanticStore`](crate::SemanticStore): a linear scan of one source kind's vectors into a
 /// bounded top-K, then one batched lookup of the winners. Document vectors are stored
 /// quantised, so their similarities are approximate; documents rank by keyword as well.
 #[derive(Debug, Clone)]
@@ -149,7 +150,7 @@ impl SqliteSemanticStore {
 }
 
 #[async_trait]
-impl SemanticStore for SqliteSemanticStore {
+impl RecallStore for SqliteSemanticStore {
     async fn nearest_chunks(
         &self,
         query_vector: Vec<f32>,
@@ -223,6 +224,48 @@ impl SemanticStore for SqliteSemanticStore {
             .await
     }
 
+    async fn document_text(
+        &self,
+        path: &Path,
+        page: usize,
+        bytes: Range<usize>,
+    ) -> Result<Option<DocumentText>> {
+        let path = path.to_path_buf();
+        self.handle
+            .read("document_text", move |c| {
+                c.prepare_cached(
+                    "SELECT substr(CAST(p.content AS BLOB), ?3 + 1, ?4),
+                            ifnull(length(CAST(p.content AS BLOB)), 0),
+                            (SELECT count(*) FROM document_pages n WHERE n.document_id = d.id),
+                            d.indexed_at
+                     FROM documents d
+                     LEFT JOIN document_pages p ON p.document_id = d.id AND p.page = ?2
+                     WHERE d.path = ?1",
+                )?
+                .query_row(
+                    rusqlite::params![path.as_os_str().as_bytes(), page, bytes.start, bytes.len()],
+                    |row| {
+                        let within = row.get_ref(0)?.as_blob_or_null()?.unwrap_or_default();
+                        let (skipped, text) = whole_characters(within);
+                        let start = bytes.start + skipped;
+                        Ok(DocumentText {
+                            text: text.to_owned(),
+                            page,
+                            page_count: row.get(2)?,
+                            bytes: start..start + text.len(),
+                            page_bytes: row.get(1)?,
+                            indexed_at: timestamp_at(row, 3)?,
+                        })
+                    },
+                )
+                .optional()
+            })
+            .await
+    }
+}
+
+#[async_trait]
+impl EmbeddingQueue for SqliteSemanticStore {
     async fn adopt_embedding_space(
         &self,
         space: &EmbeddingSpace,
@@ -341,7 +384,10 @@ impl SemanticStore for SqliteSemanticStore {
             })
             .await
     }
+}
 
+#[async_trait]
+impl DocumentStore for SqliteSemanticStore {
     async fn begin_index_pass(&self, root: &Path) -> Result<IndexPass> {
         let root = root.to_path_buf();
         self.handle
@@ -488,45 +534,6 @@ impl SemanticStore for SqliteSemanticStore {
                     [],
                     |r| r.get(0),
                 )
-            })
-            .await
-    }
-
-    async fn document_text(
-        &self,
-        path: &Path,
-        page: usize,
-        bytes: Range<usize>,
-    ) -> Result<Option<DocumentText>> {
-        let path = path.to_path_buf();
-        self.handle
-            .read("document_text", move |c| {
-                c.prepare_cached(
-                    "SELECT substr(CAST(p.content AS BLOB), ?3 + 1, ?4),
-                            ifnull(length(CAST(p.content AS BLOB)), 0),
-                            (SELECT count(*) FROM document_pages n WHERE n.document_id = d.id),
-                            d.indexed_at
-                     FROM documents d
-                     LEFT JOIN document_pages p ON p.document_id = d.id AND p.page = ?2
-                     WHERE d.path = ?1",
-                )?
-                .query_row(
-                    rusqlite::params![path.as_os_str().as_bytes(), page, bytes.start, bytes.len()],
-                    |row| {
-                        let within = row.get_ref(0)?.as_blob_or_null()?.unwrap_or_default();
-                        let (skipped, text) = whole_characters(within);
-                        let start = bytes.start + skipped;
-                        Ok(DocumentText {
-                            text: text.to_owned(),
-                            page,
-                            page_count: row.get(2)?,
-                            bytes: start..start + text.len(),
-                            page_bytes: row.get(1)?,
-                            indexed_at: timestamp_at(row, 3)?,
-                        })
-                    },
-                )
-                .optional()
             })
             .await
     }

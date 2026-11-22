@@ -27,7 +27,7 @@ struct FixedHits {
 }
 
 #[async_trait::async_trait]
-impl SemanticStore for FixedHits {
+impl RecallStore for FixedHits {
     async fn nearest_chunks(
         &self,
         _query_vector: Vec<f32>,
@@ -70,103 +70,6 @@ impl SemanticStore for FixedHits {
     ) -> assistd_memory::Result<AdjacentChunks> {
         NoSemanticStore.adjacent_chunks(locator).await
     }
-    async fn adopt_embedding_space(
-        &self,
-        space: &EmbeddingSpace,
-    ) -> assistd_memory::Result<Option<EmbeddingSpace>> {
-        NoSemanticStore.adopt_embedding_space(space).await
-    }
-    async fn count_missing(&self) -> assistd_memory::Result<UnindexedRows> {
-        NoSemanticStore.count_missing().await
-    }
-    async fn memories_missing_embedding(
-        &self,
-        after: Option<MemoryId>,
-        limit: usize,
-    ) -> assistd_memory::Result<Vec<(MemoryId, String)>> {
-        NoSemanticStore
-            .memories_missing_embedding(after, limit)
-            .await
-    }
-    async fn chunks_missing_embedding(
-        &self,
-        source: ChunkSource,
-        after: Option<ChunkId>,
-        limit: usize,
-    ) -> assistd_memory::Result<Vec<(ChunkId, String)>> {
-        NoSemanticStore
-            .chunks_missing_embedding(source, after, limit)
-            .await
-    }
-    async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> assistd_memory::Result<()> {
-        NoSemanticStore.store_embeddings(embeddings).await
-    }
-    async fn clear_unembeddable(&self) -> assistd_memory::Result<u64> {
-        NoSemanticStore.clear_unembeddable().await
-    }
-    async fn begin_index_pass(&self, root: &Path) -> assistd_memory::Result<IndexPass> {
-        NoSemanticStore.begin_index_pass(root).await
-    }
-    async fn changed_documents(
-        &self,
-        pass: IndexPass,
-        files: Vec<(PathBuf, FileStamp)>,
-    ) -> assistd_memory::Result<Vec<(PathBuf, FileStamp)>> {
-        NoSemanticStore.changed_documents(pass, files).await
-    }
-    async fn index_document(
-        &self,
-        pass: IndexPass,
-        path: PathBuf,
-        stamp: FileStamp,
-        pages: Vec<String>,
-        empty_pages: EmptyPages,
-    ) -> assistd_memory::Result<Vec<ChunkId>> {
-        NoSemanticStore
-            .index_document(pass, path, stamp, pages, empty_pages)
-            .await
-    }
-    async fn next_waiting_page(&self) -> assistd_memory::Result<Option<WaitingPage>> {
-        NoSemanticStore.next_waiting_page().await
-    }
-    async fn store_page_reading(
-        &self,
-        page: WaitingPage,
-        reading: PageReading,
-    ) -> assistd_memory::Result<Vec<ChunkId>> {
-        NoSemanticStore.store_page_reading(page, reading).await
-    }
-    async fn count_transcriptions(&self) -> assistd_memory::Result<TranscriptionCounts> {
-        NoSemanticStore.count_transcriptions().await
-    }
-    async fn retry_failed_transcriptions(&self) -> assistd_memory::Result<u64> {
-        NoSemanticStore.retry_failed_transcriptions().await
-    }
-    async fn finish_index_pass(&self, pass: IndexPass) -> assistd_memory::Result<u64> {
-        NoSemanticStore.finish_index_pass(pass).await
-    }
-    async fn finish_index_pass_under(
-        &self,
-        pass: IndexPass,
-        paths: Vec<PathBuf>,
-    ) -> assistd_memory::Result<u64> {
-        NoSemanticStore.finish_index_pass_under(pass, paths).await
-    }
-    async fn remove_document(&self, path: &Path) -> assistd_memory::Result<bool> {
-        NoSemanticStore.remove_document(path).await
-    }
-    async fn index_roots(&self) -> assistd_memory::Result<Vec<PathBuf>> {
-        NoSemanticStore.index_roots().await
-    }
-    async fn index_root_counts(&self) -> assistd_memory::Result<Vec<IndexRootCounts>> {
-        NoSemanticStore.index_root_counts().await
-    }
-    async fn remove_index_root(&self, root: &Path) -> assistd_memory::Result<u64> {
-        NoSemanticStore.remove_index_root(root).await
-    }
-    async fn count_document_chunks(&self) -> assistd_memory::Result<u64> {
-        NoSemanticStore.count_document_chunks().await
-    }
     async fn document_text(
         &self,
         path: &Path,
@@ -201,7 +104,7 @@ async fn auto_recall_runs_once_per_new_session_with_memories_and_past_chat_point
     memory.embedder = Arc::new(EmbedderHandle::new(Readiness::Ready(Arc::new(
         ConstantEmbedder,
     ))));
-    memory.semantic = Arc::new(FixedHits {
+    memory.recall = Arc::new(FixedHits {
         chunks: vec![
             recall_hit(current, 1, 0.9, "said in this chat"),
             recall_hit(other, 2, 0.9, "strong past match"),

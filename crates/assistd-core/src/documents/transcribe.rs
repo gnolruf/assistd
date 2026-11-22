@@ -8,7 +8,7 @@ use std::time::Duration;
 use assistd_documents::{Extractor, ExtractorError, RenderedPage};
 use assistd_ipc::PresenceState;
 use assistd_llm::{LlamaServerControl, PageTranscriber, TranscribeError, Transcription};
-use assistd_memory::{MemoryError, PageReading, SemanticStore, WaitingPage};
+use assistd_memory::{DocumentStore, MemoryError, PageReading, WaitingPage};
 use assistd_utils::readiness::NotReady;
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -90,7 +90,7 @@ struct RunCounts {
 /// What page transcription reads from and writes to, and the OCR model it reads with.
 #[derive(Debug)]
 pub struct TranscriptionDeps {
-    pub store: Arc<dyn SemanticStore>,
+    pub store: Arc<dyn DocumentStore>,
     pub extractor: Arc<Extractor>,
     pub presence: Arc<PresenceManager>,
     /// Wakes the embedding worker after a document leaves chunks to embed.

@@ -94,11 +94,7 @@ impl TurnService {
     ) -> Result<Vec<MemoryHit>, DispatchError> {
         let top_k = self.deps.embedding_cfg.top_k.get() as usize;
         let floor = self.deps.embedding_cfg.min_similarity.get();
-        let hits = self
-            .deps
-            .semantic
-            .nearest_memories(embedding, top_k)
-            .await?;
+        let hits = self.deps.recall.nearest_memories(embedding, top_k).await?;
         Ok(hits
             .into_iter()
             .filter(|hit| hit.similarity >= floor)
@@ -116,7 +112,7 @@ impl TurnService {
         let floor = self.deps.embedding_cfg.min_similarity.get();
         let hits = self
             .deps
-            .semantic
+            .recall
             .nearest_chunks(embedding, top_k, SessionScope::AllExcept(session))
             .await?;
         Ok(SourcePointer::group(

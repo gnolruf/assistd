@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    ChunkSource, PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, SemanticStore, Seq,
+    ChunkSource, EmbeddingQueue, PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, Seq,
     SqliteSemanticStore,
 };
 
