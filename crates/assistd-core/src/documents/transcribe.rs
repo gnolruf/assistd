@@ -12,7 +12,7 @@ use assistd_memory::{DocumentStore, MemoryError, PageReading, WaitingPage};
 use assistd_utils::readiness::NotReady;
 use parking_lot::Mutex;
 use thiserror::Error;
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use super::indexer::DocumentIndex;
@@ -40,22 +40,15 @@ pub enum TranscriptionRun {
     Stopped(String),
 }
 
-/// Page transcription as the rest of the daemon sees it: where it is told that
-/// pages may wait, and how its last run went.
+/// Page transcription as the rest of the daemon sees it: how its last run went.
 #[derive(Debug, Default)]
 pub struct PageTranscription {
-    pages_may_wait: Notify,
     last_run: Mutex<TranscriptionRun>,
 }
 
 impl PageTranscription {
     pub fn last_run(&self) -> TranscriptionRun {
         self.last_run.lock().clone()
-    }
-
-    /// Have transcription look for waiting pages once the daemon is `Drowsy`.
-    pub(super) fn pages_may_wait(&self) {
-        self.pages_may_wait.notify_one();
     }
 
     fn record(&self, run: TranscriptionRun) {
@@ -93,8 +86,6 @@ pub struct TranscriptionDeps {
     pub store: Arc<dyn DocumentStore>,
     pub extractor: Arc<Extractor>,
     pub presence: Arc<PresenceManager>,
-    /// Wakes the embedding worker after a document leaves chunks to embed.
-    pub embed_wake: Arc<Notify>,
     pub model: BorrowedModel,
     pub transcriber: PageTranscriber,
     /// Says whether the server still has the OCR model loaded.
@@ -148,10 +139,7 @@ impl TranscriptionDeps {
                 PageReading::Text(_) => counts.read += 1,
                 PageReading::Failed => counts.failed += 1,
             }
-            let added = self.store.store_page_reading(page, reading).await?;
-            if !added.is_empty() {
-                self.embed_wake.notify_one();
-            }
+            self.store.store_page_reading(page, reading).await?;
         }
         Ok(())
     }
@@ -224,7 +212,8 @@ impl TranscriptionDeps {
 }
 
 /// Until `shutdown` flips, read the waiting pages with the OCR model whenever the
-/// daemon is `Drowsy`. Pages that failed before wait again, and a run that stops
+/// daemon is `Drowsy` and again when the store signals that more wait. Pages that
+/// failed before wait again, and a run that stops
 /// early is retried in five minutes. The store's database must stay open meanwhile.
 pub async fn transcribe_while_drowsy(
     deps: TranscriptionDeps,
@@ -235,6 +224,7 @@ pub async fn transcribe_while_drowsy(
         warn!(target: "assistd::documents", "failed pages are not tried again: {error}");
     }
     let status = index.transcription();
+    let pages_to_transcribe = deps.store.pages_to_transcribe();
     let mut presence = deps.presence.subscribe();
     loop {
         tokio::select! {
@@ -259,7 +249,7 @@ pub async fn transcribe_while_drowsy(
             biased;
             _ = shutdown.wait_for(|stop| *stop) => return,
             _ = presence.changed() => {}
-            () = status.pages_may_wait.notified(), if !stopped_early => {}
+            () = pages_to_transcribe.notified(), if !stopped_early => {}
             () = tokio::time::sleep(RETRY_DELAY), if stopped_early => {}
         }
     }

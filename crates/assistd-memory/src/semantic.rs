@@ -6,9 +6,11 @@ use std::fs::Metadata;
 use std::ops::Range;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use tokio::sync::Notify;
 
 use crate::{ChunkId, DocumentId, MemoryId, MessageId, PersistedRole, Result, SessionId};
 
@@ -407,6 +409,10 @@ pub trait EmbeddingQueue: fmt::Debug + Send + Sync + 'static {
     async fn adopt_embedding_space(&self, space: &EmbeddingSpace)
     -> Result<Option<EmbeddingSpace>>;
 
+    /// Signalled once a committed write has left a row to embed; a write that
+    /// leaves none does not signal it.
+    fn rows_to_embed(&self) -> Arc<Notify>;
+
     /// Rows neither embedded nor marked unembeddable.
     async fn count_missing(&self) -> Result<UnindexedRows>;
 
@@ -478,6 +484,10 @@ pub trait DocumentStore: fmt::Debug + Send + Sync + 'static {
         pages: Vec<String>,
         empty_pages: EmptyPages,
     ) -> Result<Vec<ChunkId>>;
+
+    /// Signalled once a committed write has left a page waiting for transcription;
+    /// a write that leaves none does not signal it.
+    fn pages_to_transcribe(&self) -> Arc<Notify>;
 
     /// The first page waiting for transcription, by document and then position;
     /// `None` when none waits.
@@ -579,6 +589,9 @@ impl EmbeddingQueue for NoSemanticStore {
     ) -> Result<Option<EmbeddingSpace>> {
         Ok(None)
     }
+    fn rows_to_embed(&self) -> Arc<Notify> {
+        Arc::default()
+    }
     async fn count_missing(&self) -> Result<UnindexedRows> {
         Ok(UnindexedRows::default())
     }
@@ -643,6 +656,9 @@ impl DocumentStore for NoSemanticStore {
         _empty_pages: EmptyPages,
     ) -> Result<Vec<ChunkId>> {
         Ok(Vec::new())
+    }
+    fn pages_to_transcribe(&self) -> Arc<Notify> {
+        Arc::default()
     }
     async fn next_waiting_page(&self) -> Result<Option<WaitingPage>> {
         Ok(None)

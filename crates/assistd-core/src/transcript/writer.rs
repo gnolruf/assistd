@@ -2,13 +2,13 @@
 
 use std::sync::{Arc, OnceLock};
 
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use assistd_llm::CompactionCut;
 use assistd_memory::{
-    AppendedMessage, BranchId, BranchSummary, HistoryScope, MemoryError, PersistedMessage,
-    PersistedRelayStep, TranscriptStore, TurnId, TurnStats,
+    BranchId, BranchSummary, HistoryScope, MemoryError, PersistedMessage, PersistedRelayStep,
+    TranscriptStore, TurnId, TurnStats,
 };
 
 use super::seq_ledger::{RowRole, SeqLedger, SharedLedger};
@@ -70,19 +70,13 @@ pub(super) enum WriteCommand {
 #[derive(Debug)]
 pub(super) struct TranscriptWriter {
     transcripts: Arc<dyn TranscriptStore>,
-    /// The embedding worker's wake signal, when embedding is enabled.
-    embed_wake: Option<Arc<Notify>>,
     failed_writes: u64,
 }
 
 impl TranscriptWriter {
-    pub(super) fn new(
-        transcripts: Arc<dyn TranscriptStore>,
-        embed_wake: Option<Arc<Notify>>,
-    ) -> Self {
+    pub(super) fn new(transcripts: Arc<dyn TranscriptStore>) -> Self {
         Self {
             transcripts,
-            embed_wake,
             failed_writes: 0,
         }
     }
@@ -121,7 +115,9 @@ impl TranscriptWriter {
         match self.transcripts.begin_turn(target.branch, prompt).await {
             Ok(opened) => {
                 let _ = target.turn.set(opened.turn);
-                self.landed(target, RowRole::Question, &opened.message);
+                target
+                    .ledger
+                    .record(RowRole::Question, Some(opened.message.seq));
             }
             Err(e) => {
                 target.ledger.record(RowRole::Question, None);
@@ -188,22 +184,11 @@ impl TranscriptWriter {
             }
         };
         match appended {
-            Ok(appended) => self.landed(target, role, &appended),
+            Ok(appended) => target.ledger.record(role, Some(appended.seq)),
             Err(e) => {
                 target.ledger.record(role, None);
                 self.mark_turn_incomplete(turn, &e).await;
             }
-        }
-    }
-
-    /// Enter the stored `message` in the target's ledger and wake the
-    /// embedding worker for the chunks cut from it.
-    fn landed(&self, target: &PersistTarget, role: RowRole, message: &AppendedMessage) {
-        target.ledger.record(role, Some(message.seq));
-        if let Some(embed_wake) = &self.embed_wake
-            && !message.chunks.is_empty()
-        {
-            embed_wake.notify_one();
         }
     }
 

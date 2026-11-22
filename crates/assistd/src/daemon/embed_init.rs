@@ -16,7 +16,7 @@ use assistd_memory::{
 };
 use assistd_utils::child_server::{ApiKey, ChildServer};
 use assistd_utils::readiness::Readiness;
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::info;
@@ -32,7 +32,6 @@ const EMBED_DRAIN_BUDGET: Duration = Duration::from_secs(10);
 pub(super) struct EmbeddingHandles {
     pub embedder: Arc<EmbedderHandle>,
     pub semantic_store: Arc<dyn SemanticStore>,
-    pub embed_wake: Arc<Notify>,
 }
 
 /// What starting the embedding server in the background still needs.
@@ -40,7 +39,6 @@ pub(super) struct EmbeddingStartup {
     config: assistd_config::EmbeddingConfig,
     server_binary: NonBlankString,
     api_key: ApiKey,
-    embed_wake: Arc<Notify>,
 }
 
 /// The shutdown signals the embedding server and worker stop on.
@@ -149,17 +147,14 @@ pub(super) fn prepare(
     }
     let semantic_store: Arc<dyn SemanticStore> =
         Arc::new(SqliteSemanticStore::new(sqlite_handle.clone()));
-    let embed_wake = Arc::new(Notify::new());
     let handles = EmbeddingHandles {
         embedder: Arc::new(EmbedderHandle::new(Readiness::Starting)),
         semantic_store,
-        embed_wake: embed_wake.clone(),
     };
     let startup = EmbeddingStartup {
         config: config.embedding.clone(),
         server_binary: config.model.server_binary.clone(),
         api_key: api_key.clone(),
-        embed_wake,
     };
     (handles, Some(startup))
 }
@@ -168,7 +163,6 @@ fn disabled_handles(reason: &str) -> EmbeddingHandles {
     EmbeddingHandles {
         embedder: Arc::new(EmbedderHandle::new(Readiness::Unavailable(reason.into()))),
         semantic_store: Arc::new(NoSemanticStore),
-        embed_wake: Arc::default(),
     }
 }
 
@@ -189,7 +183,7 @@ async fn start_and_record(
                 embedder.dim(),
                 startup.config.port,
             );
-            let worker = adopt_space_then_serve(state, embedder, startup, stages.worker).await;
+            let worker = adopt_space_then_serve(state, embedder, &startup, stages.worker).await;
             Some(RunningEmbedding { server, worker })
         }
         Err(failure) => {
@@ -223,7 +217,7 @@ fn publish_readiness(state: &AppState) {
 async fn adopt_space_then_serve(
     state: &AppState,
     embedder: Arc<dyn Embedder>,
-    startup: EmbeddingStartup,
+    startup: &EmbeddingStartup,
     worker_shutdown: watch::Receiver<bool>,
 ) -> Option<EmbedWorker> {
     let space = EmbeddingSpace {
@@ -240,20 +234,18 @@ async fn adopt_space_then_serve(
             .set(Readiness::Unavailable(reason.into()));
         return None;
     }
-    Some(serve_embedder(state, embedder, startup, worker_shutdown))
+    Some(serve_embedder(state, embedder, worker_shutdown))
 }
 
 fn serve_embedder(
     state: &AppState,
     embedder: Arc<dyn Embedder>,
-    startup: EmbeddingStartup,
     worker_shutdown: watch::Receiver<bool>,
 ) -> EmbedWorker {
     let (documents_gate_open, documents_gate) = state.status.document_embed_gate();
     let worker = spawn_embedder_task(
         embedder.clone(),
         state.memory.embedding_queue.clone(),
-        startup.embed_wake,
         documents_gate_open,
         worker_shutdown,
     );

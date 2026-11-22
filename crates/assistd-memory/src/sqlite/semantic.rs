@@ -8,11 +8,13 @@ use std::hash::Hash;
 use std::ops::Range;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use num_traits::ToPrimitive;
 use rusqlite::types::FromSql;
 use rusqlite::{OptionalExtension, Params, Row, Transaction};
+use tokio::sync::Notify;
 
 use crate::{
     AdjacentChunks, ChunkId, ChunkLocator, ChunkSource, ContextChunk, DocumentHit, DocumentId,
@@ -147,6 +149,13 @@ impl SqliteSemanticStore {
     pub fn new(handle: SqliteHandle) -> Self {
         Self { handle }
     }
+
+    /// Wake the embedding worker when `added` holds chunks to embed.
+    fn signal_chunks(&self, added: &[ChunkId]) {
+        if !added.is_empty() {
+            self.handle.rows_to_embed().notify_one();
+        }
+    }
 }
 
 #[async_trait]
@@ -271,7 +280,8 @@ impl EmbeddingQueue for SqliteSemanticStore {
         space: &EmbeddingSpace,
     ) -> Result<Option<EmbeddingSpace>> {
         let space = space.clone();
-        self.handle
+        let replaced = self
+            .handle
             .write("adopt_embedding_space", move |tx| {
                 let recorded = recorded_space(tx)?;
                 if recorded.as_ref() == Some(&space) {
@@ -281,7 +291,15 @@ impl EmbeddingQueue for SqliteSemanticStore {
                 record_space(tx, &space)?;
                 Ok(recorded)
             })
-            .await
+            .await?;
+        if replaced.is_some() {
+            self.handle.rows_to_embed().notify_one();
+        }
+        Ok(replaced)
+    }
+
+    fn rows_to_embed(&self) -> Arc<Notify> {
+        Arc::clone(self.handle.rows_to_embed())
     }
 
     async fn count_missing(&self) -> Result<UnindexedRows> {
@@ -372,7 +390,8 @@ impl EmbeddingQueue for SqliteSemanticStore {
     }
 
     async fn clear_unembeddable(&self) -> Result<u64> {
-        self.handle
+        let cleared = self
+            .handle
             .write("clear_unembeddable", |tx| {
                 let cleared = EMBEDDING_TABLES
                     .iter()
@@ -382,7 +401,11 @@ impl EmbeddingQueue for SqliteSemanticStore {
                     .sum::<rusqlite::Result<usize>>()?;
                 Ok(u64::try_from(cleared).unwrap_or(u64::MAX))
             })
-            .await
+            .await?;
+        if cleared > 0 {
+            self.handle.rows_to_embed().notify_one();
+        }
+        Ok(cleared)
     }
 }
 
@@ -449,11 +472,21 @@ impl DocumentStore for SqliteSemanticStore {
         pages: Vec<String>,
         empty_pages: EmptyPages,
     ) -> Result<Vec<ChunkId>> {
-        self.handle
+        let stored = self
+            .handle
             .write("index_document", move |tx| {
                 documents::store_document(tx, pass, &path, stamp, &pages, empty_pages)
             })
-            .await
+            .await?;
+        self.signal_chunks(&stored.added);
+        if stored.pages_wait {
+            self.handle.pages_to_transcribe().notify_one();
+        }
+        Ok(stored.added)
+    }
+
+    fn pages_to_transcribe(&self) -> Arc<Notify> {
+        Arc::clone(self.handle.pages_to_transcribe())
     }
 
     async fn next_waiting_page(&self) -> Result<Option<WaitingPage>> {
@@ -467,11 +500,14 @@ impl DocumentStore for SqliteSemanticStore {
         page: WaitingPage,
         reading: PageReading,
     ) -> Result<Vec<ChunkId>> {
-        self.handle
+        let added = self
+            .handle
             .write("store_page_reading", move |tx| {
                 documents::store_page_reading(tx, &page, &reading)
             })
-            .await
+            .await?;
+        self.signal_chunks(&added);
+        Ok(added)
     }
 
     async fn count_transcriptions(&self) -> Result<TranscriptionCounts> {
@@ -481,11 +517,16 @@ impl DocumentStore for SqliteSemanticStore {
     }
 
     async fn retry_failed_transcriptions(&self) -> Result<u64> {
-        self.handle
+        let waiting = self
+            .handle
             .write("retry_failed_transcriptions", |tx| {
                 documents::retry_failed_transcriptions(tx)
             })
-            .await
+            .await?;
+        if waiting > 0 {
+            self.handle.pages_to_transcribe().notify_one();
+        }
+        Ok(waiting)
     }
 
     async fn finish_index_pass(&self, pass: IndexPass) -> Result<u64> {

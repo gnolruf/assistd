@@ -3,8 +3,6 @@
 
 use std::sync::Arc;
 
-use tokio::sync::Notify;
-
 use assistd_config::EmbeddingConfig;
 use assistd_embed::EmbedderHandle;
 use assistd_memory::{
@@ -26,8 +24,6 @@ pub struct MemoryStack {
     pub recall: Arc<dyn RecallStore>,
     pub embedding_queue: Arc<dyn EmbeddingQueue>,
     pub document_store: Arc<dyn DocumentStore>,
-    /// Wakes the embedding worker after a write leaves rows to embed.
-    pub embed_wake: Arc<Notify>,
     pub embedding_cfg: EmbeddingConfig,
 }
 
@@ -52,7 +48,6 @@ impl MemoryStack {
             recall: Arc::new(NoSemanticStore),
             embedding_queue: Arc::new(NoSemanticStore),
             document_store: Arc::new(NoSemanticStore),
-            embed_wake: Arc::default(),
             embedding_cfg,
         }
     }
@@ -68,12 +63,6 @@ impl MemoryStack {
         self.recall = semantic.clone();
         self.embedding_queue = semantic.clone();
         self.document_store = semantic;
-        self
-    }
-
-    /// Replace the embedding worker's wake signal.
-    pub fn with_embed_wake(mut self, embed_wake: Arc<Notify>) -> Self {
-        self.embed_wake = embed_wake;
         self
     }
 }

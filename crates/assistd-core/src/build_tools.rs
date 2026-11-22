@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 use tracing::warn;
 
 use assistd_config::{BashSandboxMode, Config, NoDefaultDirError, WritablePath};
@@ -101,8 +101,6 @@ pub struct BuildToolsDeps<'a> {
     pub memory_ops: Arc<MemoryOps>,
     pub embedder: Arc<EmbedderHandle>,
     pub semantic: Arc<dyn SemanticStore>,
-    /// Wakes the embedding worker after `remember` saves a value.
-    pub embed_wake: Arc<Notify>,
     /// The active session, whose messages still in context `reminisce` excludes.
     pub current_session: watch::Receiver<SessionId>,
     pub window_manager: Arc<dyn WindowManager>,
@@ -166,7 +164,6 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
         memory_ops,
         embedder,
         semantic,
-        embed_wake,
         current_session,
         window_manager,
         web_search,
@@ -249,8 +246,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
     });
     tools.register(relay);
     if config.memory.enabled {
-        let memory = (memory_ops, embed_wake);
-        register_memory_tools(&mut tools, memory, embedder, semantic, current_session);
+        register_memory_tools(&mut tools, memory_ops, embedder, semantic, current_session);
     }
     Ok(BuiltTools {
         registry: Arc::new(tools),
@@ -277,10 +273,10 @@ fn docs_command(
     })
 }
 
-/// Register `remember` over `memory`'s store and embedding wake signal, and `reminisce`.
+/// Register `remember` over `memory_ops`' store, and `reminisce`.
 fn register_memory_tools(
     tools: &mut ToolRegistry,
-    (memory_ops, embed_wake): (Arc<MemoryOps>, Arc<Notify>),
+    memory_ops: Arc<MemoryOps>,
     embedder: Arc<EmbedderHandle>,
     semantic: Arc<dyn SemanticStore>,
     current_session: watch::Receiver<SessionId>,
@@ -288,7 +284,6 @@ fn register_memory_tools(
     let transcripts = Arc::clone(&memory_ops.transcripts);
     tools.register(RememberTool::new(
         memory_ops,
-        embed_wake,
         embedder.clone(),
         semantic.clone(),
     ));

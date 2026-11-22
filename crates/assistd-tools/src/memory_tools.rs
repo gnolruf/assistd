@@ -12,7 +12,7 @@ use assistd_memory::{
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 
 use crate::TurnContext;
 use crate::memory::MemoryOps;
@@ -36,13 +36,12 @@ const KEY_PATTERN: &str = r"^[a-z0-9._-]+$";
 static KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
 
-/// Saves `(key, value)` facts about the user, waking the embedding worker for each
-/// new or changed value, and searches them by semantic similarity to a query. A save's
-/// result repeats the key and value, so every client that shows results shows what was kept.
+/// Saves `(key, value)` facts about the user and searches them by semantic similarity
+/// to a query. A save's result repeats the key and value, so every client that shows
+/// results shows what was kept.
 #[derive(Debug)]
 pub struct RememberTool {
     ops: Arc<MemoryOps>,
-    embed_wake: Arc<Notify>,
     embedder: Arc<EmbedderHandle>,
     semantic: Arc<dyn RecallStore>,
 }
@@ -71,17 +70,15 @@ impl RememberRequest {
 }
 
 impl RememberTool {
-    /// A tool saving through `ops`, signalling `embed_wake` for each value, and
-    /// searching memories in `semantic` by vectors from `embedder`.
+    /// A tool saving through `ops` and searching memories in `semantic` by vectors
+    /// from `embedder`.
     pub fn new(
         ops: Arc<MemoryOps>,
-        embed_wake: Arc<Notify>,
         embedder: Arc<EmbedderHandle>,
         semantic: Arc<dyn RecallStore>,
     ) -> Self {
         Self {
             ops,
-            embed_wake,
             embedder,
             semantic,
         }
@@ -89,10 +86,7 @@ impl RememberTool {
 
     async fn save(&self, key: &str, value: String) -> Result<String, ToolError> {
         let report = format!("remembered {key}: {value}");
-        let saved = self.ops.save(key, value).await?;
-        if saved.value_changed {
-            self.embed_wake.notify_one();
-        }
+        self.ops.save(key, value).await?;
         tracing::info!(target: "assistd::memory", key = %key, "remember saved");
         Ok(report)
     }
@@ -860,7 +854,7 @@ mod tests {
     }
 
     fn remember_tool(ops: Arc<MemoryOps>) -> RememberTool {
-        RememberTool::new(ops, Arc::default(), no_embedder(), no_semantic())
+        RememberTool::new(ops, no_embedder(), no_semantic())
     }
 
     fn invalid_args(err: ToolError) -> String {

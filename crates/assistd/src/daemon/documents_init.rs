@@ -140,13 +140,11 @@ async fn run(startup: DocumentsStartup, state: Arc<AppState>, shutdown: watch::R
     let deps = IndexDeps {
         store: Arc::clone(&state.memory.document_store),
         extractor: Arc::clone(extractor),
-        embed_wake: Arc::clone(&state.memory.embed_wake),
     };
     let transcription = startup.ocr.map(|ocr| TranscriptionDeps {
         store: Arc::clone(&state.memory.document_store),
         extractor: Arc::clone(extractor),
         presence: Arc::clone(&state.subsystems.presence),
-        embed_wake: Arc::clone(&state.memory.embed_wake),
         model: ocr.model,
         transcriber: ocr.transcriber,
         control: ocr.control,

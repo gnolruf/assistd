@@ -85,9 +85,14 @@ impl SqliteTranscriptStore {
     /// Cut the chunks of every user and assistant message stored without any,
     /// returning how many chunks were added.
     pub async fn chunk_unchunked_messages(&self) -> Result<u64> {
-        self.handle
+        let added = self
+            .handle
             .write("chunk_unchunked_messages", cut_missing_chunks)
-            .await
+            .await?;
+        if added > 0 {
+            self.handle.rows_to_embed().notify_one();
+        }
+        Ok(added)
     }
 
     /// Every saved relay answer a stored relay step names.
@@ -99,6 +104,13 @@ impl SqliteTranscriptStore {
 
     fn message_row(&self, msg: PersistedMessage) -> MessageRow {
         MessageRow::new(msg, now_millis(), self.chunk_messages)
+    }
+
+    /// Wake the embedding worker for the chunks cut from the stored `message`.
+    fn signal_chunks_of(&self, message: &AppendedMessage) {
+        if !message.chunks.is_empty() {
+            self.handle.rows_to_embed().notify_one();
+        }
     }
 }
 
@@ -117,7 +129,8 @@ impl TranscriptStore for SqliteTranscriptStore {
 
     async fn begin_turn(&self, branch: BranchId, prompt: PersistedMessage) -> Result<OpenedTurn> {
         let row = self.message_row(prompt);
-        self.handle
+        let opened = self
+            .handle
             .try_write(move |tx| {
                 let slot = claim_next_seq(tx, branch)?;
                 let turn = tx
@@ -130,7 +143,9 @@ impl TranscriptStore for SqliteTranscriptStore {
             .map_err(MemoryError::sqlite_or_missing(
                 "begin_turn",
                 MemoryError::BranchNotFound(branch),
-            ))
+            ))?;
+        self.signal_chunks_of(&opened.message);
+        Ok(opened)
     }
 
     async fn begin_session_with_main_branch(&self, session: SessionId) -> Result<BranchId> {
@@ -188,7 +203,8 @@ impl TranscriptStore for SqliteTranscriptStore {
         msg: PersistedMessage,
     ) -> Result<AppendedMessage> {
         let row = self.message_row(msg);
-        self.handle
+        let appended = self
+            .handle
             .try_write(move |tx| {
                 let slot = claim_next_seq(tx, branch)?;
                 store_message(tx, branch, slot, turn, &row)
@@ -197,7 +213,9 @@ impl TranscriptStore for SqliteTranscriptStore {
             .map_err(MemoryError::sqlite_or_missing(
                 "append_message_to_branch",
                 MemoryError::BranchNotFound(branch),
-            ))
+            ))?;
+        self.signal_chunks_of(&appended);
+        Ok(appended)
     }
 
     async fn append_relay_result(
@@ -208,7 +226,8 @@ impl TranscriptStore for SqliteTranscriptStore {
         steps: Vec<PersistedRelayStep>,
     ) -> Result<AppendedMessage> {
         let row = self.message_row(msg);
-        self.handle
+        let appended = self
+            .handle
             .try_write(move |tx| {
                 let slot = claim_next_seq(tx, branch)?;
                 let appended = store_message(tx, branch, slot, turn, &row)?;
@@ -219,7 +238,9 @@ impl TranscriptStore for SqliteTranscriptStore {
             .map_err(MemoryError::sqlite_or_missing(
                 "append_relay_result",
                 MemoryError::BranchNotFound(branch),
-            ))
+            ))?;
+        self.signal_chunks_of(&appended);
+        Ok(appended)
     }
 
     async fn load_relay_traces(

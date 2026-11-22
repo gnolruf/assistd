@@ -797,8 +797,9 @@ or assistant message is chunked in the transaction that saves it. With
 `embedding.enabled = false` no chunks are cut; the next start with
 embedding on cuts them for the messages stored meanwhile. The
 database is the embedding queue: a memory or chunk with no row in its
-embeddings table is pending. Each write wakes a background task, which
-pages through the pending rows, sends batches to the embedding server
+embeddings table is pending. The store signals after each committed
+write that leaves a row pending, whoever made it, and the signal wakes
+a background task, which pages through the pending rows, sends batches to the embedding server
 (a second, smaller llama-server child process configured under
 `[embedding]`), and inserts the resulting vectors into the semantic
 store. Many embedding models are trained with a task prefix on each
@@ -817,7 +818,7 @@ forgets them. When the server answers nothing, no row is counted and
 the pass stops for a retry. A pass moves past each batch whatever became
 of its rows, so a failing row never holds back the rows behind it.
 `assistd memory reindex` embeds nothing itself: it clears the marks,
-wakes the worker, and reports the rows still waiting until none is or
+which wakes the worker, and reports the rows still waiting until none is or
 the client leaves. The server is started with `--batch-size 2048 --ubatch-size 2048`,
 the tokens one input may hold, ahead of `embedding.custom_args`, which
 may set another count. llama-server's own 512 is too few: of 151,597
@@ -947,7 +948,7 @@ the daemon's memory.
 A pass brings the index in step with one root of `documents.roots`. It walks
 the root with the `ignore` crate, asks the store which of the files it found
 have a changed stamp, sends those to the extraction worker one at a time,
-stores each file's pages, wakes the embedding worker, and finishes by removing
+stores each file's pages, which wakes the embedding worker, and finishes by removing
 the root's documents it did not see. A file the worker skips is recorded in
 `skipped_files` with its stamp and the cause, and while its stamp matches,
 later passes count it under that cause without reading it. Only
@@ -1494,8 +1495,9 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
    chunks' words to the keyword index; a chunk whose text is unchanged
    keeps its vector. From here a search finds the file by its exact
    words. A page with no text is recorded as waiting for
-   [page transcription](#page-transcription-assistd-core). The pass
-   then wakes the embedding worker.
+   [page transcription](#page-transcription-assistd-core). Once the
+   transaction commits the store wakes the embedding worker for new
+   chunks, and page transcription for a waiting page.
 
 5. **Embed gate** ([`crates/assistd-core/src/documents/embed_gate.rs`](../crates/assistd-core/src/documents/embed_gate.rs)).
    The embedding worker embeds pending message chunks and memories

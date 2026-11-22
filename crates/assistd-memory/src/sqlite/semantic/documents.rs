@@ -323,9 +323,18 @@ pub(super) fn forget_skipped(conn: &Connection) -> rusqlite::Result<u64> {
     Ok(u64::try_from(forgotten).unwrap_or(u64::MAX))
 }
 
-/// Store `pages` as the document at `path`, seen by `pass`, returning the chunks
-/// added. Pages with the stored hash and chunking only have their stamp refreshed.
-/// A skip recorded for the path is dropped.
+/// What storing a document left for the workers that follow it.
+#[derive(Default)]
+pub(super) struct StoredDocument {
+    /// The chunks added, which have no vector.
+    pub added: Vec<ChunkId>,
+    /// Whether any of its pages now waits for transcription.
+    pub pages_wait: bool,
+}
+
+/// Store `pages` as the document at `path`, seen by `pass`. Pages with the stored
+/// hash and chunking only have their stamp refreshed. A skip recorded for the path
+/// is dropped.
 pub(super) fn store_document(
     tx: &Transaction<'_>,
     pass: IndexPass,
@@ -333,7 +342,7 @@ pub(super) fn store_document(
     stamp: FileStamp,
     pages: &[String],
     empty_pages: EmptyPages,
-) -> rusqlite::Result<Vec<ChunkId>> {
+) -> rusqlite::Result<StoredDocument> {
     tx.prepare_cached("DELETE FROM skipped_files WHERE path = ?1")?
         .execute(rusqlite::params![path.as_os_str().as_bytes()])?;
     let document = DocumentRow {
@@ -344,7 +353,7 @@ pub(super) fn store_document(
         chunking: ChunkingConfig::DOCUMENTS,
     };
     if document.refresh_stamp_if_same_pages(tx)? {
-        return Ok(Vec::new());
+        return Ok(StoredDocument::default());
     }
     let id = document.upsert(tx)?;
     let stored = StoredPages::load(tx, id)?;
@@ -353,8 +362,9 @@ pub(super) fn store_document(
     write_changed_pages(tx, id, &stored.pages, pages)?;
     recut.apply(tx, id, longest_page(&stored.pages).max(longest_page(pages)))?;
     remove_pages_from(tx, id, pages.len())?;
-    reset_transcriptions(tx, id, pages, empty_pages)?;
-    add_chunks(tx, id, pages, &recut.added)
+    let pages_wait = reset_transcriptions(tx, id, pages, empty_pages)?;
+    let added = add_chunks(tx, id, pages, &recut.added)?;
+    Ok(StoredDocument { added, pages_wait })
 }
 
 /// The first page waiting for transcription, by document and then position.
@@ -517,17 +527,17 @@ pub(super) fn retry_failed_transcriptions(conn: &Connection) -> rusqlite::Result
 }
 
 /// Forget what was transcribed of `document` and, when its empty pages are to be
-/// transcribed, record each of `pages` without text as waiting.
+/// transcribed, record each of `pages` without text as waiting. Returns whether any waits.
 fn reset_transcriptions(
     tx: &Transaction<'_>,
     document: DocumentId,
     pages: &[String],
     empty_pages: EmptyPages,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<bool> {
     tx.prepare_cached("DELETE FROM page_transcriptions WHERE document_id = ?1")?
         .execute(rusqlite::params![document])?;
     if empty_pages == EmptyPages::Final {
-        return Ok(());
+        return Ok(false);
     }
     let mut wait =
         tx.prepare_cached("INSERT INTO page_transcriptions (document_id, page) VALUES (?1, ?2)")?;
@@ -535,10 +545,12 @@ fn reset_transcriptions(
         .iter()
         .enumerate()
         .filter(|(_, text)| text.trim().is_empty());
+    let mut pages_wait = false;
     for (page, _) in empty {
         wait.execute(rusqlite::params![document, page])?;
+        pages_wait = true;
     }
-    Ok(())
+    Ok(pages_wait)
 }
 
 fn has_waiting_page(tx: &Transaction<'_>, document: DocumentId) -> rusqlite::Result<bool> {

@@ -4,7 +4,7 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::TaskTracker;
 use tracing::warn;
 
@@ -32,8 +32,6 @@ pub(crate) use self::writer::PersistTarget;
 #[derive(Debug)]
 pub(crate) struct TranscriptLog {
     transcripts: Arc<dyn TranscriptStore>,
-    /// The embedding worker's wake signal, when embedding is enabled.
-    embed_wake: Option<Arc<Notify>>,
     session_ctx: Arc<SessionContext>,
     /// The transcript writer's queue, once its first write started the writer.
     writes: OnceLock<mpsc::Sender<WriteCommand>>,
@@ -44,16 +42,13 @@ pub(crate) struct TranscriptLog {
 }
 
 impl TranscriptLog {
-    /// A log over `transcripts` for the session `session_ctx` points at, waking
-    /// the embedding worker through `embed_wake` after each write.
+    /// A log over `transcripts` for the session `session_ctx` points at.
     pub(crate) fn new(
         transcripts: Arc<dyn TranscriptStore>,
-        embed_wake: Option<Arc<Notify>>,
         session_ctx: Arc<SessionContext>,
     ) -> Self {
         Self {
             transcripts,
-            embed_wake,
             session_ctx,
             writes: OnceLock::new(),
             user_ledger: SharedLedger::default(),
@@ -199,7 +194,7 @@ impl TranscriptLog {
     fn transcript_writes(&self) -> &mpsc::Sender<WriteCommand> {
         self.writes.get_or_init(|| {
             let (writes_tx, writes_rx) = mpsc::channel(WRITE_QUEUE_CAPACITY);
-            let writer = TranscriptWriter::new(self.transcripts.clone(), self.embed_wake.clone());
+            let writer = TranscriptWriter::new(self.transcripts.clone());
             spawn_supervised(
                 "transcript_writer",
                 Component::Memory,
@@ -399,7 +394,7 @@ mod tests {
 
     fn log_over(store: Arc<dyn TranscriptStore>) -> TranscriptLog {
         let session = Arc::new(SessionContext::new(SessionId::new(), Some(BranchId(1))));
-        TranscriptLog::new(store, None, session)
+        TranscriptLog::new(store, session)
     }
 
     fn tool_step(content: &str) -> PersistedMessage {

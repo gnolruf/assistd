@@ -155,7 +155,6 @@ async fn passes_and_the_watch_between_them_index_changed_files_and_drop_deleted_
     let deps = IndexDeps {
         store: store.clone(),
         extractor,
-        embed_wake: Arc::default(),
     };
     let runner = {
         let index = Arc::clone(&index);

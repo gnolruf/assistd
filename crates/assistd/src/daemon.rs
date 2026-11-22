@@ -532,7 +532,6 @@ fn build_memory_stack(
     )
     .with_embedder(embed.embedder.clone())
     .with_semantic(embed.semantic_store.clone())
-    .with_embed_wake(embed.embed_wake.clone())
 }
 
 async fn replay_history(llm: &dyn LlmBackend, replay: HistoryReplay) {

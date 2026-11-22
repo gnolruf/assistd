@@ -20,12 +20,13 @@ impl MemoryStore {
     }
 
     /// Persist `value` under `key`, overwriting any existing value. A changed value
-    /// bumps `updated_at`, drops the row's embedding (by schema trigger), and
-    /// truncates the WAL so the old value leaves no trace.
+    /// bumps `updated_at`, drops the row's embedding (by schema trigger), wakes the
+    /// embedding worker, and truncates the WAL so the old value leaves no trace.
     pub async fn save(&self, key: &str, value: String) -> Result<SavedMemory> {
         let key = key.to_string();
         let now = now_millis();
-        self.handle
+        let saved = self
+            .handle
             .write_erasing("memory save", move |tx| {
                 let previous_value = value_at(tx, &key)?;
                 let id: MemoryId = tx.query_row(
@@ -46,7 +47,11 @@ impl MemoryStore {
                     erased: value_changed && previous_value.is_some(),
                 })
             })
-            .await
+            .await?;
+        if saved.value_changed {
+            self.handle.rows_to_embed().notify_one();
+        }
+        Ok(saved)
     }
 
     /// Value stored at `key`, or `None` when absent.
