@@ -20,6 +20,10 @@ const TRANSCRIPTION_DEADLINE: Duration = Duration::from_secs(120);
 /// How long the worker has to synthesize and queue one sentence.
 const SYNTHESIS_DEADLINE: Duration = Duration::from_secs(60);
 
+/// Most bytes of one line the daemon reads from the worker; a transcript or a
+/// failure message is far shorter.
+pub(super) const MAX_REPLY_LINE_BYTES: usize = 1024 * 1024;
+
 /// A line from the other side that is not a message this build knows.
 #[derive(Debug, Error)]
 #[error("malformed voice-worker message: {0}")]
@@ -180,8 +184,8 @@ pub(super) fn encode(message: &impl Serialize) -> String {
     line
 }
 
-pub(super) fn decode<T: DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
-    Ok(serde_json::from_str(line)?)
+pub(super) fn decode<T: DeserializeOwned>(line: &[u8]) -> Result<T, ProtocolError> {
+    Ok(serde_json::from_slice(line)?)
 }
 
 /// The reply failing a line that did not decode for `error`, when the line
@@ -212,7 +216,8 @@ mod tests {
                 1,
                 "one line per message: {line}"
             );
-            let decoded: T = decode(line.trim_end()).unwrap_or_else(|e| panic!("{line}: {e}"));
+            let decoded: T =
+                decode(line.trim_end().as_bytes()).unwrap_or_else(|e| panic!("{line}: {e}"));
             assert_eq!(&decoded, message, "{line}");
         }
     }
@@ -330,15 +335,15 @@ mod tests {
             r#"{"type":"reply","id":1,"outcome":{"status":"done"}}"#,
         ];
         for line in lines {
-            assert!(decode::<ToWorker>(line).is_err(), "{line:?}");
+            assert!(decode::<ToWorker>(line.as_bytes()).is_err(), "{line:?}");
         }
-        assert!(decode::<FromWorker>(r#"{"type":"heard","heard":{"kind":"shout"}}"#).is_err());
+        assert!(decode::<FromWorker>(br#"{"type":"heard","heard":{"kind":"shout"}}"#).is_err());
     }
 
     #[test]
     fn an_undecodable_line_is_refused_only_when_it_carries_a_call_id() {
         let refused = |line: &str| {
-            let error = decode::<ToWorker>(line).unwrap_err();
+            let error = decode::<ToWorker>(line.as_bytes()).unwrap_err();
             refusal(line, &error)
         };
         let unknown_request =

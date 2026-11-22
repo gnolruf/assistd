@@ -1,13 +1,13 @@
 //! The daemon's end of the pipe: calls awaiting replies, and the worker's
 //! state mirrored into channels that outlive any one worker process.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use assistd_ipc::{ListenPhase, VoiceCaptureState};
+use assistd_utils::pipe_worker::PendingReplies;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::protocol::{FromWorker, Outcome, Request, Startup, ToWorker};
 use crate::error::VoiceWorkerError;
@@ -15,15 +15,6 @@ use crate::listen::{Heard, WakeTest};
 
 /// Wake phrases and commands held for a slow subscriber.
 const HEARD_BACKLOG: usize = 16;
-
-/// The running worker's input queue and its calls awaiting a reply.
-/// Dropping it fails every one of those calls with [`VoiceWorkerError::Exited`].
-#[derive(Debug)]
-struct Connection {
-    outgoing: mpsc::UnboundedSender<ToWorker>,
-    pending: HashMap<u64, oneshot::Sender<Outcome>>,
-    unresponsive: Option<oneshot::Sender<()>>,
-}
 
 /// A component's startup as the worker reported it.
 #[derive(Debug)]
@@ -35,8 +26,7 @@ pub(super) enum StartupReport {
 /// Shared by the proxies and the supervisor for the daemon's lifetime.
 #[derive(Debug)]
 pub(super) struct Link {
-    connection: parking_lot::Mutex<Option<Connection>>,
-    next_id: AtomicU64,
+    replies: PendingReplies<ToWorker, oneshot::Sender<Outcome>>,
     pub(super) capture_state: watch::Sender<VoiceCaptureState>,
     pub(super) phase: watch::Sender<ListenPhase>,
     pub(super) heard: broadcast::Sender<Heard>,
@@ -51,8 +41,7 @@ pub(super) struct Link {
 impl Link {
     pub(super) fn new() -> Self {
         Self {
-            connection: parking_lot::Mutex::new(None),
-            next_id: AtomicU64::new(0),
+            replies: PendingReplies::new("voice worker"),
             capture_state: watch::channel(VoiceCaptureState::Idle).0,
             phase: watch::channel(ListenPhase::Off).0,
             heard: broadcast::channel(HEARD_BACKLOG).0,
@@ -68,18 +57,12 @@ impl Link {
         &self,
         outgoing: mpsc::UnboundedSender<ToWorker>,
     ) -> oneshot::Receiver<()> {
-        let (unresponsive_tx, unresponsive_rx) = oneshot::channel();
-        *self.connection.lock() = Some(Connection {
-            outgoing,
-            pending: HashMap::new(),
-            unresponsive: Some(unresponsive_tx),
-        });
-        unresponsive_rx
+        self.replies.connect(outgoing)
     }
 
     /// The worker is gone: fail its pending calls and reset what it mirrored.
     pub(super) fn disconnect(&self) {
-        self.connection.lock().take();
+        self.replies.disconnect();
         self.wake_test.lock().take();
         self.capture_state.send_replace(VoiceCaptureState::Idle);
         self.phase.send_replace(ListenPhase::Off);
@@ -90,57 +73,14 @@ impl Link {
     /// and is marked for the supervisor to terminate.
     pub(super) async fn call(&self, request: Request) -> Result<Outcome, VoiceWorkerError> {
         let deadline = request.deadline();
-        let (id, mut reply) = self.send_call(request)?;
-        let Some(deadline) = deadline else {
-            return reply.await.map_err(|_| VoiceWorkerError::Exited);
-        };
-        if let Ok(answered) = tokio::time::timeout(deadline, &mut reply).await {
-            return answered.map_err(|_| VoiceWorkerError::Exited);
-        }
-        if self.abandon(id) {
-            return Err(VoiceWorkerError::Unresponsive { deadline });
-        }
-        reply.await.map_err(|_| VoiceWorkerError::Exited)
-    }
-
-    fn send_call(
-        &self,
-        request: Request,
-    ) -> Result<(u64, oneshot::Receiver<Outcome>), VoiceWorkerError> {
-        let mut connection = self.connection.lock();
-        let connection = connection.as_mut().ok_or(VoiceWorkerError::NotRunning)?;
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (reply_tx, reply_rx) = oneshot::channel();
-        connection.pending.insert(id, reply_tx);
-        connection
-            .outgoing
-            .send(ToWorker::Call { id, request })
-            .map_err(|_| VoiceWorkerError::Exited)?;
-        Ok((id, reply_rx))
-    }
-
-    /// Give up on call `id` and flag its worker unresponsive; false when the
-    /// call was already answered or its worker already gone.
-    fn abandon(&self, id: u64) -> bool {
-        let mut connection = self.connection.lock();
-        let Some(connection) = connection.as_mut() else {
-            return false;
-        };
-        if connection.pending.remove(&id).is_none() {
-            return false;
-        }
-        warn!(target: "assistd::voice::worker", "voice worker missed a call's deadline");
-        if let Some(unresponsive) = connection.unresponsive.take() {
-            let _ = unresponsive.send(());
-        }
-        true
+        let (answer, reply) = oneshot::channel();
+        let call = |id| ToWorker::Call { id, request };
+        Ok(self.replies.call(call, answer, reply, deadline).await?)
     }
 
     /// Send a message that has no reply; dropped while no worker runs.
     pub(super) fn notify(&self, message: ToWorker) {
-        if let Some(connection) = &*self.connection.lock() {
-            let _ = connection.outgoing.send(message);
-        }
+        self.replies.notify(message);
     }
 
     /// Mirror one message from the worker; startup reports are handed back
@@ -168,19 +108,12 @@ impl Link {
                     let _ = sink.try_send(report);
                 }
             }
-            FromWorker::Reply { id, outcome } => self.answer(id, outcome),
+            FromWorker::Reply { id, outcome } => {
+                if let Some(answer) = self.replies.take(id) {
+                    let _ = answer.send(outcome);
+                }
+            }
         }
         None
-    }
-
-    fn answer(&self, id: u64, outcome: Outcome) {
-        let reply = self
-            .connection
-            .lock()
-            .as_mut()
-            .and_then(|connection| connection.pending.remove(&id));
-        if let Some(reply) = reply {
-            let _ = reply.send(outcome);
-        }
     }
 }

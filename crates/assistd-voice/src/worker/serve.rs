@@ -379,7 +379,7 @@ pub async fn serve() -> Result<(), ServeError> {
 
 async fn read_config(lines: &mut Lines<BufReader<Stdin>>) -> Result<VoiceConfig, ServeError> {
     let line = lines.next_line().await?.ok_or(ServeError::Unconfigured)?;
-    match decode(&line)? {
+    match decode(line.as_bytes())? {
         ToWorker::Configure { config } => Ok(*config),
         _ => Err(ServeError::Unconfigured),
     }
@@ -392,7 +392,7 @@ async fn read_calls(
 ) -> Result<(), ServeError> {
     while let Some(line) = lines.next_line().await? {
         while calls.try_join_next().is_some() {}
-        match decode(&line) {
+        match decode(line.as_bytes()) {
             Ok(message) => worker.receive(message, calls),
             Err(e) => {
                 warn!("voice worker: {e}; line ignored");

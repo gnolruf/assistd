@@ -11,7 +11,6 @@ use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use rmcp::ServiceExt;
-use rustix::process::Signal;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::process::{Child, ChildStderr, Command};
 use tokio_util::task::AbortOnDropHandle;
@@ -147,35 +146,16 @@ impl ChildLifeline {
     pub(crate) async fn shutdown(self, term_timeout: Duration) {
         let Self {
             label,
-            mut child,
-            mut group,
+            child,
+            group,
             service,
             stderr_task,
         } = self;
         service.close(SESSION_CLOSE_TIMEOUT).await;
-        group.signal(Signal::TERM);
-        match tokio::time::timeout(term_timeout, group.reap_leader(&mut child)).await {
-            Ok(Ok(status)) => info!(
-                target: "assistd::mcp",
-                server = %label,
-                "MCP server exited after SIGTERM: {status}",
-            ),
-            Ok(Err(e)) => warn!(
-                target: "assistd::mcp",
-                server = %label,
-                "MCP server wait error: {e}",
-            ),
-            Err(_) => {
-                warn!(
-                    target: "assistd::mcp",
-                    server = %label,
-                    "MCP server did not exit within {term_timeout:?}; sending SIGKILL",
-                );
-                group.signal(Signal::KILL);
-                let _ = group.reap_leader(&mut child).await;
-            }
+        let name = format!("MCP server {label}");
+        if let Err(e) = group.terminate(child, term_timeout, &name).await {
+            warn!(target: "assistd::mcp", server = %label, "MCP server wait error: {e}");
         }
-        drop(group);
         let _ = tokio::time::timeout(Duration::from_millis(500), stderr_task).await;
     }
 }

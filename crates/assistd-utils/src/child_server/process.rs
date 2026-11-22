@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use rustix::process::{Pid, Signal};
+use rustix::process::Pid;
 use tokio::process::{Child, ChildStderr, ChildStdout};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -91,33 +91,12 @@ impl ChildProcess {
     pub(super) async fn shutdown(self, term_timeout: Duration) -> Result<(), ChildServerError> {
         let Self {
             server,
-            mut child,
-            mut group,
+            child,
+            group,
             stdout_task,
             stderr_task,
         } = self;
-        group.signal(Signal::TERM);
-
-        match timeout(term_timeout, group.reap_leader(&mut child)).await {
-            Ok(Ok(status)) => {
-                info!(
-                    target: "assistd::child_server",
-                    server,
-                    "{server} exited after SIGTERM: {status}",
-                );
-            }
-            Ok(Err(e)) => return Err(ChildServerError::Io(e)),
-            Err(_) => {
-                warn!(
-                    target: "assistd::child_server",
-                    server,
-                    "{server} did not exit within {term_timeout:?}; sending SIGKILL",
-                );
-                group.signal(Signal::KILL);
-                let _ = group.reap_leader(&mut child).await;
-            }
-        }
-        drop(group);
+        group.terminate(child, term_timeout, server).await?;
 
         for task in [stdout_task, stderr_task] {
             let _ = timeout(OUTPUT_FLUSH_TIMEOUT, task).await;

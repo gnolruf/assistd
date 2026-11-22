@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use assistd_utils::pipe_worker::CallError;
 use thiserror::Error;
 
 /// Errors surfaced by [`VoiceInput`](crate::VoiceInput) implementations.
@@ -49,4 +50,14 @@ pub enum VoiceWorkerError {
     /// The worker answered with this failure.
     #[error("{0}")]
     Failed(String),
+}
+
+impl From<CallError> for VoiceWorkerError {
+    fn from(error: CallError) -> Self {
+        match error {
+            CallError::NotRunning => Self::NotRunning,
+            CallError::Exited => Self::Exited,
+            CallError::Unresponsive { deadline } => Self::Unresponsive { deadline },
+        }
+    }
 }

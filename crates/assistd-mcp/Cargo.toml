@@ -22,7 +22,6 @@ oauth2 = { workspace = true }
 parking_lot = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 rmcp = { workspace = true, features = ["auth"] }
-rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sse-stream = { workspace = true }
