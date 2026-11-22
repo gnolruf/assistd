@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 
 use assistd_ipc::{Event, EventBody};
 
+use super::DispatchError;
 use super::turns::TurnService;
 use crate::bus::EventSink;
 
@@ -103,36 +104,36 @@ impl ChatFocusSlot {
 }
 
 impl TurnService {
-    pub(super) async fn handle_chat_state(
+    pub(super) fn handle_chat_state(
         &self,
-        id: String,
+        id: &str,
         focused: bool,
         peer_pid: Option<u32>,
-        tx: EventSink,
-    ) {
+    ) -> Result<(), DispatchError> {
         self.chat_focus.report(peer_pid, focused);
-        self.refresh_chat_focus(&id);
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        self.refresh_chat_focus(id);
+        Ok(())
     }
 
-    pub(super) async fn handle_chat_closed(
+    pub(super) fn handle_chat_closed(
         &self,
-        id: String,
+        id: &str,
         peer_pid: Option<u32>,
-        tx: EventSink,
-    ) {
+    ) -> Result<(), DispatchError> {
         self.chat_focus.close(peer_pid);
         self.deps.admission.interaction.end();
-        self.refresh_chat_focus(&id);
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        self.refresh_chat_focus(id);
+        Ok(())
     }
 
-    pub(super) async fn handle_get_chat_focus(&self, id: String, tx: EventSink) {
+    pub(super) async fn handle_get_chat_focus(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         let focused = self.refresh_chat_focus(&id);
-        let _ = tx
-            .send(Event::new(id.clone(), EventBody::ChatFocus { focused }))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        tx.reply(id, EventBody::ChatFocus { focused }).await;
+        Ok(())
     }
 
     /// Whether a live chat has focus, broadcasting `ChatFocus` tagged with

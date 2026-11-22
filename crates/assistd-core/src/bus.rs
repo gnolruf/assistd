@@ -153,6 +153,11 @@ impl EventSink {
         }
     }
 
+    /// Send `body` as an event of request `id`; a client that has gone misses it.
+    pub async fn reply(&self, id: String, body: EventBody) {
+        let _ = self.send(Event::new(id, body)).await;
+    }
+
     /// Publish `event` without sending it to the client.
     pub fn publish(&self, event: &Event) {
         if let Some(bus) = &self.bus {

@@ -79,20 +79,15 @@ impl BranchService {
 
         let (_, parent_name, fork_point_seq) = self.lookup_branch_meta(new_branch).await;
         let session_title = self.transcripts.session_title(session).await.ok().flatten();
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::BranchSwitched {
-                    branch_id: Some(new_branch.0),
-                    session_id: session.to_string(),
-                    session_title,
-                    name,
-                    parent_branch_name: parent_name,
-                    fork_point_seq: fork_point_seq.map(|seq| seq.0),
-                },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        let switched = EventBody::BranchSwitched {
+            branch_id: Some(new_branch.0),
+            session_id: session.to_string(),
+            session_title,
+            name,
+            parent_branch_name: parent_name,
+            fork_point_seq: fork_point_seq.map(|seq| seq.0),
+        };
+        tx.reply(id, switched).await;
         Ok(())
     }
 
@@ -131,7 +126,6 @@ impl BranchService {
                 ))
                 .await;
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -289,16 +283,11 @@ impl BranchService {
             }
         }
         delete_answer_files(outcome.released_answer_files).await;
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::UndoApplied {
-                    removed_messages: u32::try_from(outcome.removed_messages).unwrap_or(u32::MAX),
-                    last_user_text: outcome.last_user_text,
-                },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        let applied = EventBody::UndoApplied {
+            removed_messages: u32::try_from(outcome.removed_messages).unwrap_or(u32::MAX),
+            last_user_text: outcome.last_user_text,
+        };
+        tx.reply(id, applied).await;
         Ok(())
     }
 
@@ -317,7 +306,7 @@ impl BranchService {
 
         let (session, branch) = self.session_ctx.current().await;
         let Some(branch) = branch else {
-            announce_unsaved_session(id, session, &tx).await;
+            report_unsaved_session(id, session, &tx).await;
             return Ok(());
         };
         let latest = self
@@ -349,7 +338,7 @@ impl BranchService {
         match branch {
             Some(branch) => self.replay_branch(id, session, branch, &tx).await,
             None => {
-                announce_unsaved_session(id, session, &tx).await;
+                report_unsaved_session(id, session, &tx).await;
                 Ok(())
             }
         }
@@ -373,7 +362,7 @@ impl BranchService {
     }
 
     /// Load `branch`, replace the LLM history with it, and stream it to
-    /// the client as `BranchSwitched`, `HistoryEntry` rows, and `Done`.
+    /// the client as `BranchSwitched` and `HistoryEntry` rows.
     async fn replay_branch(
         &self,
         id: String,
@@ -458,7 +447,6 @@ impl BranchService {
                 ))
                 .await;
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -495,11 +483,11 @@ impl BranchService {
     }
 
     /// Make a new, unsaved session active, clear the LLM history, and
-    /// report `BranchSwitched` then `Done`. The session and its `main`
+    /// report `BranchSwitched`. The session and its `main`
     /// branch are inserted with its first message.
     async fn begin_unsaved_session(&self, id: String, tx: &EventSink, label: &str) {
         let new_session = self.start_unsaved_session(label).await;
-        announce_unsaved_session(id, new_session, tx).await;
+        report_unsaved_session(id, new_session, tx).await;
     }
 
     /// Make a new, unsaved session active and clear the LLM history.
@@ -559,13 +547,6 @@ pub fn branch_replay(rows: &[HistoryRow], summary: Option<BranchSummary>) -> His
         folded_steps,
         entries,
     }
-}
-
-/// Report the unsaved `session` as active on its future `main` branch:
-/// `BranchSwitched` without a branch id, then `Done`.
-async fn announce_unsaved_session(id: String, session: SessionId, tx: &EventSink) {
-    report_unsaved_session(id.clone(), session, tx).await;
-    let _ = tx.send(Event::new(id, EventBody::Done)).await;
 }
 
 /// Report the unsaved `session` as active on its future `main` branch.

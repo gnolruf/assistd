@@ -62,22 +62,18 @@ impl MemoryStack {
                 ))
                 .await;
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
     pub(super) async fn handle_memory_save(
         &self,
-        id: String,
         key: String,
         value: String,
-        tx: EventSink,
     ) -> Result<(), DispatchError> {
         self.memory_ops
             .save(&key, value)
             .await
             .context("memory save failed")?;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -92,27 +88,15 @@ impl MemoryStack {
             .load(&key)
             .await
             .context("memory load failed")?;
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::MemoryValue { key, value },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        tx.reply(id, EventBody::MemoryValue { key, value }).await;
         Ok(())
     }
 
-    pub(super) async fn handle_memory_delete(
-        &self,
-        id: String,
-        key: String,
-        tx: EventSink,
-    ) -> Result<(), DispatchError> {
+    pub(super) async fn handle_memory_delete(&self, key: String) -> Result<(), DispatchError> {
         self.memory_ops
             .delete(&key)
             .await
             .context("memory delete failed")?;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -145,7 +129,6 @@ impl MemoryStack {
                 ))
                 .await;
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -160,16 +143,11 @@ impl MemoryStack {
             .forget(MemoryId(memory_id))
             .await
             .context("memory forget failed")?;
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::MemoryForgetResult {
-                    deleted: removed.is_some(),
-                    key: removed,
-                },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        let result = EventBody::MemoryForgetResult {
+            deleted: removed.is_some(),
+            key: removed,
+        };
+        tx.reply(id, result).await;
         Ok(())
     }
 
@@ -239,7 +217,6 @@ impl MemoryStack {
         .await
         .context("reindex: list missing memories")?;
 
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 

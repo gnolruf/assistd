@@ -230,7 +230,7 @@ impl TurnTranslator {
             }
             LlmEvent::Done => {
                 self.persist_final_text(events).await;
-                EventBody::Done
+                return None;
             }
         };
         Some(Event::new(self.id.clone(), body))
@@ -403,7 +403,7 @@ impl TurnDriver {
 
     /// Forward the turn's events until the agent finishes. A client that leaves cancels
     /// the turn through `cancel`, and its wind-down events are still persisted and
-    /// published. Returns the turn's final reply once it emitted `Done`.
+    /// published. Returns the turn's final reply once the agent finished it.
     pub(crate) async fn drive(
         mut self,
         mut llm_rx: mpsc::Receiver<LlmEvent>,

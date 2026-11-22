@@ -12,7 +12,7 @@ use assistd_config::Config;
 use assistd_ipc::{Event, EventBody, ListenPhase, PlanMode, VoiceCaptureState};
 use assistd_voice::{VoiceCapture, VoiceManager};
 
-use super::turns::{Query, TurnOrigin, finish_interrupted_before_start};
+use super::turns::{Query, TurnOrigin};
 use super::wakeword_handlers::{MicError, MicSession};
 use super::{DispatchError, FailedStep};
 use crate::admission::TurnAdmission;
@@ -88,15 +88,8 @@ impl VoiceService {
             *ptt_capture = Some(self.open_ptt_capture().await?);
         }
         drop(ptt_capture);
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::VoiceState {
-                    state: VoiceCaptureState::Recording,
-                },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        let state = VoiceCaptureState::Recording;
+        tx.reply(id, EventBody::VoiceState { state }).await;
         Ok(())
     }
 
@@ -126,8 +119,8 @@ impl VoiceService {
         })
     }
 
-    /// Transcribe the press being released; `None`, with the request already answered,
-    /// when it heard nothing or was interrupted.
+    /// Transcribe the press being released; `None` when it heard nothing to run as a
+    /// turn or was interrupted.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     pub(super) async fn handle_ptt_stop(
         &self,
@@ -195,7 +188,7 @@ impl VoiceService {
             ))
             .await;
         if cancel.is_cancelled() {
-            finish_interrupted_before_start(tx, id).await?;
+            debug!(target: "assistd::state", "press interrupted; dropping what it heard");
             return Ok(None);
         }
         let _ = tx
@@ -206,7 +199,6 @@ impl VoiceService {
             .await;
 
         if answers_prompt || text.trim().is_empty() {
-            let _ = tx.send(Event::new(id, EventBody::Done)).await;
             return Ok(None);
         }
 
@@ -302,15 +294,8 @@ impl VoiceService {
             .start()
             .await
             .context("listen_start failed")?;
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::ListenState {
-                    phase: self.voice.listen_phase(),
-                },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        let phase = self.voice.listen_phase();
+        tx.reply(id, EventBody::ListenState { phase }).await;
         Ok(())
     }
 
@@ -327,15 +312,8 @@ impl VoiceService {
             Err(_) => Ok(()),
         };
         stopped.context("listen_stop failed")?;
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::ListenState {
-                    phase: ListenPhase::Off,
-                },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        let phase = ListenPhase::Off;
+        tx.reply(id, EventBody::ListenState { phase }).await;
         Ok(())
     }
 
@@ -351,39 +329,38 @@ impl VoiceService {
         }
     }
 
-    pub(super) async fn handle_get_listen_state(&self, id: String, tx: EventSink) {
+    pub(super) async fn handle_get_listen_state(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         let phase = self.voice.listen_phase();
-        let _ = tx
-            .send(Event::new(id.clone(), EventBody::ListenState { phase }))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        tx.reply(id, EventBody::ListenState { phase }).await;
+        Ok(())
     }
 
-    pub(super) async fn handle_voice_toggle(&self, id: String, tx: EventSink) {
+    pub(super) async fn handle_voice_toggle(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         let speech = self.voice.speech();
-        let new_state = !speech.enabled();
-        speech.set_enabled(new_state).await;
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::VoiceOutputState { enabled: new_state },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        let enabled = !speech.enabled();
+        speech.set_enabled(enabled).await;
+        tx.reply(id, EventBody::VoiceOutputState { enabled }).await;
+        Ok(())
     }
 
-    pub(super) async fn handle_voice_skip(&self, id: String, tx: EventSink) {
+    pub(super) async fn handle_voice_skip(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         let speech = self.voice.speech();
         speech.skip().await;
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::VoiceOutputState {
-                    enabled: speech.enabled(),
-                },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        let enabled = speech.enabled();
+        tx.reply(id, EventBody::VoiceOutputState { enabled }).await;
+        Ok(())
     }
 
     /// Cancel every agent turn already received, including ones still
@@ -393,12 +370,16 @@ impl VoiceService {
         self.voice.speech().skip().await;
     }
 
-    pub(super) async fn handle_interrupt_turn(&self, id: String, tx: EventSink) {
+    pub(super) async fn handle_interrupt_turn(&self) -> Result<(), DispatchError> {
         self.interrupt_turns().await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
-    pub(super) async fn handle_get_voice_state(&self, id: String, tx: EventSink) {
+    pub(super) async fn handle_get_voice_state(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         let voice = &self.voice;
         let _ = tx
             .send(Event::new(
@@ -416,7 +397,7 @@ impl VoiceService {
                 ))
                 .await;
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 }
 

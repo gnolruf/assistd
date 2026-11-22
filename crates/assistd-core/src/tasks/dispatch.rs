@@ -12,12 +12,11 @@ use tracing::{debug, warn};
 use assistd_ipc::{Event, EventBody, SuspendReason, TaskQueueOp, TaskQueueSnapshot, TaskRunId};
 use assistd_memory::{TaskRunEnd, WaitingRun};
 
+use super::TaskService;
 use super::runs::DAEMON_STOPPED;
-use super::{TaskError, TaskService};
 use crate::admission::interaction::InteractionState;
 use crate::admission::lanes::{LaneLease, ModelLanes, changed_or_pending};
 use crate::admission::queue::{Cancelled, NextStart, QueueOpError, TurnStart};
-use crate::bus::EventSink;
 
 /// The `id` broadcast `TaskQueue` events carry.
 const TASK_QUEUE_EVENT_ID: &str = "task_queue";
@@ -50,17 +49,6 @@ impl TaskService {
             .spawn_service(move |stopping| startup.fire_on_daemon_started(stopping));
     }
 
-    pub(super) async fn handle_task_queue(
-        &self,
-        id: String,
-        op: TaskQueueOp,
-        tx: EventSink,
-    ) -> Result<(), TaskError> {
-        self.apply_task_queue_op(op).await?;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
-        Ok(())
-    }
-
     /// Drop waiting run `run`, recording it as cancelled, or stop it if it is running.
     pub(super) async fn cancel_task_run(&self, run: TaskRunId) -> Result<(), QueueOpError> {
         let runner = &self.runner;
@@ -82,7 +70,7 @@ impl TaskService {
         }
     }
 
-    async fn apply_task_queue_op(&self, op: TaskQueueOp) -> Result<(), QueueOpError> {
+    pub(super) async fn apply_task_queue_op(&self, op: TaskQueueOp) -> Result<(), QueueOpError> {
         let queue = &self.deps.admission.task_queue;
         match op {
             TaskQueueOp::Move { run, to } => {

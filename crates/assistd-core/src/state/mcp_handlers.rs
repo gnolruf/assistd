@@ -134,7 +134,6 @@ impl McpService {
         if let Some(event) = self.mcp_server_event(&id, &server) {
             let _ = tx.send(event).await;
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -146,23 +145,22 @@ impl McpService {
     ) -> Result<(), DispatchError> {
         let accounts = self.accounts.clone().ok_or(DispatchError::McpDisabled)?;
         let revocation = accounts.logout(self.host.clone(), &server).await?;
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::McpLoggedOut { server, revocation },
-            ))
+        tx.reply(id, EventBody::McpLoggedOut { server, revocation })
             .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
-    pub(super) async fn handle_mcp_status(&self, id: String, tx: EventSink) {
+    pub(super) async fn handle_mcp_status(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         for server in self.host.servers.iter() {
             if let Some(event) = self.mcp_server_event(&id, server.name()) {
                 let _ = tx.send(event).await;
             }
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     fn mcp_server_event(&self, id: &str, name: &str) -> Option<Event> {

@@ -12,7 +12,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-use assistd_ipc::{Event, EventBody, HostName, PausedPrompt, TaskId, TaskRunId};
+use assistd_ipc::{HostName, PausedPrompt, TaskId, TaskRunId};
 use assistd_memory::TaskRecord;
 use assistd_tools::{Answer, Approval, ConfirmationRequest, PromptParking, Unattended};
 
@@ -218,7 +218,6 @@ impl TaskService {
         tx: EventSink,
     ) -> Result<(), TaskError> {
         let Some(allowed) = self.confirms.answer(run, &confirm_id, answer)? else {
-            let _ = tx.send(Event::new(id, EventBody::Done)).await;
             return Ok(());
         };
         let record = self.allow_task_host(allowed).await;
