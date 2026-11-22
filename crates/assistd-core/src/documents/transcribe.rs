@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use assistd_documents::{Extractor, ExtractorError, RenderedPage};
 use assistd_llm::{LlamaServerControl, PageTranscriber, TranscribeError, Transcription};
-use assistd_memory::{DocumentStore, MemoryError, PageReading, WaitingPage};
+use assistd_memory::{DocumentId, DocumentStore, MemoryError, PageReading, WaitingPage};
+use assistd_utils::backlog::{
+    Backlog, DrainEnd, Page, Pass, Signals, drain, keep_drained, permitted,
+};
 use assistd_utils::readiness::NotReady;
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -17,8 +20,8 @@ use tracing::{debug, info, warn};
 use super::indexer::DocumentIndex;
 use crate::presence::{BorrowedModel, PresenceError, PresenceManager};
 
-/// How long a run that stopped early is left alone, its permit still held,
-/// before the next one starts.
+/// How long a run that stopped early is left alone before the next one starts,
+/// since each loads a model.
 const RETRY_DELAY: Duration = Duration::from_secs(300);
 
 /// Times the extraction worker may exit over one page before that page fails.
@@ -96,55 +99,6 @@ pub struct TranscriptionDeps {
 }
 
 impl TranscriptionDeps {
-    /// One run: nothing when no page waits, else the OCR model on the drowsy server
-    /// until none does, the daemon leaves `Drowsy` or `shutdown` flips.
-    async fn run_once(
-        &self,
-        status: &PageTranscription,
-        shutdown: &watch::Receiver<bool>,
-    ) -> Result<(), RunStopped> {
-        if self.store.next_waiting_page().await?.is_none() {
-            return Ok(());
-        }
-        let mut counts = RunCounts::default();
-        let reading = self.read_waiting_pages(status, &mut counts, shutdown);
-        let lent = self.presence.lend_while_drowsy(&self.model, reading).await;
-        if counts.read + counts.failed > 0 {
-            info!(
-                target: "assistd::documents",
-                "page transcription read {} page(s) and failed on {}",
-                counts.read, counts.failed
-            );
-        }
-        match lent {
-            Ok(Some(read)) => read,
-            Ok(None) | Err(PresenceError::NotDrowsy) => Ok(()),
-            Err(error) => Err(RunStopped::Presence(error)),
-        }
-    }
-
-    /// Read page after page with the model now loaded, reporting the run as running.
-    async fn read_waiting_pages(
-        &self,
-        status: &PageTranscription,
-        counts: &mut RunCounts,
-        shutdown: &watch::Receiver<bool>,
-    ) -> Result<(), RunStopped> {
-        status.record(TranscriptionRun::Running);
-        while !*shutdown.borrow() {
-            let Some(page) = self.store.next_waiting_page().await? else {
-                return Ok(());
-            };
-            let reading = self.read(&page, counts).await?;
-            match reading {
-                PageReading::Text(_) => counts.read += 1,
-                PageReading::Failed => counts.failed += 1,
-            }
-            self.store.store_page_reading(page, reading).await?;
-        }
-        Ok(())
-    }
-
     /// What `page` reads as: nothing when it is blank, and failed when it cannot be
     /// rendered or the model's reply is not its text.
     async fn read(
@@ -212,46 +166,147 @@ impl TranscriptionDeps {
     }
 }
 
+/// The pages waiting for transcription, read with the OCR model on loan. A page done
+/// no longer waits, so the first one waiting is always the next.
+struct WaitingPages<'a> {
+    deps: &'a TranscriptionDeps,
+    permit: watch::Receiver<bool>,
+    counts: RunCounts,
+}
+
+impl Backlog for WaitingPages<'_> {
+    type RowId = (DocumentId, usize);
+    type Row = WaitingPage;
+    type Error = RunStopped;
+
+    fn permit(&mut self) -> Option<&mut watch::Receiver<bool>> {
+        Some(&mut self.permit)
+    }
+
+    async fn page_after(&self, _after: Option<Self::RowId>) -> Result<Page<Self>, RunStopped> {
+        let next = self.deps.store.next_waiting_page().await?;
+        Ok(next
+            .map(|page| ((page.document_id, page.page), page))
+            .into_iter()
+            .collect())
+    }
+
+    async fn do_page(&mut self, page: Page<Self>) -> Result<usize, RunStopped> {
+        for (_, page) in page {
+            let reading = self.deps.read(&page, &mut self.counts).await?;
+            match reading {
+                PageReading::Text(_) => self.counts.read += 1,
+                PageReading::Failed => self.counts.failed += 1,
+            }
+            self.deps.store.store_page_reading(page, reading).await?;
+        }
+        Ok(0)
+    }
+}
+
+/// One run of page transcription: the waiting pages drained on a loan of the server.
+struct TranscriptionPass<'a> {
+    deps: TranscriptionDeps,
+    status: &'a PageTranscription,
+}
+
+impl TranscriptionPass<'_> {
+    /// Borrow the server for the OCR model and drain the waiting pages, without the
+    /// loan when none waits. `None` when the loan was cut short or the daemon is not
+    /// `Drowsy` after all.
+    async fn drain_on_loan(&self, signals: &Signals) -> Result<Option<DrainEnd>, RunStopped> {
+        let deps = &self.deps;
+        if deps.store.next_waiting_page().await?.is_none() {
+            return Ok(Some(DrainEnd::Emptied { rows_left: 0 }));
+        }
+        let mut pages = WaitingPages {
+            deps,
+            permit: deps.permit.clone(),
+            counts: RunCounts::default(),
+        };
+        let draining = async {
+            self.status.record(TranscriptionRun::Running);
+            drain_through_wakes(&mut pages, signals).await
+        };
+        let lent = deps.presence.lend_while_drowsy(&deps.model, draining).await;
+        let RunCounts { read, failed, .. } = pages.counts;
+        if read + failed > 0 {
+            info!(
+                target: "assistd::documents",
+                "page transcription read {read} page(s) and failed on {failed}"
+            );
+        }
+        match lent {
+            Ok(Some(ended)) => ended.map(Some),
+            Ok(None) | Err(PresenceError::NotDrowsy) => Ok(None),
+            Err(error) => Err(RunStopped::Presence(error)),
+        }
+    }
+}
+
+impl Pass for TranscriptionPass<'_> {
+    type Error = RunStopped;
+
+    async fn run(&mut self, signals: &Signals) -> Result<DrainEnd, RunStopped> {
+        let mut shutdown = signals.shutdown.clone();
+        tokio::select! {
+            biased;
+            _ = shutdown.wait_for(|stop| *stop) => return Ok(DrainEnd::Shutdown),
+            () = signals.wake.notified() => return Ok(DrainEnd::Woken),
+            () = permitted(Some(&mut self.deps.permit)) => {}
+        }
+        let ended = self.drain_on_loan(signals).await;
+        self.status.record(match &ended {
+            Ok(_) => TranscriptionRun::Idle,
+            Err(stopped) => TranscriptionRun::Stopped(stopped.to_string()),
+        });
+        if let Some(ended) = ended? {
+            return Ok(ended);
+        }
+        tokio::select! {
+            biased;
+            _ = shutdown.wait_for(|stop| *stop) => Ok(DrainEnd::Shutdown),
+            () = signals.wake.notified() => Ok(DrainEnd::Woken),
+            permit = self.deps.permit.changed() => Ok(match permit {
+                Ok(()) => DrainEnd::Woken,
+                Err(_) => DrainEnd::Shutdown,
+            }),
+        }
+    }
+}
+
 /// Until `shutdown` flips, read the waiting pages with the OCR model whenever the
-/// permit holds and again when the store signals that more wait. Pages that
-/// failed before wait again, and a run that stops
-/// early is retried in five minutes. The store's database must stay open meanwhile.
+/// permit holds and again when the store signals that more wait. Pages that failed
+/// before wait again, and a run that stops early is retried in five minutes. The
+/// store's database must stay open meanwhile.
 pub async fn transcribe_while_permitted(
     deps: TranscriptionDeps,
     index: &DocumentIndex,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) {
     if let Err(error) = deps.store.retry_failed_transcriptions().await {
         warn!(target: "assistd::documents", "failed pages are not tried again: {error}");
     }
-    let status = index.transcription();
-    let pages_to_transcribe = deps.store.pages_to_transcribe();
-    let mut permit = deps.permit.clone();
+    let signals = Signals {
+        wake: deps.store.pages_to_transcribe(),
+        shutdown,
+    };
+    let pass = TranscriptionPass {
+        deps,
+        status: index.transcription(),
+    };
+    keep_drained("page transcription", &signals, |_| RETRY_DELAY, pass).await;
+}
+
+/// Drain `pages` to the end, listing again after a wake so the loan is kept.
+async fn drain_through_wakes(
+    pages: &mut WaitingPages<'_>,
+    signals: &Signals,
+) -> Result<DrainEnd, RunStopped> {
     loop {
-        tokio::select! {
-            biased;
-            _ = shutdown.wait_for(|stop| *stop) => return,
-            permitted = permit.wait_for(|permitted| *permitted) => {
-                if permitted.is_err() {
-                    return;
-                }
-            }
-        }
-        let ended = deps.run_once(status, &shutdown).await;
-        let stopped_early = ended.is_err();
-        status.record(match ended {
-            Ok(()) => TranscriptionRun::Idle,
-            Err(stopped) => {
-                warn!(target: "assistd::documents", "page transcription stopped: {stopped}");
-                TranscriptionRun::Stopped(stopped.to_string())
-            }
-        });
-        tokio::select! {
-            biased;
-            _ = shutdown.wait_for(|stop| *stop) => return,
-            _ = permit.changed() => {}
-            () = pages_to_transcribe.notified(), if !stopped_early => {}
-            () = tokio::time::sleep(RETRY_DELAY), if stopped_early => {}
+        match drain(pages, signals).await? {
+            DrainEnd::Woken => {}
+            ended => return Ok(ended),
         }
     }
 }
