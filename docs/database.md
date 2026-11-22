@@ -76,6 +76,7 @@ erDiagram
         text tool_name
         int tool_exit_code
         int tool_duration_ms
+        int tool_read_host "0 or 1"
     }
     branch_messages {
         int branch_id PK, FK

@@ -330,6 +330,42 @@ async fn step_with_parallel_calls_persists_as_one_assistant_row() {
     assert!(tool_calls(&rows[4]).is_empty());
 }
 
+#[tokio::test]
+async fn a_tool_result_is_saved_with_whether_its_call_read_this_machine() {
+    let not_offered = ToolCall {
+        id: "call-b".into(),
+        name: "gone".into(),
+        arguments: serde_json::json!({}),
+    };
+    let backend = scripted(
+        [Step::tool_calls(vec![
+            run_call("call-a", "echo a"),
+            not_offered,
+        ])],
+        "All done.",
+    );
+    let (state, conv, _session, branch) = branch_state_with(backend, echo_tools()).await;
+    let (res, _) = dispatch(&state, query("rq", "go")).await;
+    res.unwrap();
+    state.transcript.drain_inflight().await;
+
+    let rows = conv
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
+    let read_host: Vec<_> = rows
+        .iter()
+        .filter_map(|row| match &row.message.kind {
+            MessageKind::Tool {
+                call_id, read_host, ..
+            } => Some((call_id.as_str(), *read_host)),
+            MessageKind::User | MessageKind::Assistant { .. } => None,
+        })
+        .collect();
+    assert_eq!(read_host, [("call-a", true), ("call-b", false)]);
+}
+
 fn tool_calls(row: &HistoryRow) -> &[PersistedToolCall] {
     match &row.message.kind {
         MessageKind::Assistant { tool_calls, .. } => tool_calls,

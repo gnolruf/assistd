@@ -59,7 +59,7 @@ async fn a_tool_turn_round_trips_with_its_stats_on_its_last_row() {
         .append_message_to_branch(
             branch,
             turn,
-            PersistedMessage::tool_result("file1\nfile2", "c-1", "run", outcome),
+            PersistedMessage::tool_result("file1\nfile2", "c-1", "run", outcome, true),
         )
         .await
         .unwrap();
@@ -103,6 +103,7 @@ async fn a_tool_turn_round_trips_with_its_stats_on_its_last_row() {
                         call_id: "c-1".into(),
                         tool_name: "run".into(),
                         outcome,
+                        read_host: true,
                     },
                 },
                 turn_stats: Some(stats),
@@ -502,7 +503,8 @@ async fn relay_trace_round_trips_follows_forks_and_goes_with_undo() {
         exit_code: 1,
         duration_ms: 42_000,
     };
-    let result = PersistedMessage::tool_result("[error] relay: step 2", "c-1", "relay", outcome);
+    let result =
+        PersistedMessage::tool_result("[error] relay: step 2", "c-1", "relay", outcome, true);
     let appended = store
         .append_relay_result(branch, turn, result, relay_plan())
         .await

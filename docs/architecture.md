@@ -658,8 +658,10 @@ asks before a plan with a web step starts, showing those steps' tasks: either
 could carry what was read. `Tool::reads_host` decides what counts: every tool
 and `run` command does except `web`, a `relay` of web steps only, a `remember`
 save, and the plan-mode tools. The record (`HostReads`) travels in the `TurnContext`. The
-user's turns keep one between them, rebuilt from the branch's saved
-tool calls when another branch becomes active; a task run starts with a new
+user's turns keep one between them. Each tool result is saved with whether its
+call read this machine (`messages.tool_read_host`), decided by the tools the
+call ran on, and when another branch becomes active the record is read back
+from that branch's saved results; a task run starts with a new
 one; a sub-agent's reads are not recorded, since its quarantine holds files or
 the web, never both. Host-level trust remains for a history that has only
 searched and fetched, which can still send what the user typed, recalled
