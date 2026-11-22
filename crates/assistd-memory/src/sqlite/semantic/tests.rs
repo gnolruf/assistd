@@ -1,3 +1,5 @@
+use std::pin::pin;
+
 use super::*;
 use crate::sqlite::SqliteTranscriptStore;
 use crate::{BranchId, MemoryStore, MessageId, PersistedMessage, PersistedRole, TranscriptStore};
@@ -104,6 +106,12 @@ async fn embed_chunk(store: &SqliteSemanticStore, chunk_id: ChunkId, vector: &[f
         }])
         .await
         .unwrap();
+}
+
+/// Whether `wake` was signalled since it was last asked; asking takes the signal.
+fn signalled(wake: &Notify) -> bool {
+    let mut notified = pin!(wake.notified());
+    notified.as_mut().enable()
 }
 
 async fn save_memory(handle: &SqliteHandle, key: &str, value: &str) -> MemoryId {
@@ -1353,4 +1361,147 @@ fn quantised_score_tracks_the_exact_dot_product() {
         None
     );
     assert_eq!(score_against_quantised(&query, &[0u8; 3]), None);
+}
+
+#[tokio::test]
+async fn a_write_signals_the_embedding_worker_only_when_it_leaves_a_row_to_embed() {
+    let (handle, store, _temp) = fresh().await;
+    let rows_to_embed = store.rows_to_embed();
+    let memories = MemoryStore::new(handle.clone());
+    let transcript = Transcript::new(&handle).await;
+    assert!(!signalled(&rows_to_embed), "a session with no message");
+
+    transcript.append("said").await;
+    assert!(signalled(&rows_to_embed), "a message cut into a chunk");
+    let uncut = SqliteTranscriptStore::new(handle.clone()).without_message_chunks();
+    let stored_uncut = uncut.begin_turn(transcript.branch, PersistedMessage::user("uncut"));
+    stored_uncut.await.unwrap();
+    assert!(
+        !signalled(&rows_to_embed),
+        "a message stored without chunks"
+    );
+    assert_eq!(
+        transcript.store.chunk_unchunked_messages().await.unwrap(),
+        1
+    );
+    assert!(signalled(&rows_to_embed), "a stored message cut later");
+    assert_eq!(
+        transcript.store.chunk_unchunked_messages().await.unwrap(),
+        0
+    );
+    assert!(!signalled(&rows_to_embed), "no message left to cut");
+
+    let memory = memories.save("k", "v".into()).await.unwrap().id;
+    assert!(signalled(&rows_to_embed), "a new memory");
+    memories.save("k", "v".into()).await.unwrap();
+    assert!(
+        !signalled(&rows_to_embed),
+        "a memory saved with the value it had"
+    );
+    memories.save("k", "changed".into()).await.unwrap();
+    assert!(signalled(&rows_to_embed), "a memory saved with a new value");
+
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let index = || {
+        let path = PathBuf::from("/notes/a.md");
+        store.index_document(pass, path, STAMP, one_page("words"), EmptyPages::Final)
+    };
+    index().await.unwrap();
+    assert!(signalled(&rows_to_embed), "a document stored with a chunk");
+    index().await.unwrap();
+    assert!(!signalled(&rows_to_embed), "a document stored unchanged");
+
+    let refused = Embedding {
+        target: EmbeddingTarget::Memory(memory),
+        text: "changed".to_string(),
+        vector: None,
+    };
+    store.store_embeddings(vec![refused]).await.unwrap();
+    assert!(!signalled(&rows_to_embed), "a row marked unembeddable");
+    assert_eq!(store.clear_unembeddable().await.unwrap(), 1);
+    assert!(signalled(&rows_to_embed), "a refusal mark cleared");
+    assert_eq!(store.clear_unembeddable().await.unwrap(), 0);
+    assert!(!signalled(&rows_to_embed), "no refusal mark to clear");
+
+    let space = EmbeddingSpace {
+        model: "owner/repo:Q8_0".to_string(),
+        dim: 2,
+        server_args: String::new(),
+        document_prefix: String::new(),
+    };
+    store.adopt_embedding_space(&space).await.unwrap();
+    assert!(!signalled(&rows_to_embed), "the first space recorded");
+    let other_space = EmbeddingSpace { dim: 3, ..space };
+    store.adopt_embedding_space(&other_space).await.unwrap();
+    assert!(
+        signalled(&rows_to_embed),
+        "the vectors dropped for a new space"
+    );
+    store.adopt_embedding_space(&other_space).await.unwrap();
+    assert!(
+        !signalled(&rows_to_embed),
+        "the recorded space adopted again"
+    );
+}
+
+#[tokio::test]
+async fn a_write_signals_page_transcription_only_when_it_leaves_a_page_waiting() {
+    let (_handle, store, _temp) = fresh().await;
+    let rows_to_embed = store.rows_to_embed();
+    let pages_to_transcribe = store.pages_to_transcribe();
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let index = |name: &str, pages: &[&str], empty_pages| {
+        let path = Path::new("/notes").join(name);
+        let pages = pages.iter().map(|page| (*page).to_string()).collect();
+        store.index_document(pass, path, STAMP, pages, empty_pages)
+    };
+
+    let typed = index("typed.pdf", &["typed"], EmptyPages::AwaitTranscription);
+    typed.await.unwrap();
+    assert!(!signalled(&pages_to_transcribe), "every page has text");
+    let finished = index("slides.odp", &["", "shown"], EmptyPages::Final);
+    finished.await.unwrap();
+    assert!(
+        !signalled(&pages_to_transcribe),
+        "empty pages stored as final"
+    );
+    let scan = index(
+        "scan.pdf",
+        &["", "", "typed"],
+        EmptyPages::AwaitTranscription,
+    );
+    scan.await.unwrap();
+    assert!(
+        signalled(&pages_to_transcribe),
+        "a document with scanned pages"
+    );
+    assert!(signalled(&rows_to_embed));
+
+    let first = store.next_waiting_page().await.unwrap().expect("a page");
+    let read = |page: usize, reading: PageReading| {
+        let waiting = WaitingPage {
+            page,
+            ..first.clone()
+        };
+        store.store_page_reading(waiting, reading)
+    };
+    read(0, PageReading::Text("scanned".into())).await.unwrap();
+    assert!(
+        !signalled(&rows_to_embed),
+        "nothing is cut while a page waits"
+    );
+    read(1, PageReading::Failed).await.unwrap();
+    assert!(signalled(&rows_to_embed), "the read page cut into a chunk");
+    assert!(
+        !signalled(&pages_to_transcribe),
+        "readings leave no page waiting"
+    );
+
+    assert_eq!(store.retry_failed_transcriptions().await.unwrap(), 1);
+    assert!(
+        signalled(&pages_to_transcribe),
+        "a failed page set to wait again"
+    );
+    assert_eq!(store.retry_failed_transcriptions().await.unwrap(), 0);
+    assert!(!signalled(&pages_to_transcribe), "no failed page to retry");
 }

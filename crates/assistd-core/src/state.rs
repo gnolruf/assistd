@@ -207,13 +207,8 @@ impl AppState {
         let config = Arc::new(config);
         let bus = EventBus::new();
         let admission = Arc::new(TurnAdmission::new(Arc::clone(&config), slots));
-        let embed_wake = memory
-            .embedding_cfg
-            .enabled
-            .then(|| Arc::clone(&memory.embed_wake));
         let transcript = Arc::new(TranscriptLog::new(
             Arc::clone(&memory.transcripts),
-            embed_wake,
             Arc::clone(&session_ctx),
         ));
         let agents = agent_spec(&config, &subsystems);

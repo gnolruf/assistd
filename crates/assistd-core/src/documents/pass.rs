@@ -15,7 +15,7 @@ use assistd_tools::policy::{PathGuards, on_blocking_pool};
 use assistd_utils::readiness::NotReady;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
 use super::indexer::DocumentIndex;
@@ -117,8 +117,6 @@ pub struct IndexDeps {
     pub store: Arc<dyn DocumentStore>,
     /// A pass with a file to read waits until its worker is ready, however long.
     pub extractor: Arc<Extractor>,
-    /// Wakes the embedding worker after a document leaves chunks to embed.
-    pub embed_wake: Arc<Notify>,
 }
 
 /// Why a pass ended without removing the documents it did not see.
@@ -223,12 +221,6 @@ impl RunningPass<'_> {
         let indexed = store.index_document(self.pass, path, stamp, pages, empty_pages);
         let added = indexed.await?;
         self.counts.indexed += 1;
-        if !added.is_empty() {
-            self.deps.embed_wake.notify_one();
-        }
-        if empty_pages == EmptyPages::AwaitTranscription {
-            self.index.transcription().pages_may_wait();
-        }
         Ok(added.len() as u64)
     }
 
@@ -468,7 +460,6 @@ mod tests {
         let deps = IndexDeps {
             store: store.clone(),
             extractor: Arc::new(Extractor::starting()),
-            embed_wake: Arc::default(),
         };
         let root = Arc::new(IndexRoot::new(&root_dir, &DocumentsConfig::default()).unwrap());
         let guards = Arc::new(PathGuards::default());

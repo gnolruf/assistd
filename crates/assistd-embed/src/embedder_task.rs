@@ -11,7 +11,7 @@ use assistd_memory::{
 use assistd_utils::backlog::{Backlog, DrainEnd, Pass, Signals, drain, keep_drained};
 use assistd_utils::backoff::backoff_delay;
 use thiserror::Error;
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::{BATCH_SIZE, EmbedError, Embedder};
@@ -228,19 +228,21 @@ impl SingleInputs<'_> {
     }
 }
 
-/// Spawn the worker. It embeds the rows missing an embedding at once and again after each
-/// `wake`, document chunks last and only while `documents_gate` reads `true`, retrying with
-/// backoff a pass that stopped early or left rows. It exits on `shutdown` between batches;
-/// `store`'s database must outlive it.
+/// Spawn the worker. It embeds the rows missing an embedding at once and again each time
+/// `store` signals that a write left more, document chunks last and only while
+/// `documents_gate` reads `true`, retrying with backoff a pass that stopped early or left
+/// rows. It exits on `shutdown` between batches; `store`'s database must outlive it.
 pub fn spawn_embedder_task(
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn EmbeddingQueue>,
-    wake: Arc<Notify>,
     documents_gate: watch::Receiver<bool>,
     shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let signals = Signals { wake, shutdown };
+        let signals = Signals {
+            wake: store.rows_to_embed(),
+            shutdown,
+        };
         let backlogs = [
             (RowKind::MessageChunks, None),
             (RowKind::Memories, None),
@@ -342,6 +344,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use tokio::sync::Notify;
 
     use assistd_memory::{
         ChunkId, Embedding, EmbeddingSpace, MemoryId, Result as MemoryResult, UnindexedRows,
@@ -412,6 +415,7 @@ mod tests {
         missing_document_chunks: Mutex<BTreeMap<ChunkId, String>>,
         missing_memories: Mutex<BTreeMap<MemoryId, String>>,
         stored: Mutex<Vec<Embedding>>,
+        rows_to_embed: Arc<Notify>,
     }
 
     fn page_after<Id: Copy + Ord>(
@@ -436,6 +440,9 @@ mod tests {
             _space: &EmbeddingSpace,
         ) -> MemoryResult<Option<EmbeddingSpace>> {
             Ok(None)
+        }
+        fn rows_to_embed(&self) -> Arc<Notify> {
+            Arc::clone(&self.rows_to_embed)
         }
         async fn count_missing(&self) -> MemoryResult<UnindexedRows> {
             Ok(UnindexedRows::default())
@@ -484,7 +491,6 @@ mod tests {
     struct Harness {
         embedder: Arc<ScriptedEmbedder>,
         store: Arc<PendingStore>,
-        wake: Arc<Notify>,
         documents_gate: watch::Sender<bool>,
         shutdown: watch::Sender<bool>,
         task: JoinHandle<()>,
@@ -504,20 +510,17 @@ mod tests {
         fn spawn_with(embedder: ScriptedEmbedder) -> Self {
             let embedder = Arc::new(embedder);
             let store = Arc::new(PendingStore::default());
-            let wake = Arc::new(Notify::new());
             let (documents_gate, documents_gate_rx) = watch::channel(true);
             let (shutdown, shutdown_rx) = watch::channel(false);
             Self {
                 task: spawn_embedder_task(
                     embedder.clone(),
                     store.clone(),
-                    wake.clone(),
                     documents_gate_rx,
                     shutdown_rx,
                 ),
                 embedder,
                 store,
-                wake,
                 documents_gate,
                 shutdown,
             }
@@ -607,7 +610,7 @@ mod tests {
         harness.add_chunks(&["late"]);
         tokio::time::sleep(Duration::from_secs(600)).await;
         assert_eq!(harness.missing_chunks(), 1, "nothing woke the worker");
-        harness.wake.notify_one();
+        harness.store.rows_to_embed.notify_one();
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(harness.missing_chunks(), 0);
 
@@ -717,7 +720,7 @@ mod tests {
         assert_eq!(harness.missing_document_chunks(), 1);
 
         harness.add_chunks(&["said later"]);
-        harness.wake.notify_one();
+        harness.store.rows_to_embed.notify_one();
         tokio::time::sleep(Duration::from_secs(600)).await;
         assert_eq!(harness.missing_chunks(), 0);
         assert_eq!(harness.missing_document_chunks(), 1);
@@ -748,7 +751,7 @@ mod tests {
         );
 
         harness.add_chunks(&["said"]);
-        harness.wake.notify_one();
+        harness.store.rows_to_embed.notify_one();
         harness.documents_gate.send_replace(true);
         tokio::time::sleep(Duration::from_secs(600)).await;
         assert_eq!(harness.missing_document_chunks(), 0);

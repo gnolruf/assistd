@@ -8,7 +8,7 @@ rust-version.workspace = true
 [dependencies]
 assistd-ipc = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["fs", "sync"] }
 tracing = { workspace = true }
 rusqlite = { workspace = true }
 tokio-rusqlite = { workspace = true }

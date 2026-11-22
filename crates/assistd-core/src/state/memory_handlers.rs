@@ -148,7 +148,7 @@ impl MemoryStack {
         Ok(())
     }
 
-    /// Clear the refusal marks, wake the embedding worker, and stream the rows still
+    /// Clear the refusal marks, which wakes the embedding worker, and stream the rows still
     /// waiting as `ReindexProgress` until none is or the client leaves.
     pub(super) async fn handle_memory_reindex(
         &self,
@@ -160,7 +160,6 @@ impl MemoryStack {
             .clear_unembeddable()
             .await
             .context("reindex: clear refusal marks")?;
-        self.embed_wake.notify_one();
         let mut reported = None;
         loop {
             let waiting = self

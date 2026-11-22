@@ -4,9 +4,11 @@ use std::ffi::OsString;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::{OpenFlags, Transaction};
+use tokio::sync::Notify;
 use tokio_rusqlite::Connection;
 
 use crate::{MemoryError, Result, migrations};
@@ -35,12 +37,15 @@ const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 /// Cheaply cloneable handle shared by every store: document searches, other vector
 /// scans and other reads each go to their own read-only connection and writes
 /// to the only writable one, each run in submission order on its connection's own thread.
+/// It also carries the wake signal of each backlog the database holds.
 #[derive(Debug, Clone)]
 pub struct SqliteHandle {
     reader: Connection,
     search_reader: Connection,
     document_search_reader: Connection,
     writer: Connection,
+    rows_to_embed: Arc<Notify>,
+    pages_to_transcribe: Arc<Notify>,
 }
 
 impl SqliteHandle {
@@ -57,7 +62,19 @@ impl SqliteHandle {
             search_reader,
             document_search_reader,
             writer,
+            rows_to_embed: Arc::default(),
+            pages_to_transcribe: Arc::default(),
         })
+    }
+
+    /// Signalled once a committed write has left a row to embed.
+    pub(super) fn rows_to_embed(&self) -> &Arc<Notify> {
+        &self.rows_to_embed
+    }
+
+    /// Signalled once a committed write has left a page waiting for transcription.
+    pub(super) fn pages_to_transcribe(&self) -> &Arc<Notify> {
+        &self.pages_to_transcribe
     }
 
     /// Refresh planner statistics and close every connection once every call
