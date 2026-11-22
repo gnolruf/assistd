@@ -538,6 +538,7 @@ struct MessageColumns {
     tool_name: Option<String>,
     tool_exit_code: Option<i64>,
     tool_duration_ms: Option<u64>,
+    tool_read_host: Option<bool>,
 }
 
 impl MessageColumns {
@@ -560,11 +561,13 @@ impl MessageColumns {
                 call_id,
                 tool_name,
                 outcome,
+                read_host,
             } => Self {
                 tool_call_id: Some(call_id),
                 tool_name: Some(tool_name),
                 tool_exit_code: Some(outcome.exit_code),
                 tool_duration_ms: Some(outcome.duration_ms),
+                tool_read_host: Some(read_host),
                 ..Self::default()
             },
         }
@@ -652,8 +655,9 @@ fn insert_message(
     tx.prepare_cached(
         "INSERT INTO messages
             (session_id, turn_id, created_at, role, content, reasoning, reasoning_ms,
-             tool_calls, tool_call_id, tool_name, tool_exit_code, tool_duration_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             tool_calls, tool_call_id, tool_name, tool_exit_code, tool_duration_ms,
+             tool_read_host)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          RETURNING id",
     )?
     .query_row(
@@ -670,6 +674,7 @@ fn insert_message(
             columns.tool_name,
             columns.tool_exit_code,
             columns.tool_duration_ms,
+            columns.tool_read_host,
         ],
         |r| r.get(0),
     )
@@ -882,6 +887,7 @@ fn history_rows(
                  m.tool_name,
                  m.tool_exit_code,
                  m.tool_duration_ms,
+                 m.tool_read_host,
                  LEAD(m.turn_id) OVER (ORDER BY bm.seq) IS NOT m.turn_id,
                  t.duration_ms,
                  t.generated_tokens
@@ -943,6 +949,7 @@ fn history_row(row: &Row<'_>) -> rusqlite::Result<HistoryRow> {
                 exit_code: row.get(9)?,
                 duration_ms: row.get(10)?,
             },
+            read_host: row.get(11)?,
         },
     };
     Ok(HistoryRow {
@@ -952,7 +959,7 @@ fn history_row(row: &Row<'_>) -> rusqlite::Result<HistoryRow> {
             content: row.get(3)?,
             kind,
         },
-        turn_stats: turn_stats_at(row, 11)?,
+        turn_stats: turn_stats_at(row, 12)?,
     })
 }
 

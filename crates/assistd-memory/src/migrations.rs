@@ -49,7 +49,8 @@ CREATE TABLE turns (
     CHECK ((duration_ms IS NULL) = (generated_tokens IS NULL))
 ) STRICT;
 
--- `role` is 0 user, 1 assistant, 2 tool.
+-- `role` is 0 user, 1 assistant, 2 tool. `tool_read_host` is set on a result whose call
+-- could put data from this machine in it.
 CREATE TABLE messages (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id       INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -64,6 +65,7 @@ CREATE TABLE messages (
     tool_name        TEXT,
     tool_exit_code   INTEGER,
     tool_duration_ms INTEGER CHECK (tool_duration_ms >= 0),
+    tool_read_host   INTEGER CHECK (tool_read_host IN (0, 1)),
     FOREIGN KEY (session_id, turn_id) REFERENCES turns(session_id, id),
     CHECK (tool_calls IS NULL OR (role = 1 AND json_valid(tool_calls)
                                   AND json_type(tool_calls) = 'array'
@@ -73,7 +75,8 @@ CREATE TABLE messages (
     CHECK ((role = 2) = (tool_call_id IS NOT NULL)),
     CHECK ((role = 2) = (tool_name IS NOT NULL)),
     CHECK ((role = 2) = (tool_exit_code IS NOT NULL)),
-    CHECK ((role = 2) = (tool_duration_ms IS NOT NULL))
+    CHECK ((role = 2) = (tool_duration_ms IS NOT NULL)),
+    CHECK ((role = 2) = (tool_read_host IS NOT NULL))
 ) STRICT;
 CREATE INDEX idx_messages_session ON messages(session_id);
 CREATE INDEX idx_messages_turn ON messages(turn_id);

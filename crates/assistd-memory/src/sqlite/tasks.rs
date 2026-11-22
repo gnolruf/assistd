@@ -1042,7 +1042,7 @@ mod tests {
                 entries: Vec::new(),
             }),
         };
-        let result = PersistedMessage::tool_result("done", "c-1", "relay", outcome);
+        let result = PersistedMessage::tool_result("done", "c-1", "relay", outcome, true);
         transcripts
             .append_relay_result(branch, turn, result, vec![step])
             .await

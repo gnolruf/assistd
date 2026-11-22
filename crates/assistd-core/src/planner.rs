@@ -217,14 +217,6 @@ impl Planner {
             .with_planning_tools(Arc::new(planning))
     }
 
-    /// Every tool a user turn over `acting` may have called, acting or planning.
-    pub(crate) fn user_turn_tools(acting: &ToolRegistry) -> ToolRegistry {
-        let mut tools = acting.clone();
-        tools.register(EnterPlanModeTool);
-        tools.register(ExitPlanModeTool);
-        tools
-    }
-
     /// Run a planning turn on `ask` over `backend`, streaming it on `tx`, then ask for the
     /// task prompt rewritten as a brief for an unattended run, with the plan of that brief,
     /// each action checked against the machine and `permissions`, and the mode its runs are

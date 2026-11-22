@@ -164,6 +164,8 @@ pub enum LlmEvent {
         id: String,
         name: String,
         result: Box<ToolReport>,
+        /// Whether the call could put data from this machine in `result`.
+        read_host: bool,
     },
     /// Progress of a relay running inside the tool call in flight.
     Relay(RelayEvent),

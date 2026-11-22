@@ -190,8 +190,10 @@ impl TurnTranslator {
                 id: call_id,
                 name,
                 result,
+                read_host,
             } => {
-                self.persist_tool_result(call_id, &name, &result).await;
+                self.persist_tool_result(call_id, &name, &result, read_host)
+                    .await;
                 EventBody::ToolResult {
                     name,
                     result: *result,
@@ -267,14 +269,25 @@ impl TurnTranslator {
         self.persist_message(msg, None).await;
     }
 
-    async fn persist_tool_result(&mut self, call_id: String, name: &str, result: &ToolReport) {
+    async fn persist_tool_result(
+        &mut self,
+        call_id: String,
+        name: &str,
+        result: &ToolReport,
+        read_host: bool,
+    ) {
         self.awaiting_tool_result = false;
         let outcome = ToolOutcome {
             exit_code: result.exit_code.into(),
             duration_ms: result.duration_ms,
         };
-        let msg =
-            PersistedMessage::tool_result(result.output.clone(), call_id, name.to_owned(), outcome);
+        let msg = PersistedMessage::tool_result(
+            result.output.clone(),
+            call_id,
+            name.to_owned(),
+            outcome,
+            read_host,
+        );
         let relay_steps = self.relay.take().map(RelayTraceBuilder::finish);
         self.persist_message(msg, relay_steps).await;
     }

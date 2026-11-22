@@ -368,9 +368,8 @@ impl TurnService {
 
     async fn active_branch_host_reads(&self) -> HostReads {
         let (_session, branch) = self.deps.session_ctx.current().await;
-        let offered = Planner::user_turn_tools(&self.deps.tools.snapshot());
         self.host_reads
-            .of(branch, self.deps.transcript.store().as_ref(), &offered)
+            .of(branch, self.deps.transcript.store().as_ref())
             .await
     }
 

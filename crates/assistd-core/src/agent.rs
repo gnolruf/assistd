@@ -20,7 +20,7 @@ use assistd_llm::{
     HealthWaitError, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall, ToolResultPayload,
     TurnBackend,
 };
-use assistd_tools::{RelayObserver, ToolOutput, ToolRegistry, TurnContext};
+use assistd_tools::{RelayObserver, ToolError, ToolOutput, ToolRegistry, TurnContext};
 use assistd_utils::text::panic_message;
 
 use crate::recovery::{Component, StatusSeverity};
@@ -191,7 +191,7 @@ impl Agent {
         let mut results = Vec::with_capacity(calls.len());
         for call in calls {
             let result = cancelled_tool_result(call, "ended; tools are unavailable");
-            results.push(send_tool_result(turn, call, result).await);
+            results.push(send_tool_result(turn, call, result, false).await);
         }
         self.backend.push_tool_results(results).await?;
         let _ = turn.tx.send(LlmEvent::Done).await;
@@ -366,19 +366,22 @@ impl Agent {
             () = turn.cancel.cancelled() => None,
             r = dispatch_tool_call(turn, call, self.spec.tool_deadline) => Some(r),
         };
-        let result = dispatched.unwrap_or_else(|| {
+        let (result, read_host) = dispatched.unwrap_or_else(|| {
             warn!(
                 target: "assistd::agent",
                 iteration = turn.iteration,
                 tool = %call.name,
                 "cancellation fired during tool dispatch; abandoning tool"
             );
-            cancelled_tool_result(call, "cancelled during dispatch")
+            (
+                cancelled_tool_result(call, "cancelled during dispatch"),
+                false,
+            )
         });
         let result = quoting_decline_messages(result, turn.context.take_decline_messages());
         let cancelled_mid_dispatch = turn.cancel.is_cancelled();
         (
-            send_tool_result(turn, call, result).await,
+            send_tool_result(turn, call, result, read_host).await,
             cancelled_mid_dispatch,
         )
     }
@@ -684,12 +687,19 @@ async fn skip_tool_call(turn: &Turn, call: &ToolCall) -> ToolResultPayload {
         turn,
         call,
         cancelled_tool_result(call, "cancelled before dispatch"),
+        false,
     )
     .await
 }
 
-/// Report `result` to the client and return what the model is shown.
-async fn send_tool_result(turn: &Turn, call: &ToolCall, result: ToolOutput) -> ToolResultPayload {
+/// Report `result`, and whether its call read this machine, to the client and return what
+/// the model is shown.
+async fn send_tool_result(
+    turn: &Turn,
+    call: &ToolCall,
+    result: ToolOutput,
+    read_host: bool,
+) -> ToolResultPayload {
     let payload = ToolResultPayload {
         call_id: call.id.clone(),
         name: call.name.clone(),
@@ -702,6 +712,7 @@ async fn send_tool_result(turn: &Turn, call: &ToolCall, result: ToolOutput) -> T
             id: call.id.clone(),
             name: call.name.clone(),
             result: Box::new(result.report()),
+            read_host,
         })
         .await;
     payload
@@ -792,12 +803,20 @@ async fn within_deadline<F: Future>(
     }
 }
 
-async fn dispatch_tool_call(turn: &Turn, call: &ToolCall, deadline: Duration) -> ToolOutput {
+/// Run `call`, returning its result and whether it read this machine.
+async fn dispatch_tool_call(
+    turn: &Turn,
+    call: &ToolCall,
+    deadline: Duration,
+) -> (ToolOutput, bool) {
     let start = Instant::now();
     let (tools, iteration) = (turn.tools.as_ref(), turn.iteration);
 
     let Some(tool) = tools.get(&call.name) else {
-        return unknown_tool_result(tools, call, iteration, start.elapsed());
+        return (
+            unknown_tool_result(tools, call, iteration, start.elapsed()),
+            false,
+        );
     };
 
     let invocation =
@@ -807,9 +826,22 @@ async fn dispatch_tool_call(turn: &Turn, call: &ToolCall, deadline: Duration) ->
     } else {
         Some(invocation.await)
     };
-    if tool.reads_host(&call.arguments) {
+    let read_host = tool.reads_host(&call.arguments);
+    if read_host {
         turn.context.record_host_read();
     }
+    let result = finished_tool_result(call, iteration, finished, deadline, start);
+    (result, read_host)
+}
+
+/// The result of a `finished` invocation of `call`, `None` being one its `deadline` cut off.
+fn finished_tool_result(
+    call: &ToolCall,
+    iteration: u32,
+    finished: Option<Result<Result<ToolOutput, ToolError>, Box<dyn Any + Send>>>,
+    deadline: Duration,
+    start: Instant,
+) -> ToolOutput {
     let Some(result) = finished else {
         let duration = start.elapsed();
         warn!(

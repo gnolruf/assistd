@@ -52,6 +52,8 @@ pub enum MessageKind {
         call_id: String,
         tool_name: String,
         outcome: ToolOutcome,
+        /// Whether the call could put data from this machine in the result.
+        read_host: bool,
     },
 }
 
@@ -79,12 +81,14 @@ impl PersistedMessage {
         Self::assistant(content.into(), reasoning, calls)
     }
 
-    /// The output of tool call `call_id`, which invoked tool `name`.
+    /// The output of tool call `call_id`, which invoked tool `name`; `read_host` says
+    /// whether the call could put data from this machine in it.
     pub fn tool_result(
         content: impl Into<String>,
         call_id: impl Into<String>,
         name: impl Into<String>,
         outcome: ToolOutcome,
+        read_host: bool,
     ) -> Self {
         Self {
             content: content.into(),
@@ -92,6 +96,7 @@ impl PersistedMessage {
                 call_id: call_id.into(),
                 tool_name: name.into(),
                 outcome,
+                read_host,
             },
         }
     }
