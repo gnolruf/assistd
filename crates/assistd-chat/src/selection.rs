@@ -32,12 +32,6 @@ impl Selection {
     }
 }
 
-/// The entry shown as `digit` in a list numbered from 1.
-pub(crate) fn numbered<T: Copy>(all: &[T], digit: char) -> Option<T> {
-    let number = usize::try_from(digit.to_digit(10)?).ok()?;
-    all.get(number.checked_sub(1)?).copied()
-}
-
 /// The entry after or before `current` in `all`, wrapping; the first when it is not there.
 pub(crate) fn cycled<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
     let index = all.iter().position(|item| *item == current).unwrap_or(0);

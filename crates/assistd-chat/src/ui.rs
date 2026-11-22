@@ -22,6 +22,7 @@ use super::app::{
     AnswerTo, App, BranchListEntry, ChatMode, ConfirmChoice, ConfirmationPrompt, Panel,
     ResumePicker, ResumeTab,
 };
+use super::choice_list::ChoiceList;
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot, banner_lines};
 use super::selection::list_window;
 use super::settings::{editor_window, place_cursor, render_settings};
@@ -410,7 +411,7 @@ fn confirmation_body(
         width,
     ));
     body.push(Line::default());
-    let choices = choice_rows(prompt, width, theme);
+    let choices = confirm_choice_rows(prompt, width, theme);
     let rows_around_script = body.len() + 2 + choices.len();
     let script_budget = max_rows.saturating_sub(rows_around_script).max(1);
     body.extend(script_rows(prompt, width, script_budget, theme));
@@ -513,29 +514,53 @@ fn script_line(row: String) -> Line<'static> {
     Line::from(vec![Span::raw(SCRIPT_INDENT), Span::raw(row)])
 }
 
-/// One numbered row per choice, the selected one marked and highlighted.
-fn choice_rows(prompt: &ConfirmationPrompt, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    prompt
-        .choices()
-        .iter()
+/// The prompt's answers as numbered rows.
+fn confirm_choice_rows(
+    prompt: &ConfirmationPrompt,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    choice_rows(&prompt.choices, width, theme, |choice| match choice {
+        ConfirmChoice::Once => "Yes".to_string(),
+        ConfirmChoice::Always => always_label(prompt),
+        ConfirmChoice::Deny => "No (Esc)".to_string(),
+        ConfirmChoice::Tell => typed_label(
+            prompt.choices.typed(),
+            "No, and tell the agent",
+            MESSAGE_PLACEHOLDER,
+        ),
+    })
+}
+
+/// One numbered row per choice, labelled by `label`, the selected one marked and highlighted.
+fn choice_rows<C: Copy>(
+    list: &ChoiceList<C>,
+    width: usize,
+    theme: &Theme,
+    label: impl Fn(C) -> String,
+) -> Vec<Line<'static>> {
+    list.rows()
         .enumerate()
-        .flat_map(|(index, choice)| {
-            let label = match choice {
-                ConfirmChoice::Once => "Yes".to_string(),
-                ConfirmChoice::Always => always_label(prompt),
-                ConfirmChoice::Deny => "No (Esc)".to_string(),
-                ConfirmChoice::Tell if prompt.message.is_empty() => MESSAGE_PLACEHOLDER.to_string(),
-                ConfirmChoice::Tell => format!("No, and tell the agent: {}▏", prompt.message),
-            };
-            let (pointer, style) = if index == prompt.selected.index() {
+        .flat_map(|(index, (choice, selected))| {
+            let (pointer, style) = if selected {
                 ("❯", theme.title_style())
             } else {
                 (" ", Style::default())
             };
             let lead = format!("{pointer} {}. ", index + 1);
-            indented_rows(&lead, &label, style, width)
+            indented_rows(&lead, &label(choice), style, width)
         })
         .collect()
+}
+
+/// The row text is typed on: `typed` after `lead` with a cursor, or `placeholder` before
+/// anything is typed.
+fn typed_label(typed: &str, lead: &str, placeholder: &str) -> String {
+    if typed.is_empty() {
+        placeholder.to_string()
+    } else {
+        format!("{lead}: {typed}▏")
+    }
 }
 
 /// What the "always" choice stops asking about, in the terms of the tool

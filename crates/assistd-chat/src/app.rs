@@ -20,9 +20,10 @@ use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinSet};
 
+use super::choice_list::ChoiceList;
 use super::input::InputLine;
 use super::output::OutputPane;
-use super::selection::{Selection, numbered};
+use super::selection::Selection;
 use super::settings::SettingsPanel;
 use super::tasks::TasksPanel;
 use super::text_editor::{EditorShape, TextEditor};
@@ -212,15 +213,13 @@ pub(super) struct ConfirmationPrompt {
     /// Echoed back with the answer.
     confirm_id: String,
     pub answer_to: AnswerTo,
-    /// Index into [`choices`](Self::choices).
-    pub selected: Selection,
+    /// The answers on offer; what to tell the agent is typed on the [`ConfirmChoice::Tell`] row.
+    pub choices: ChoiceList<ConfirmChoice>,
     /// Every script row is shown, scrolled to `scroll`, rather than the
     /// first few.
     pub expanded: bool,
     /// First script row shown while expanded; each frame clamps it.
     pub scroll: usize,
-    /// What to tell the agent, typed on the [`ConfirmChoice::Tell`] row.
-    pub message: String,
 }
 
 impl ConfirmationPrompt {
@@ -241,32 +240,22 @@ impl ConfirmationPrompt {
         Self::answered_to(prompt.confirm_id, request, AnswerTo::TaskRun(run))
     }
 
+    /// Offers "always" only when the request names something to stop asking about.
     fn answered_to(confirm_id: String, request: ConfirmationRequest, answer_to: AnswerTo) -> Self {
-        let mut prompt = Self {
+        let always = (!request.always_allow.is_empty()).then_some(ConfirmChoice::Always);
+        let choices = [ConfirmChoice::Once]
+            .into_iter()
+            .chain(always)
+            .chain([ConfirmChoice::Deny, ConfirmChoice::Tell])
+            .collect();
+        Self {
             request,
             confirm_id,
             answer_to,
-            selected: Selection::default(),
+            choices: ChoiceList::new(choices, ConfirmChoice::Deny),
             expanded: false,
             scroll: 0,
-            message: String::new(),
-        };
-        prompt.select_message_row();
-        prompt
-    }
-
-    /// The answer numbered `digit`; the message row's number selects it instead.
-    fn numbered_answer(&mut self, digit: char) -> Option<ConfirmChoice> {
-        let choice = numbered(self.choices(), digit)?;
-        if choice == ConfirmChoice::Tell {
-            self.select_message_row();
-            return None;
         }
-        Some(choice)
-    }
-
-    fn select_message_row(&mut self) {
-        self.selected = Selection::at(self.choices().len() - 1);
     }
 
     /// The answer `choice` gives, with the message typed when it tells the agent.
@@ -276,29 +265,8 @@ impl ConfirmationPrompt {
             ConfirmChoice::Always => ConfirmAnswer::Always,
             ConfirmChoice::Deny => ConfirmAnswer::DENY,
             ConfirmChoice::Tell => ConfirmAnswer::Deny {
-                message: Some(self.message.trim())
-                    .filter(|message| !message.is_empty())
-                    .map(str::to_string),
+                message: self.choices.message(),
             },
-        }
-    }
-
-    /// The answers on offer, in display order; "always" only when the
-    /// request names something to stop asking about.
-    pub(super) fn choices(&self) -> &'static [ConfirmChoice] {
-        if self.request.always_allow.is_empty() {
-            &[
-                ConfirmChoice::Once,
-                ConfirmChoice::Deny,
-                ConfirmChoice::Tell,
-            ]
-        } else {
-            &[
-                ConfirmChoice::Once,
-                ConfirmChoice::Always,
-                ConfirmChoice::Deny,
-                ConfirmChoice::Tell,
-            ]
         }
     }
 }

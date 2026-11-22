@@ -19,6 +19,8 @@ use super::terminal::{TerminalGuard, TerminalInput};
 
 mod catalog;
 mod color_picker;
+mod form;
+mod form_box;
 mod list_editor;
 mod panel;
 mod preview;
@@ -28,10 +30,12 @@ mod server_form;
 mod server_list;
 mod theme_list;
 
+pub(crate) use form::{FieldValue, Form, FormAction, FormFields};
+pub(crate) use form_box::{form_hint, render_form};
 pub(crate) use list_editor::{ListAction, ListEditor};
 pub(crate) use panel::{PanelHost, SettingsPanel};
 pub(crate) use render::{
-    choice_span, editor_window, list_hint, place_cursor, render_list_editor, render_settings,
+    editor_window, list_hint, place_cursor, render_list_editor, render_settings,
     render_wrapped_editor, titled_box,
 };
 

@@ -16,13 +16,12 @@ use ratatui::widgets::Paragraph;
 
 use super::super::selection::list_window;
 use super::super::settings::{
-    choice_span, editor_window, list_hint, place_cursor, render_list_editor, render_wrapped_editor,
-    titled_box,
+    editor_window, form_hint, list_hint, place_cursor, render_form, render_list_editor,
+    render_wrapped_editor, titled_box,
 };
 use super::super::tasks::{
     AT_FORMAT, EditorMode, EditorRow, ListRow, ListedTask, Message, PanelTab, QueueView,
-    RefineNote, TaskEditor, TasksPanel, TriggerCheck, TriggerForm, TriggerRow, UndecodableTask,
-    UpstreamChoice,
+    RefineNote, TaskEditor, TasksPanel, TriggerCheck, TriggerRow, UndecodableTask, UpstreamChoice,
 };
 use super::super::text_editor::TextEditor;
 use super::super::theme::Theme;
@@ -51,7 +50,6 @@ const RUNS_HINT: &str = "↑/↓ select · ←/→ task · Enter resume session 
 const FIELD_HINT: &str = "Enter apply · Esc cancel";
 const KEPT_RUNS_HINT: &str = "Enter apply (empty for default) · Esc cancel";
 const PROMPT_HINT: &str = "Enter apply · shift+Enter new line · ctrl+r refine · Esc cancel";
-const FORM_HINT: &str = "↑/↓ field · ←/→ choose · Enter apply · Esc cancel";
 const UNSAVED_HINT: &str = "Enter save · d discard · Esc keep editing";
 const SAVING_HINT: &str = "saving… · Esc keep editing";
 const DELETE_HINT: &str = "Enter delete · Esc keep";
@@ -104,7 +102,7 @@ pub(super) fn tasks_panel_hint(panel: &TasksPanel) -> Cow<'static, str> {
             EditorMode::Prompt(prompt) => prompt
                 .refine_dots()
                 .map_or(PROMPT_HINT, |dots| REFINING_HINTS[dots]),
-            EditorMode::Trigger(_) => FORM_HINT,
+            EditorMode::Trigger(form) => form_hint(form),
             EditorMode::Unsaved => UNSAVED_HINT,
             EditorMode::SavingToClose { .. } => SAVING_HINT,
             EditorMode::ConfirmDelete => DELETE_HINT,
@@ -453,7 +451,14 @@ fn render_editor(
         frame.render_widget(Paragraph::new(line), error_area);
     }
     match editor.mode() {
-        EditorMode::Trigger(form) => render_trigger_form(frame, box_area, form, upstreams, theme),
+        EditorMode::Trigger(form) => {
+            let title = if form.fields().replaces.is_some() {
+                "Edit trigger"
+            } else {
+                "Add trigger"
+            };
+            render_form(frame, box_area, form, title, theme);
+        }
         EditorMode::Prompt(_) => {
             let inner = render_box(frame, box_area, "Prompt", theme);
             editor.set_prompt_width(inner.width);
@@ -752,46 +757,6 @@ fn labelled(selected: bool, label: &str, value: Span<'static>, theme: &Theme) ->
         Span::styled(format!("{pointer}{label:<LABEL_WIDTH$}"), style),
         value,
     ])
-}
-
-/// The form's fields in a box, the focused one picked out, then why it would not apply.
-fn render_trigger_form(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    form: &TriggerForm,
-    upstreams: &[UpstreamChoice],
-    theme: &Theme,
-) {
-    let title = if form.replaces.is_some() {
-        "Edit trigger"
-    } else {
-        "Add trigger"
-    };
-    let inner = render_box(frame, area, title, theme);
-    let mut lines = Vec::new();
-    let mut cursor = None;
-    for field in form.fields() {
-        let focused = field == form.focus();
-        let value = match form.text_field(field) {
-            Some(text) => {
-                let width = usize::from(inner.width).saturating_sub(value_column());
-                let (shown, column) = editor_window(text, width);
-                if focused {
-                    cursor = Some((lines.len(), value_column() + column));
-                }
-                Span::raw(shown)
-            }
-            None => choice_span(&form.choice_text(field, upstreams), focused, theme),
-        };
-        lines.push(labelled(focused, field.label(), value, theme));
-    }
-    if let Some(error) = form.error() {
-        lines.push(Line::styled(error.to_string(), theme.error_style()));
-    }
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-    if let Some((line, column)) = cursor {
-        place_cursor(frame, inner, line, column);
-    }
 }
 
 /// A box titled `title` over `area`, returning its inside.

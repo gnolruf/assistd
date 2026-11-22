@@ -27,7 +27,7 @@ use queue::QueueAction;
 pub(super) use queue::{QueueView, paused_prompts, waits_on};
 use runs::RunsAction;
 pub(super) use runs::RunsView;
-pub(super) use trigger_form::{AT_FORMAT, TriggerForm, UpstreamChoice};
+pub(super) use trigger_form::{AT_FORMAT, UpstreamChoice};
 
 /// A task as the daemon last listed it.
 pub(super) struct ListedTask {

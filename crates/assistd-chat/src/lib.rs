@@ -36,6 +36,7 @@ use self::theme::Theme;
 
 mod app;
 mod bus;
+mod choice_list;
 mod focus;
 mod input;
 mod logging;
