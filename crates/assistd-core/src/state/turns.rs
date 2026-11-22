@@ -12,7 +12,7 @@ use tracing::{Instrument, debug, warn};
 
 use assistd_config::{Config, EmbeddingConfig};
 use assistd_embed::EmbedderHandle;
-use assistd_ipc::{Attachment, Event, EventBody, ImageAttachment, PlanMode};
+use assistd_ipc::{Attachment, EventBody, ImageAttachment, PlanMode};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent};
 use assistd_memory::{PersistedMessage, RecallStore, SessionId};
 use assistd_tools::{ConfirmRouter, HostReads, ToolCatalog, TurnContext, VoiceGate};
@@ -23,9 +23,10 @@ use super::branches::BranchService;
 use super::chat_focus::ChatFocusSlot;
 use super::context::{combine_context_blocks, voice_approvals_note};
 use super::host_reads::BranchHostReads;
-use super::session_lapse::SessionLapse;
+use super::session_lapse::{SessionLapse, TurnInFlight};
 use super::wire::decode_wire_attachments;
 use super::{DispatchError, FailedStep, default_permission_mode};
+use crate::admission::interaction::InteractionTurn;
 use crate::admission::{MainLaneTurn, TurnAdmission};
 use crate::agent::{Agent, AgentSpec};
 use crate::bus::{EventBus, EventSink};
@@ -101,6 +102,21 @@ impl TurnOrigin {
     }
 }
 
+/// A turn whose reply is complete but may still be being spoken, and what it holds until
+/// the speech ends.
+struct ReplySpeech<'turn> {
+    worker: JoinHandle<()>,
+    _daemon_awake: RequestGuard,
+    _interaction: InteractionTurn,
+    _session_in_use: TurnInFlight<'turn>,
+}
+
+impl ReplySpeech<'_> {
+    async fn finished(self) {
+        let _ = self.worker.await;
+    }
+}
+
 /// What the turn service borrows from the rest of the daemon.
 #[derive(Debug)]
 pub(super) struct TurnDeps {
@@ -147,7 +163,8 @@ impl TurnService {
     }
 
     /// Handle a single user query: wake the daemon if needed, run the agent loop under
-    /// its plan mode, stream events through `tx`, and persist the turn.
+    /// its plan mode, stream events through `tx`, and persist the turn. `Done` is sent
+    /// when the reply is complete; returns once it has been spoken.
     pub async fn handle_query(&self, query: Query, tx: EventSink) -> Result<(), DispatchError> {
         let cancel = self.deps.admission.turn_cancellation();
         self.run_query(query, tx, cancel).await
@@ -161,6 +178,30 @@ impl TurnService {
         tx: EventSink,
         cancel: CancellationToken,
     ) -> Result<(), DispatchError> {
+        let id = query.id.clone();
+        let speech = self.reply_to(query, &tx, cancel).await?;
+        if speech.is_none() {
+            debug!(
+                target: "assistd::state",
+                id = %id,
+                "turn interrupted before reaching the model; dropping the prompt"
+            );
+        }
+        tx.reply(id, EventBody::Done).await;
+        if let Some(speech) = speech {
+            speech.finished().await;
+        }
+        Ok(())
+    }
+
+    /// Run `query`'s turn until its reply is complete; `None` when the turn was
+    /// interrupted before it reached the model, its prompt dropped.
+    async fn reply_to(
+        &self,
+        query: Query,
+        tx: &EventSink,
+        cancel: CancellationToken,
+    ) -> Result<Option<ReplySpeech<'_>>, DispatchError> {
         let Query {
             id,
             text,
@@ -170,23 +211,23 @@ impl TurnService {
         } = query;
         let _cancel_on_return = cancel.clone().drop_guard();
         let attachments = decode_wire_attachments(wire_attachments)?;
-        let Some((_request_guard, main_lane)) = self.admit_turn(&id, &text, &tx, &cancel).await?
+        let Some((daemon_awake, main_lane)) = self.admit_turn(&id, &text, tx, &cancel).await?
         else {
-            return finish_interrupted_before_start(&tx, id).await;
+            return Ok(None);
         };
         let MainLaneTurn {
             lane: agent_guard,
             user_turn,
-            turn: _interaction_turn,
+            turn: interaction,
         } = main_lane;
         if !self.revalidate_vision(&cancel).await {
-            return finish_interrupted_before_start(&tx, id).await;
+            return Ok(None);
         }
         self.require_vision_for(&attachments)?;
         if origin.is_voice() {
-            self.leave_lapsed_session(&id, &tx).await;
+            self.leave_lapsed_session(&id, tx).await;
         }
-        let _turn_in_flight = self.session_lapse.turn();
+        let session_in_use = self.session_lapse.turn();
 
         let (current_session, persist) = self.open_persistence_turn(&text).await;
         self.refresh_chat_focus(&id);
@@ -204,10 +245,15 @@ impl TurnService {
         let voice_output = self.deps.voice.speech();
         voice_output.skip().await;
         let start_epoch = voice_output.current_epoch();
-        let speech_handle = self.spawn_speech_worker(id.clone(), start_epoch, speech_rx);
+        let reply_speech = ReplySpeech {
+            worker: self.spawn_speech_worker(id.clone(), start_epoch, speech_rx),
+            _daemon_awake: daemon_awake,
+            _interaction: interaction,
+            _session_in_use: session_in_use,
+        };
 
         let transcript = Arc::clone(&self.deps.transcript);
-        let done_emitted = TurnDriver::new(id.clone(), transcript, persist, tx.clone())
+        let finished = TurnDriver::new(id.clone(), transcript, persist, tx.clone())
             .speaking(speech)
             .drive(llm_rx, &cancel)
             .await
@@ -216,16 +262,16 @@ impl TurnService {
         let agent_result = agent_task.await;
         drop((agent_guard, user_turn));
 
-        if done_emitted && matches!(&agent_result, Ok(Ok(()))) {
-            self.deps.branches.spawn_session_title_broadcast(
-                id.clone(),
-                current_session,
-                &title_user_text,
-            );
+        if let Err(e) = agent_outcome(agent_result) {
+            reply_speech.finished().await;
+            return Err(e);
         }
-
-        self.finalize_turn(id, agent_result, speech_handle, &tx, done_emitted)
-            .await
+        if finished {
+            self.deps
+                .branches
+                .spawn_session_title_broadcast(id, current_session, &title_user_text);
+        }
+        Ok(Some(reply_speech))
     }
 
     /// Begin a new session for a spoken prompt when the one before it has lapsed and no chat
@@ -422,41 +468,14 @@ impl TurnService {
             .in_current_span(),
         )
     }
-
-    /// Wait for speech and report the agent's outcome. Sends `Done` if the
-    /// stream did not, as a cancelled turn ends without one.
-    async fn finalize_turn(
-        &self,
-        id: String,
-        agent_result: Result<Result<(), LlmError>, JoinError>,
-        speech_handle: JoinHandle<()>,
-        tx: &EventSink,
-        done_emitted: bool,
-    ) -> Result<(), DispatchError> {
-        let _ = speech_handle.await;
-
-        match agent_result {
-            Ok(Ok(())) => {
-                if !done_emitted {
-                    let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                }
-                Ok(())
-            }
-            Ok(Err(e)) => Err(DispatchError::from(e).context("llm backend error")),
-            Err(join_err) => Err(DispatchError::AgentPanicked(join_err)),
-        }
-    }
 }
 
-pub(super) async fn finish_interrupted_before_start(
-    tx: &EventSink,
-    id: String,
+fn agent_outcome(
+    agent_result: Result<Result<(), LlmError>, JoinError>,
 ) -> Result<(), DispatchError> {
-    debug!(
-        target: "assistd::state",
-        id = %id,
-        "turn interrupted before reaching the model; dropping the prompt"
-    );
-    let _ = tx.send(Event::new(id, EventBody::Done)).await;
-    Ok(())
+    match agent_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(DispatchError::from(e).context("llm backend error")),
+        Err(join_err) => Err(DispatchError::AgentPanicked(join_err)),
+    }
 }

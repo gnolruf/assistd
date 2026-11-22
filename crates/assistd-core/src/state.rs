@@ -1,7 +1,6 @@
 //! `AppState` and the request dispatcher, which routes each family of `Request`
 //! variants to the service that owns its state.
 
-use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -333,8 +332,9 @@ impl AppState {
 
     /// Route one request from `requester` to its handler, streaming events on `tx` and none
     /// after returning; every event but a subscriber's is published on the bus as it is
-    /// produced. A failure is sent as the request's one `Error` event and returned. Requests
-    /// other than the long-lived ones are bounded by the dispatch envelope timeout.
+    /// produced. A handled request ends with `Done` and a failed one with its one `Error`
+    /// event, the failure returned. Requests other than the long-lived ones are bounded by
+    /// the dispatch envelope timeout.
     pub async fn dispatch(
         self: Arc<Self>,
         req: Request,
@@ -343,14 +343,28 @@ impl AppState {
     ) -> Result<(), DispatchError> {
         let tx = self.events_of(&req, tx);
         let id = req.id.clone();
+        let ends_itself = Self::ends_itself(&req);
         let result = self
             .dispatch_within_envelope(req, requester, tx.clone())
             .await;
-        if let Err(e) = &result {
-            let message = e.to_string();
-            let _ = tx.send(Event::new(id, EventBody::Error { message })).await;
+        match &result {
+            Ok(()) if ends_itself => {}
+            Ok(()) => tx.reply(id, EventBody::Done).await,
+            Err(e) => {
+                let message = e.to_string();
+                tx.reply(id, EventBody::Error { message }).await;
+            }
         }
         result
+    }
+
+    /// Requests whose handler ends them: a turn sends `Done` when its reply is complete and
+    /// only then waits for it to be spoken, and a subscription has no end.
+    fn ends_itself(req: &Request) -> bool {
+        matches!(
+            req.body,
+            RequestBody::Query { .. } | RequestBody::PttStop | RequestBody::Subscribe { .. }
+        )
     }
 
     async fn dispatch_within_envelope(
@@ -398,11 +412,15 @@ impl AppState {
         )
     }
 
-    /// Transcribe the push-to-talk press being released and run what it heard as a turn.
+    /// Transcribe the push-to-talk press being released and run what it heard as a turn;
+    /// a press that starts no turn ends here.
     async fn handle_ptt_stop(&self, id: String, tx: EventSink) -> Result<(), DispatchError> {
-        match self.voice.handle_ptt_stop(id, &tx).await? {
+        match self.voice.handle_ptt_stop(id.clone(), &tx).await? {
             Some(HeardPrompt { query, cancel }) => self.turns.run_query(query, tx, cancel).await,
-            None => Ok(()),
+            None => {
+                tx.reply(id, EventBody::Done).await;
+                Ok(())
+            }
         }
     }
 
@@ -423,17 +441,21 @@ impl AppState {
                 let query = Query::typed(id, text, attachments, plan, requester.turn);
                 self.turns.handle_query(query, tx).await
             }
+            RequestBody::PttStop => self.handle_ptt_stop(id, tx).await,
+            RequestBody::Subscribe { filter } => {
+                self.status.handle_subscribe(id, filter, tx).await;
+                Ok(())
+            }
             RequestBody::SetPresence { target } => {
                 self.status.handle_set_presence(id, target, tx).await
             }
             RequestBody::PttStart => self.voice.handle_ptt_start(id, tx).await,
-            RequestBody::PttStop => self.handle_ptt_stop(id, tx).await,
             RequestBody::ListenStart => self.voice.handle_listen_start(id, tx).await,
             RequestBody::ListenStop => self.voice.handle_listen_stop(id, tx).await,
             RequestBody::ListenToggle => self.voice.handle_listen_toggle(id, tx).await,
             RequestBody::WakeWord { op } => self.voice.handle_wake_word(id, op, tx).await,
             RequestBody::MemorySave { key, value } => {
-                self.memory.handle_memory_save(id, key, value, tx).await
+                self.memory.handle_memory_save(key, value).await
             }
             RequestBody::MemoryLoad { key } => self.memory.handle_memory_load(id, key, tx).await,
             RequestBody::MemoryListAll { prefix, limit } => {
@@ -441,9 +463,7 @@ impl AppState {
                     .handle_memory_list_all(id, prefix, limit, tx)
                     .await
             }
-            RequestBody::MemoryDelete { key } => {
-                self.memory.handle_memory_delete(id, key, tx).await
-            }
+            RequestBody::MemoryDelete { key } => self.memory.handle_memory_delete(key).await,
             RequestBody::MemoryForget { memory_id } => {
                 self.memory.handle_memory_forget(id, memory_id, tx).await
             }
@@ -460,17 +480,13 @@ impl AppState {
                     .handle_documents_search(id, query, limit, tx)
                     .await
             }
-            RequestBody::GetPresence => replied(self.status.handle_get_presence(id, tx)).await,
-            RequestBody::GetListenState => {
-                replied(self.voice.handle_get_listen_state(id, tx)).await
-            }
-            RequestBody::VoiceToggle => replied(self.voice.handle_voice_toggle(id, tx)).await,
-            RequestBody::VoiceSkip => replied(self.voice.handle_voice_skip(id, tx)).await,
-            RequestBody::InterruptTurn => replied(self.voice.handle_interrupt_turn(id, tx)).await,
-            RequestBody::GetVoiceState => replied(self.voice.handle_get_voice_state(id, tx)).await,
-            RequestBody::GetCapabilities => {
-                replied(self.status.handle_get_capabilities(id, tx)).await
-            }
+            RequestBody::GetPresence => self.status.handle_get_presence(id, tx).await,
+            RequestBody::GetListenState => self.voice.handle_get_listen_state(id, tx).await,
+            RequestBody::VoiceToggle => self.voice.handle_voice_toggle(id, tx).await,
+            RequestBody::VoiceSkip => self.voice.handle_voice_skip(id, tx).await,
+            RequestBody::InterruptTurn => self.voice.handle_interrupt_turn().await,
+            RequestBody::GetVoiceState => self.voice.handle_get_voice_state(id, tx).await,
+            RequestBody::GetCapabilities => self.status.handle_get_capabilities(id, tx).await,
             RequestBody::Fork { name } => self.branches.handle_fork(id, name, tx).await,
             RequestBody::Branches => self.branches.handle_branches(id, tx).await,
             RequestBody::Switch { target } => self.branches.handle_switch(id, target, tx).await,
@@ -483,19 +499,14 @@ impl AppState {
             RequestBody::ReplayBranch => self.branches.handle_replay_branch(id, tx).await,
             RequestBody::NewSession => self.branches.handle_new_session(id, tx).await,
             RequestBody::ChatState { focused } => {
-                replied(self.turns.handle_chat_state(id, focused, peer_pid, tx)).await
+                self.turns.handle_chat_state(&id, focused, peer_pid)
             }
-            RequestBody::ChatClosed => {
-                replied(self.turns.handle_chat_closed(id, peer_pid, tx)).await
-            }
-            RequestBody::GetChatFocus => replied(self.turns.handle_get_chat_focus(id, tx)).await,
-            RequestBody::GetReadiness => replied(self.status.handle_get_readiness(id, tx)).await,
-            RequestBody::Subscribe { filter } => {
-                replied(self.status.handle_subscribe(id, filter, tx)).await
-            }
+            RequestBody::ChatClosed => self.turns.handle_chat_closed(&id, peer_pid),
+            RequestBody::GetChatFocus => self.turns.handle_get_chat_focus(id, tx).await,
+            RequestBody::GetReadiness => self.status.handle_get_readiness(id, tx).await,
             RequestBody::McpLogin { server } => self.mcp.handle_mcp_login(id, server, tx).await,
             RequestBody::McpLogout { server } => self.mcp.handle_mcp_logout(id, server, tx).await,
-            RequestBody::McpStatus => replied(self.mcp.handle_mcp_status(id, tx)).await,
+            RequestBody::McpStatus => self.mcp.handle_mcp_status(id, tx).await,
             RequestBody::Task(task) => self
                 .tasks
                 .dispatch(id, task, tx)
@@ -557,11 +568,6 @@ fn mcp_service(subsystems: &Subsystems, bus: EventBus) -> McpService {
         ),
         accounts: subsystems.mcp_accounts.clone(),
     }
-}
-
-async fn replied(reply: impl Future<Output = ()>) -> Result<(), DispatchError> {
-    reply.await;
-    Ok(())
 }
 
 /// The mode `tools` starts a chat window in and runs spoken turns in.

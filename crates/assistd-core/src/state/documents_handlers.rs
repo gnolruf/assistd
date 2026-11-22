@@ -176,7 +176,6 @@ impl DocumentsService {
                 .send(Event::new(id.clone(), EventBody::DocumentRoot { status }))
                 .await;
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -271,7 +270,6 @@ impl DocumentsService {
             };
             let _ = tx.send(Event::new(id.clone(), body)).await;
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -296,7 +294,6 @@ impl DocumentsService {
         for hit in hits {
             let _ = tx.send(Event::new(id.clone(), wire_hit(hit))).await;
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 }

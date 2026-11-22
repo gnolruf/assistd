@@ -3,6 +3,7 @@
 
 use assistd_ipc::{ComponentReadiness, Event, EventBody, StartupComponent};
 
+use super::DispatchError;
 use super::status_service::StatusService;
 use crate::bus::{EventBus, EventSink};
 
@@ -42,16 +43,16 @@ impl StatusService {
         publish_readiness(&self.bus, component, state);
     }
 
-    pub(super) async fn handle_get_readiness(&self, id: String, tx: EventSink) {
+    pub(super) async fn handle_get_readiness(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         for (component, state) in self.startup_readiness() {
-            let _ = tx
-                .send(Event::new(
-                    id.clone(),
-                    EventBody::Readiness { component, state },
-                ))
+            tx.reply(id.clone(), EventBody::Readiness { component, state })
                 .await;
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 }
 

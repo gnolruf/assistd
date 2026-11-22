@@ -10,7 +10,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, info_span, warn};
 
 use assistd_config::Config;
-use assistd_ipc::{ConfirmSource, Event, EventBody, TaskId, TaskRunId, TaskTrigger};
+use assistd_ipc::{ConfirmSource, EventBody, TaskId, TaskRunId, TaskTrigger};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent, SlotHolder};
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
@@ -60,24 +60,7 @@ impl TaskService {
     ) -> Result<(), TaskError> {
         let (record, run) = self.queue_task_run(task).await.context("task run failed")?;
         self.deps.admission.task_queue.push(run, record, id.clone());
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::TaskRunQueued { task, run },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
-        Ok(())
-    }
-
-    pub(super) async fn handle_task_cancel(
-        &self,
-        id: String,
-        run: TaskRunId,
-        tx: EventSink,
-    ) -> Result<(), TaskError> {
-        self.cancel_task_run(run).await?;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        tx.reply(id, EventBody::TaskRunQueued { task, run }).await;
         Ok(())
     }
 
@@ -298,8 +281,7 @@ impl TaskService {
     }
 
     /// Run the task's prompt over `backend` on `lane`, persisting to `persist`, with
-    /// nothing sent to a client or spoken; returns the final reply once the turn emitted
-    /// `Done`.
+    /// nothing sent to a client or spoken; returns the final reply once the turn finished.
     async fn unattended_turn(
         &self,
         turn: &TaskRunTurn,

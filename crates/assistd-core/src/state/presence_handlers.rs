@@ -1,6 +1,6 @@
 //! Handlers for the presence state-machine variants of `Request`.
 
-use assistd_ipc::{Event, EventBody, PresenceTarget};
+use assistd_ipc::{EventBody, PresenceTarget};
 
 use super::status_service::StatusService;
 use super::{DispatchError, FailedStep};
@@ -17,23 +17,18 @@ impl StatusService {
             .set_presence(target)
             .await
             .context("set_presence failed")?;
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::Presence {
-                    state: self.presence.state(),
-                },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        let state = self.presence.state();
+        tx.reply(id, EventBody::Presence { state }).await;
         Ok(())
     }
 
-    pub(super) async fn handle_get_presence(&self, id: String, tx: EventSink) {
+    pub(super) async fn handle_get_presence(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         let state = self.presence.state();
-        let _ = tx
-            .send(Event::new(id.clone(), EventBody::Presence { state }))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        tx.reply(id, EventBody::Presence { state }).await;
+        Ok(())
     }
 }

@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use assistd_ipc::{Event, EventBody, HostName, PermissionMode, TaskPrompt};
+use assistd_ipc::{EventBody, HostName, PermissionMode, TaskPrompt};
 use assistd_llm::{LlmBackend, SlotAssignment, SlotHolder};
 
 use super::runs::task_system_prompt;
@@ -80,16 +80,12 @@ impl TaskService {
         } = cancel_when_client_leaves(refining, &id, &tx, &cancel)
             .await
             .context("task refine failed")?;
-        let refined = Event::new(
-            id.clone(),
-            EventBody::TaskRefined {
-                prompt,
-                plan,
-                recommended,
-            },
-        );
-        let _ = tx.send(refined).await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        let refined = EventBody::TaskRefined {
+            prompt,
+            plan,
+            recommended,
+        };
+        tx.reply(id, refined).await;
         Ok(())
     }
 

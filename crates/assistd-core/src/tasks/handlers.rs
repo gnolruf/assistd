@@ -37,8 +37,8 @@ impl TaskService {
                 self.handle_task_set_enabled(id, task, enabled, tx).await
             }
             TaskRequest::Run { task } => self.handle_task_run(id, task, tx).await,
-            TaskRequest::Cancel { run } => self.handle_task_cancel(id, run, tx).await,
-            TaskRequest::Queue { op } => self.handle_task_queue(id, op, tx).await,
+            TaskRequest::Cancel { run } => Ok(self.cancel_task_run(run).await?),
+            TaskRequest::Queue { op } => Ok(self.apply_task_queue_op(op).await?),
             TaskRequest::Confirm {
                 run,
                 confirm_id,
@@ -116,7 +116,6 @@ impl TaskService {
                 .send(Event::new(id.clone(), EventBody::TaskRunRecord { record }))
                 .await;
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -183,10 +182,7 @@ impl TaskService {
         tx: EventSink,
     ) -> Result<(), TaskError> {
         let fires = self.check_trigger(task, trigger).await?;
-        let _ = tx
-            .send(Event::new(id.clone(), EventBody::TriggerFires { fires }))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        tx.reply(id, EventBody::TriggerFires { fires }).await;
         Ok(())
     }
 
@@ -209,7 +205,7 @@ impl TaskService {
         Ok(upcoming_fires(&triggers[0], &now, CHECKED_FIRES))
     }
 
-    /// Send each record as an `EventBody::Task`, with its last finished run, then `Done`.
+    /// Send each record as an `EventBody::Task`, with its last finished run.
     pub(super) async fn send_tasks(&self, id: String, records: Vec<TaskRecord>, tx: &EventSink) {
         let mut last_runs = self
             .deps
@@ -235,7 +231,6 @@ impl TaskService {
                 ))
                 .await;
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     /// Save `spec` as task `task`, or as a new task, once its mode is one the daemon allows and

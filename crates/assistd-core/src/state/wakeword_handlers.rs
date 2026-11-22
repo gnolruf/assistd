@@ -132,7 +132,7 @@ impl VoiceService {
         match op {
             WakeWordOp::Status => self.handle_wake_word_status(id, tx).await,
             WakeWordOp::TestStart => self.handle_wake_word_test(id, tx).await,
-            WakeWordOp::TestStop => self.stop_mic_session(id, tx).await,
+            WakeWordOp::TestStop => self.stop_mic_session().await,
         }
     }
 
@@ -147,16 +147,11 @@ impl VoiceService {
         tx: EventSink,
     ) -> Result<(), DispatchError> {
         let capture = self.voice.capture().context("wake-word status failed")?;
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::WakeWordStatus {
-                    phrase: self.config.voice.wakeword.phrase.to_string(),
-                    listening: capture.listener.is_active(),
-                },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        let status = EventBody::WakeWordStatus {
+            phrase: self.config.voice.wakeword.phrase.to_string(),
+            listening: capture.listener.is_active(),
+        };
+        tx.reply(id, status).await;
         Ok(())
     }
 
@@ -165,7 +160,7 @@ impl VoiceService {
         self.run_mic_session(id, tx, &capture, drive_test).await
     }
 
-    async fn stop_mic_session(&self, id: String, tx: EventSink) -> Result<(), DispatchError> {
+    async fn stop_mic_session(&self) -> Result<(), DispatchError> {
         let stop = self
             .mic_session
             .lock()
@@ -178,13 +173,11 @@ impl VoiceService {
         if !stopped {
             return Err(MicError::NoTest.into());
         }
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
     /// Claim the mic, pause listening, and run `drive` against the test's
-    /// reports until it ends; then resume listening and send the
-    /// terminal event.
+    /// reports until it ends; then resume listening.
     async fn run_mic_session<F, Fut>(
         &self,
         id: String,
@@ -210,8 +203,8 @@ impl VoiceService {
         }
         let (audio_tx, audio) = mpsc::channel(AUDIO_BACKLOG);
         let io = SessionIo {
-            id: id.clone(),
-            tx: tx.clone(),
+            id,
+            tx,
             stop,
             audio,
             idle_deadline: Instant::now() + SESSION_IDLE_TIMEOUT,
@@ -222,11 +215,7 @@ impl VoiceService {
             warn!(target: "assistd::wakeword", "failed to resume listening: {e}");
         }
         match end {
-            SessionEnd::Done => {
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            SessionEnd::Disconnected => Ok(()),
+            SessionEnd::Done | SessionEnd::Disconnected => Ok(()),
             SessionEnd::Idle => Err(MicError::TestIdle.into()),
             SessionEnd::CaptureStopped => Err(capture_stop(captured).into()),
         }

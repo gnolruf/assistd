@@ -3,15 +3,19 @@
 use assistd_ipc::{Component, ComponentReadiness, Event, EventBody, StatusKind, StatusSeverity};
 use assistd_llm::VisionState;
 
-use super::default_permission_mode;
 use super::status_service::StatusService;
+use super::{DispatchError, default_permission_mode};
 use crate::bus::EventSink;
 
 impl StatusService {
     /// Report disabled tools, MCP servers that failed to start, the model
     /// name, and whether llama-server supports vision, probed live rather
     /// than read from the vision gate.
-    pub(super) async fn handle_get_capabilities(&self, id: String, tx: EventSink) {
+    pub(super) async fn handle_get_capabilities(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         if let Some(disabled) = &self.tools_disabled {
             let _ = tx
                 .send(Event::new(
@@ -54,17 +58,13 @@ impl StatusService {
             .rsplit_once('/')
             .map_or(configured, |(_, rest)| rest)
             .to_string();
-        let _ = tx
-            .send(Event::new(
-                id.clone(),
-                EventBody::Capabilities {
-                    vision: probe.vision_supported,
-                    model_name,
-                    auto_mode: self.config.tools.allow_auto_mode,
-                    default_mode: default_permission_mode(&self.config.tools),
-                },
-            ))
-            .await;
-        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        let capabilities = EventBody::Capabilities {
+            vision: probe.vision_supported,
+            model_name,
+            auto_mode: self.config.tools.allow_auto_mode,
+            default_mode: default_permission_mode(&self.config.tools),
+        };
+        tx.reply(id, capabilities).await;
+        Ok(())
     }
 }
