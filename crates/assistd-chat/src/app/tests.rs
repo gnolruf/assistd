@@ -422,18 +422,34 @@ async fn prompt_answers_match_the_numbered_choices_on_screen() {
     let offering_cargo = || vec!["cargo".to_string()];
     for (always_allow, keys, expected) in [
         (Vec::new(), vec![key(KeyCode::Enter)], (false, false)),
-        (Vec::new(), vec![typed('1')], (true, false)),
-        (Vec::new(), vec![typed('2')], (false, false)),
         (
             Vec::new(),
-            vec![key(KeyCode::Up), key(KeyCode::Enter)],
+            vec![key(KeyCode::Up), typed('1')],
             (true, false),
         ),
-        (offering_cargo(), vec![typed('2')], (true, true)),
-        (offering_cargo(), vec![typed('3')], (false, false)),
+        (
+            Vec::new(),
+            vec![key(KeyCode::Up), typed('2')],
+            (false, false),
+        ),
+        (
+            Vec::new(),
+            vec![key(KeyCode::Up), key(KeyCode::Up), key(KeyCode::Enter)],
+            (true, false),
+        ),
         (
             offering_cargo(),
-            vec![key(KeyCode::Up), key(KeyCode::Enter)],
+            vec![key(KeyCode::Up), typed('2')],
+            (true, true),
+        ),
+        (
+            offering_cargo(),
+            vec![key(KeyCode::Up), typed('3')],
+            (false, false),
+        ),
+        (
+            offering_cargo(),
+            vec![key(KeyCode::Up), key(KeyCode::Up), key(KeyCode::Enter)],
             (true, true),
         ),
         (offering_cargo(), vec![key(KeyCode::Esc)], (false, false)),
@@ -492,7 +508,7 @@ async fn keys_typed_as_a_prompt_opens_go_to_the_input_line_instead_of_answering(
 #[tokio::test]
 async fn prompt_swallows_typing_without_answering() {
     let (mut app, _rx, mut writer_rx) = app_with_prompt(vec!["cargo".into()]);
-    for c in ['y', 'a', 'x', '0', '4'] {
+    for c in ['1', 'y', 'a', 'x', '0', '4'] {
         app.on_key(typed(c));
     }
     app.on_key(key(KeyCode::Tab));
@@ -595,6 +611,26 @@ async fn a_plan_is_sent_back_with_typed_feedback_or_accepted_into_its_mode() {
     );
     assert_eq!(app.mode, ChatMode::Plan);
     review(&mut app);
+    for c in "1 is wrong".chars() {
+        app.on_key(typed(c));
+    }
+    assert!(writer_rx.try_recv().is_err(), "a digit accepted the plan");
+    assert_eq!(app.mode, ChatMode::Plan);
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(
+        sent_verdict(&mut writer_rx).await,
+        PlanVerdict::KeepPlanning {
+            feedback: Some("1 is wrong".into())
+        }
+    );
+    review(&mut app);
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(
+        sent_verdict(&mut writer_rx).await,
+        PlanVerdict::KeepPlanning { feedback: None }
+    );
+    review(&mut app);
+    app.on_key(key(KeyCode::Up));
     app.on_key(typed('1'));
     assert_eq!(
         sent_verdict(&mut writer_rx).await,

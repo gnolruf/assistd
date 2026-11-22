@@ -124,9 +124,10 @@ impl App {
         });
     }
 
-    /// Arrows move the selection, Enter or a choice's number answers, typing writes a
-    /// message for the agent on the last row, Esc or Ctrl+C denies without one, and Tab and
-    /// PgUp/PgDn expand and scroll the script.
+    /// Arrows move the selection and Enter answers. On the message row, where the prompt
+    /// opens, every character typed is the message for the agent; on the others a choice's
+    /// number answers. Esc or Ctrl+C denies, and Tab and PgUp/PgDn expand and scroll the
+    /// script.
     pub(super) fn on_confirmation_key(&mut self, ev: KeyEvent) {
         let Some(prompt) = self.confirmation.as_mut() else {
             return;
@@ -143,14 +144,11 @@ impl App {
                 prompt.message.pop();
                 None
             }
-            KeyCode::Char(digit) if prompt.message.is_empty() && digit.is_ascii_digit() => {
-                numbered_choice(choices, digit)
-            }
-            KeyCode::Char(typed) => {
-                prompt.select_message_row();
+            KeyCode::Char(typed) if on_message_row => {
                 prompt.message.push(typed);
                 None
             }
+            KeyCode::Char(digit) => prompt.numbered_answer(digit),
             KeyCode::Up => {
                 prompt.selected.previous();
                 None
@@ -178,10 +176,4 @@ impl App {
             self.resolve_confirmation(choice);
         }
     }
-}
-
-/// The choice shown as `digit`, counting from 1.
-fn numbered_choice(choices: &[ConfirmChoice], digit: char) -> Option<ConfirmChoice> {
-    let number = usize::try_from(digit.to_digit(10)?).ok()?;
-    choices.get(number.checked_sub(1)?).copied()
 }
