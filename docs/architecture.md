@@ -959,7 +959,11 @@ restarted and asked again, and a file it exits over twice is skipped, so one
 file that crashes the extractor cannot stop the pass.
 
 Between passes every root is watched recursively with `notify` (inotify), one
-watcher per root, set up on the blocking pool before the first pass. The
+watcher per root, set up on the blocking pool before the first pass. A root's
+watch and a `PathChanged` trigger's are the same `DirWatch`
+(`crates/assistd-core/src/dir_watch.rs`): it follows no symlink below the
+directory it is given, holds what its events add up to until it is asked,
+and says why once it errs or its directory is removed or moved. The
 paths that change under a root are gathered for two seconds after the first
 one, then a pass held to them runs: the same walk, pruned to those paths and
 the directories that lead to them, so the same files are left out; the same

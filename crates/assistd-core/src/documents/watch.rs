@@ -6,14 +6,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_tools::policy::on_blocking_pool;
-use notify::{Config, ErrorKind, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use parking_lot::Mutex;
+use notify::{EventKind, RecursiveMode};
 use tokio::sync::Notify;
 
 use super::indexer::DocumentIndex;
 use super::walk::{IndexRoot, WalkScope};
-use crate::tasks::path_watch::{entered_through_links, removes};
+use crate::dir_watch::{DirWatch, Report};
 
 /// How long changes are gathered after the first one before they are indexed, so
 /// a file saved in several writes is read once.
@@ -22,69 +20,47 @@ const SETTLE_WINDOW: Duration = Duration::from_secs(2);
 /// Most changed paths held for one root; a root with more has a pass run over it.
 const MAX_HELD_PATHS: usize = 65_536;
 
-/// What a root's watch has reported since it was last asked.
+/// The paths a root's watch saw change since it was last asked.
 #[derive(Debug, Default)]
-struct Reported {
-    changed: BTreeSet<PathBuf>,
+struct Changed {
+    paths: BTreeSet<PathBuf>,
     /// Changes went unreported: the kernel's event queue overflowed, or more paths
     /// changed than are held.
     lost_changes: bool,
-    /// Why the watch stopped reporting, once it has.
-    stopped: Option<String>,
 }
 
-impl Reported {
-    fn is_empty(&self) -> bool {
-        self.changed.is_empty() && !self.lost_changes && self.stopped.is_none()
+impl Changed {
+    /// Take in one event under `root`, and say whether it left anything to index.
+    /// Reads change nothing and no walk reaches a hidden or excluded path, so those
+    /// are dropped.
+    fn record(&mut self, event: notify::Event, root: &IndexRoot) -> bool {
+        if event.need_rescan() {
+            self.lost_changes = true;
+            return true;
+        }
+        if matches!(event.kind, EventKind::Access(_)) {
+            return false;
+        }
+        let mut walked = event.paths;
+        walked.retain(|path| !root.leaves_out(path));
+        let changed = !walked.is_empty();
+        walked.into_iter().for_each(|path| self.hold(path));
+        changed
     }
 
     fn hold(&mut self, path: PathBuf) {
-        if self.changed.len() < MAX_HELD_PATHS {
-            self.changed.insert(path);
+        if self.paths.len() < MAX_HELD_PATHS {
+            self.paths.insert(path);
         } else {
             self.lost_changes = true;
         }
     }
 }
 
-/// One watched root, shared with the thread its events arrive on.
-#[derive(Debug)]
-struct WatchedRoot {
-    root: Arc<IndexRoot>,
-    reported: Mutex<Reported>,
-    /// Wakes whoever waits for any root to report.
-    wake: Arc<Notify>,
-}
-
-impl WatchedRoot {
-    /// Take in one event of the watch. Reads change nothing and no walk reaches a
-    /// hidden or excluded path, so those are dropped.
-    fn record(&self, event: notify::Result<notify::Event>) {
-        match event {
-            Err(error) => self.reported.lock().stopped = Some(watch_failure(&error)),
-            Ok(event) if event.need_rescan() => self.reported.lock().lost_changes = true,
-            Ok(event) if matches!(event.kind, EventKind::Access(_)) => return,
-            Ok(event) if removes(&event, self.root.path()) => {
-                self.reported.lock().stopped = Some("the folder was removed or moved".to_owned());
-            }
-            Ok(event) => {
-                let mut walked = event.paths;
-                walked.retain(|path| !self.root.leaves_out(path));
-                if walked.is_empty() {
-                    return;
-                }
-                let mut reported = self.reported.lock();
-                walked.into_iter().for_each(|path| reported.hold(path));
-            }
-        }
-        self.wake.notify_one();
-    }
-}
-
 #[derive(Debug)]
 struct RootWatch {
-    watched: Arc<WatchedRoot>,
-    _watcher: RecommendedWatcher,
+    root: Arc<IndexRoot>,
+    watch: DirWatch<Changed>,
 }
 
 /// The inotify watches on the index roots that could be watched.
@@ -101,18 +77,19 @@ impl RootWatches {
         let wake = Arc::new(Notify::new());
         let mut watches = Vec::with_capacity(roots.len());
         for root in roots {
-            let watched = Arc::new(WatchedRoot {
-                root: Arc::clone(root),
-                reported: Mutex::default(),
-                wake: Arc::clone(&wake),
-            });
-            let events_to = Arc::clone(&watched);
-            match on_blocking_pool(move || watch_recursively(events_to)).await {
-                Ok(watcher) => watches.push(RootWatch {
-                    watched,
-                    _watcher: watcher,
+            let events_under = Arc::clone(root);
+            let watch = DirWatch::start(
+                root.path().to_path_buf(),
+                RecursiveMode::Recursive,
+                Arc::clone(&wake),
+                move |changed: &mut Changed, event| changed.record(event, &events_under),
+            );
+            match watch.await {
+                Ok(watch) => watches.push(RootWatch {
+                    root: Arc::clone(root),
+                    watch,
                 }),
-                Err(error) => index.leave_to_passes(root.path(), watch_failure(&error)),
+                Err(why) => index.leave_to_passes(root.path(), why),
             }
         }
         Self { watches, wake }
@@ -121,8 +98,7 @@ impl RootWatches {
     /// Resolves [`SETTLE_WINDOW`] after a watch reports, or after the call when one
     /// already has.
     pub(super) async fn settled(&self) {
-        let holds_report = |watch: &RootWatch| !watch.watched.reported.lock().is_empty();
-        if !self.watches.iter().any(holds_report) {
+        while !self.watches.iter().any(|root| root.watch.holds_report()) {
             self.wake.notified().await;
         }
         tokio::time::sleep(SETTLE_WINDOW).await;
@@ -133,47 +109,27 @@ impl RootWatches {
     /// the changed paths. A stopped watch is dropped, which `index` records with why.
     pub(super) fn take_stale(&mut self, index: &DocumentIndex) -> Vec<(Arc<IndexRoot>, WalkScope)> {
         let mut stale = Vec::new();
-        self.watches.retain(|watch| {
-            let root = &watch.watched.root;
-            let Reported {
-                changed,
-                lost_changes,
-                stopped,
-            } = std::mem::take(&mut *watch.watched.reported.lock());
-            let still_watched = stopped.is_none();
+        self.watches.retain(|RootWatch { root, watch }| {
+            let Report {
+                changes:
+                    Changed {
+                        paths,
+                        lost_changes,
+                    },
+                lost,
+                ..
+            } = watch.take();
+            let still_watched = lost.is_none();
             if lost_changes || !still_watched {
                 stale.push((Arc::clone(root), WalkScope::WholeRoot));
-            } else if !changed.is_empty() {
-                stale.push((Arc::clone(root), WalkScope::Under(Arc::new(changed))));
+            } else if !paths.is_empty() {
+                stale.push((Arc::clone(root), WalkScope::Under(Arc::new(paths))));
             }
-            if let Some(why) = stopped {
+            if let Some(why) = lost {
                 index.leave_to_passes(root.path(), why);
             }
             still_watched
         });
         stale
-    }
-}
-
-/// An inotify watch on `watched`'s root and every directory under it that no symlink
-/// leads to, reporting to `watched`. Blocks on the filesystem while it adds one watch
-/// per directory.
-fn watch_recursively(watched: Arc<WatchedRoot>) -> notify::Result<RecommendedWatcher> {
-    let root = entered_through_links(watched.root.path());
-    let mut watcher = RecommendedWatcher::new(
-        move |event| watched.record(event),
-        Config::default().with_follow_symlinks(false),
-    )?;
-    watcher.watch(&root, RecursiveMode::Recursive)?;
-    Ok(watcher)
-}
-
-/// Why a watch could not be set up or stopped, naming the limit when that is it.
-fn watch_failure(error: &notify::Error) -> String {
-    match error.kind {
-        ErrorKind::MaxFilesWatch => {
-            "no inotify watches are left (fs.inotify.max_user_watches)".to_owned()
-        }
-        _ => error.to_string(),
     }
 }

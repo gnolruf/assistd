@@ -30,7 +30,7 @@ mod event_triggers;
 mod events;
 mod fire_times;
 mod handlers;
-pub(crate) mod path_watch;
+mod path_watch;
 mod plans;
 mod run_lane;
 mod runner;
