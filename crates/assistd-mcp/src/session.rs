@@ -1,14 +1,19 @@
 //! The transport-independent half of an MCP session: the `rmcp` peer requests go through,
 //! the lifeline that ends with the session, and the connector that opens both.
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation, Tool,
 };
-use rmcp::service::{Peer, RoleClient, RunningService, ServiceError};
+use rmcp::service::{
+    Peer, RoleClient, RunningService, RunningServiceCancellationToken, ServiceError,
+};
 use serde_json::Value;
 
 use crate::McpClient;
@@ -60,6 +65,52 @@ impl McpClient for McpPeer {
             _ => return Err(McpError::ArgumentsNotObject),
         };
         self.within_timeout(self.peer.call_tool(params)).await
+    }
+}
+
+/// The running `rmcp` service of an open session. Waiting for its end does not give it up, so
+/// a session still running can be closed.
+pub(crate) struct OpenService {
+    /// `None` once the service has stopped.
+    running: Option<BoxFuture<'static, ()>>,
+    canceller: RunningServiceCancellationToken,
+}
+
+impl OpenService {
+    pub(crate) fn new(service: RunningService<RoleClient, ClientConfig>) -> Self {
+        let canceller = service.cancellation_token();
+        let running = async move {
+            let _ = service.waiting().await;
+        };
+        Self {
+            running: Some(running.boxed()),
+            canceller,
+        }
+    }
+
+    /// Resolves once the service has stopped. Dropped before then, it can be awaited again.
+    pub(crate) async fn wait_for_end(&mut self) {
+        if let Some(running) = &mut self.running {
+            running.await;
+            self.running = None;
+        }
+    }
+
+    /// Stop a service still running and wait up to `timeout` for its transport to close.
+    pub(crate) async fn close(self, timeout: Duration) {
+        let Some(running) = self.running else {
+            return;
+        };
+        self.canceller.cancel();
+        let _ = tokio::time::timeout(timeout, running).await;
+    }
+}
+
+impl fmt::Debug for OpenService {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenService")
+            .field("stopped", &self.running.is_none())
+            .finish_non_exhaustive()
     }
 }
 
@@ -117,14 +168,4 @@ pub(crate) fn client_config() -> ClientConfig {
         ClientCapabilities::default(),
         Implementation::new("assistd", env!("CARGO_PKG_VERSION")),
     )
-}
-
-/// Resolves once `service` has stopped, or never when there is none.
-pub(crate) async fn session_end(service: Option<RunningService<RoleClient, ClientConfig>>) {
-    match service {
-        Some(service) => {
-            let _ = service.waiting().await;
-        }
-        None => std::future::pending().await,
-    }
 }

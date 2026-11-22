@@ -21,7 +21,7 @@ use assistd_utils::http::remote_client_builder;
 
 use crate::error::McpError;
 use crate::oauth::{self, OAuthConfig, auth_failure, split_scopes};
-use crate::session::{MAX_MESSAGE_BYTES, McpPeer, client_config, session_end};
+use crate::session::{MAX_MESSAGE_BYTES, McpPeer, OpenService, client_config};
 
 mod client;
 
@@ -86,19 +86,17 @@ pub enum HttpAuth {
 /// The open HTTP session. Closing it asks the server to delete the session.
 #[derive(Debug)]
 pub(crate) struct HttpLifeline {
-    service: Option<RunningService<RoleClient, ClientConfig>>,
+    service: OpenService,
 }
 
 impl HttpLifeline {
     /// Resolves when the transport gives up on the session.
     pub(crate) async fn wait_for_end(&mut self) {
-        session_end(self.service.take()).await;
+        self.service.wait_for_end().await;
     }
 
     pub(crate) async fn shutdown(self, term_timeout: Duration) {
-        if let Some(mut service) = self.service {
-            let _ = service.close_with_timeout(term_timeout).await;
-        }
+        self.service.close(term_timeout).await;
     }
 }
 
@@ -122,7 +120,7 @@ pub(crate) async fn connect(cfg: &HttpConfig) -> Result<(McpPeer, HttpLifeline),
     );
     let peer = McpPeer::new(service.peer().clone(), cfg.request_timeout);
     let lifeline = HttpLifeline {
-        service: Some(service),
+        service: OpenService::new(service),
     };
     Ok((peer, lifeline))
 }

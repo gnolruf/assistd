@@ -11,8 +11,6 @@ use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use rmcp::ServiceExt;
-use rmcp::model::ClientConfig;
-use rmcp::service::{RoleClient, RunningService};
 use rustix::process::Signal;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::process::{Child, ChildStderr, Command};
@@ -23,7 +21,7 @@ use assistd_utils::log_lines::forward_lines;
 use assistd_utils::process_group::{ProcessGroup, set_parent_death_signal};
 
 use crate::error::McpError;
-use crate::session::{MAX_MESSAGE_BYTES, McpPeer, client_config, session_end};
+use crate::session::{MAX_MESSAGE_BYTES, McpPeer, OpenService, client_config};
 
 /// Daemon variables a server inherits besides `LC_*`; anything else,
 /// credentials included, must come from [`StdioConfig::env`].
@@ -109,7 +107,7 @@ pub(crate) async fn connect(cfg: &StdioConfig) -> Result<(McpPeer, ChildLifeline
         label: cfg.label.clone(),
         child,
         group,
-        service: Some(service),
+        service: OpenService::new(service),
         stderr_task,
     };
     Ok((peer, lifeline))
@@ -122,7 +120,7 @@ pub(crate) struct ChildLifeline {
     label: String,
     child: Child,
     group: ProcessGroup,
-    service: Option<RunningService<RoleClient, ClientConfig>>,
+    service: OpenService,
     stderr_task: AbortOnDropHandle<()>,
 }
 
@@ -130,14 +128,13 @@ impl ChildLifeline {
     /// Resolves when the child exits or its MCP session ends; a child
     /// that can no longer answer counts as dead.
     pub(crate) async fn wait_for_death(&mut self) {
-        let service = self.service.take();
         tokio::select! {
             status = self.group.reap_leader(&mut self.child) => debug!(
                 target: "assistd::mcp",
                 server = %self.label,
                 "MCP child exited: {status:?}",
             ),
-            () = session_end(service) => debug!(
+            () = self.service.wait_for_end() => debug!(
                 target: "assistd::mcp",
                 server = %self.label,
                 "MCP session ended while the child was still alive",
@@ -155,9 +152,7 @@ impl ChildLifeline {
             service,
             stderr_task,
         } = self;
-        if let Some(mut service) = service {
-            let _ = service.close_with_timeout(SESSION_CLOSE_TIMEOUT).await;
-        }
+        service.close(SESSION_CLOSE_TIMEOUT).await;
         group.signal(Signal::TERM);
         match tokio::time::timeout(term_timeout, group.reap_leader(&mut child)).await {
             Ok(Ok(status)) => info!(
