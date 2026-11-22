@@ -6,7 +6,8 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRe
 
 use crate::chunking::Chunker;
 use crate::{
-    BranchId, ChunkId, DocumentId, MemoryId, MessageId, PersistedRole, Seq, SessionId, TurnId,
+    BranchId, ChunkId, DocumentId, MemoryId, MessageId, PersistedRole, Seq, SessionId, SkippedRead,
+    TurnId,
 };
 
 macro_rules! row_id_sql {
@@ -61,6 +62,40 @@ impl FromSql for PersistedRole {
             0 => Ok(PersistedRole::User),
             1 => Ok(PersistedRole::Assistant),
             2 => Ok(PersistedRole::Tool),
+            code => Err(FromSqlError::OutOfRange(code)),
+        }
+    }
+}
+
+impl ToSql for SkippedRead {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        let code: i64 = match self {
+            SkippedRead::Unsupported => 0,
+            SkippedRead::Binary => 1,
+            SkippedRead::TooLarge => 2,
+            SkippedRead::NotDecodable => 3,
+            SkippedRead::PasswordProtected => 4,
+            SkippedRead::NoTextLayer => 5,
+            SkippedRead::Unreadable => 6,
+            SkippedRead::ExtractorFailed => 7,
+            SkippedRead::TimedOut => 8,
+        };
+        Ok(ToSqlOutput::from(code))
+    }
+}
+
+impl FromSql for SkippedRead {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_i64()? {
+            0 => Ok(SkippedRead::Unsupported),
+            1 => Ok(SkippedRead::Binary),
+            2 => Ok(SkippedRead::TooLarge),
+            3 => Ok(SkippedRead::NotDecodable),
+            4 => Ok(SkippedRead::PasswordProtected),
+            5 => Ok(SkippedRead::NoTextLayer),
+            6 => Ok(SkippedRead::Unreadable),
+            7 => Ok(SkippedRead::ExtractorFailed),
+            8 => Ok(SkippedRead::TimedOut),
             code => Err(FromSqlError::OutOfRange(code)),
         }
     }

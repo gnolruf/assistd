@@ -174,6 +174,20 @@ CREATE TABLE documents (
 ) STRICT;
 CREATE INDEX idx_documents_root ON documents(root_id);
 
+-- A file that was read and left nothing to index, with the stamp it had and the
+-- root's pass that last saw it; no document is stored at its path. `cause` is
+-- 0 unsupported, 1 binary, 2 too large, 3 not decodable, 4 password protected,
+-- 5 no text layer, 6 unreadable, 7 extractor failed, 8 timed out.
+CREATE TABLE skipped_files (
+    path      BLOB PRIMARY KEY CHECK (length(path) > 0),
+    root_id   INTEGER NOT NULL REFERENCES index_roots(id) ON DELETE CASCADE,
+    mtime_ns  INTEGER NOT NULL,
+    size      INTEGER NOT NULL CHECK (size >= 0),
+    cause     INTEGER NOT NULL CHECK (cause BETWEEN 0 AND 8),
+    seen_pass INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+CREATE INDEX idx_skipped_files_root ON skipped_files(root_id);
+
 -- One page of a document's text as indexed. `page` is its position in the file,
 -- from 0 and without gaps; a page with no text has empty `content`.
 CREATE TABLE document_pages (

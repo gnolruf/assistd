@@ -64,6 +64,15 @@ impl Transcript {
     }
 }
 
+/// A file `unindexed_files` reports as not read at `stamp`.
+fn unread(path: &Path, stamp: FileStamp) -> UnindexedFile {
+    UnindexedFile {
+        path: path.to_path_buf(),
+        stamp,
+        skipped: None,
+    }
+}
+
 /// `text` as the pages of a file whose format has none.
 fn one_page(text: impl Into<String>) -> Vec<String> {
     vec![text.into()]
@@ -387,7 +396,7 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
     let second = store.begin_index_pass(root).await.unwrap();
     let never_indexed = root.join("new.md");
     let changed = store
-        .changed_documents(
+        .unindexed_files(
             second,
             vec![
                 (plan.clone(), STAMP),
@@ -397,11 +406,14 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
         )
         .await
         .unwrap();
-    assert_eq!(changed, [(never_indexed, STAMP), (plan.clone(), touched)]);
+    assert_eq!(
+        changed,
+        [unread(&never_indexed, STAMP), unread(&plan, touched)]
+    );
     let rewritten = index(second, &plan, touched, &section).await.unwrap();
     assert!(rewritten.is_empty(), "the same text must keep its chunks");
     let changed = store
-        .changed_documents(second, vec![(plan.clone(), touched)])
+        .unindexed_files(second, vec![(plan.clone(), touched)])
         .await
         .unwrap();
     assert!(changed.is_empty(), "the stored stamp is the touched one");
@@ -442,6 +454,76 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
 }
 
 #[tokio::test]
+async fn a_skipped_file_is_not_read_again_until_it_changes_is_forgotten_or_goes_unseen() {
+    let (_handle, store, _temp) = fresh().await;
+    let root = Path::new("/notes");
+    let (blob, scan) = (root.join("blob.dat"), root.join("scan.pdf"));
+    let touched = FileStamp {
+        mtime_ns: 2,
+        ..STAMP
+    };
+    let check = |pass: IndexPass, path: &Path, stamp: FileStamp| {
+        store.unindexed_files(pass, vec![(path.to_path_buf(), stamp)])
+    };
+    let skipped = |path: &Path, cause: SkippedRead| UnindexedFile {
+        skipped: Some(cause),
+        ..unread(path, STAMP)
+    };
+
+    let first = store.begin_index_pass(root).await.unwrap();
+    let indexed = store.index_document(
+        first,
+        blob.clone(),
+        STAMP,
+        one_page("text"),
+        EmptyPages::Final,
+    );
+    assert_eq!(indexed.await.unwrap().len(), 1);
+    for (path, cause) in [(&blob, SkippedRead::Binary), (&scan, SkippedRead::TimedOut)] {
+        let recorded = store.record_skipped_file(first, path.clone(), STAMP, cause);
+        recorded.await.unwrap();
+    }
+    assert_eq!(store.count_document_chunks().await.unwrap(), 0);
+    assert_eq!(store.finish_index_pass(first).await.unwrap(), 0);
+
+    let second = store.begin_index_pass(root).await.unwrap();
+    assert_eq!(
+        check(second, &blob, STAMP).await.unwrap(),
+        [skipped(&blob, SkippedRead::Binary)]
+    );
+    assert_eq!(
+        check(second, &scan, touched).await.unwrap(),
+        [unread(&scan, touched)]
+    );
+    let reread = store.index_document(
+        second,
+        scan.clone(),
+        touched,
+        one_page("text"),
+        EmptyPages::Final,
+    );
+    reread.await.unwrap();
+    assert!(check(second, &scan, touched).await.unwrap().is_empty());
+    assert_eq!(store.finish_index_pass(second).await.unwrap(), 0);
+
+    let third = store.begin_index_pass(root).await.unwrap();
+    assert_eq!(store.finish_index_pass(third).await.unwrap(), 1);
+    let fourth = store.begin_index_pass(root).await.unwrap();
+    assert_eq!(
+        check(fourth, &blob, STAMP).await.unwrap(),
+        [unread(&blob, STAMP)],
+        "a skipped file no pass saw is forgotten"
+    );
+    let recorded = store.record_skipped_file(fourth, blob.clone(), STAMP, SkippedRead::Binary);
+    recorded.await.unwrap();
+    assert_eq!(store.forget_skipped_files().await.unwrap(), 1);
+    assert_eq!(
+        check(fourth, &blob, STAMP).await.unwrap(),
+        [unread(&blob, STAMP)]
+    );
+}
+
+#[tokio::test]
 async fn a_pass_over_part_of_a_root_drops_only_the_unseen_documents_under_it() {
     let (_handle, store, _temp) = fresh().await;
     let root = Path::new("/notes");
@@ -469,7 +551,7 @@ async fn a_pass_over_part_of_a_root_drops_only_the_unseen_documents_under_it() {
 
     let part = store.begin_index_pass(root).await.unwrap();
     let changed = store
-        .changed_documents(part, vec![(seen.clone(), STAMP)])
+        .unindexed_files(part, vec![(seen.clone(), STAMP)])
         .await
         .unwrap();
     assert!(changed.is_empty());

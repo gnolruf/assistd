@@ -16,13 +16,23 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
-use crate::backoff::{RestartDecision, RestartPolicy};
+use crate::backoff::{RestartDecision, RestartPolicy, backoff_delay};
 use crate::process_group::{ProcessGroup, set_parent_death_signal};
 use crate::readiness::NotReady;
 
 /// How long a worker whose stdin closed has to exit before SIGTERM, and
 /// again before SIGKILL.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
+
+/// What a worker's exit is held against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitBlame {
+    /// The worker: the exit counts toward its restart policy.
+    Worker,
+    /// The work it was given, which has now ended a worker twice running: the
+    /// restart policy does not count the exit.
+    Work,
+}
 
 /// One kind of worker process, and the daemon's end of its pipes.
 pub trait PipeWorker: Send + Sync + 'static {
@@ -53,8 +63,8 @@ pub trait PipeWorker: Send + Sync + 'static {
     /// Act on one line the worker wrote, line ending included.
     fn receive(&self, line: &[u8]);
 
-    /// The connected worker is gone.
-    fn disconnect(&self);
+    /// The connected worker is gone; returns what its exit is held against.
+    fn disconnect(&self) -> ExitBlame;
 
     /// No worker runs until the next restart: [`NotReady::Starting`] through a
     /// backoff, [`NotReady::Unavailable`] between the slow retries of one that keeps dying.
@@ -197,6 +207,8 @@ impl<M, P> PendingReplies<M, P> {
 enum SessionEnd {
     NeverStarted,
     Died,
+    /// Died over work that had already ended the worker before it.
+    DiedOverItsWork,
     Shutdown,
 }
 
@@ -261,21 +273,24 @@ impl RunningWorker {
             }
             _ = shutdown.wait_for(|stop| *stop) => SessionEnd::Shutdown,
         };
-        worker.disconnect();
-        match ended {
-            SessionEnd::Shutdown => group.stop_gracefully(child, EXIT_GRACE, W::NAME).await,
-            SessionEnd::NeverStarted | SessionEnd::Died => {
-                group.signal(Signal::KILL);
-                let _ = group.reap_leader(&mut child).await;
-            }
+        let blame = worker.disconnect();
+        if ended == SessionEnd::Shutdown {
+            group.stop_gracefully(child, EXIT_GRACE, W::NAME).await;
+            return ended;
         }
-        ended
+        group.signal(Signal::KILL);
+        let _ = group.reap_leader(&mut child).await;
+        match (ended, blame) {
+            (SessionEnd::Died, ExitBlame::Work) => SessionEnd::DiedOverItsWork,
+            _ => ended,
+        }
     }
 }
 
 /// Run the process `worker` describes until `shutdown` flips, restarting it
 /// with backoff when it dies, sends an overlong line, misses its startup
-/// deadline or is flagged unresponsive.
+/// deadline or is flagged unresponsive. An exit held against the worker's work
+/// does not count toward the backoff.
 pub async fn supervise<W: PipeWorker>(worker: Arc<W>, mut shutdown: watch::Receiver<bool>) {
     let mut policy = RestartPolicy::default();
     loop {
@@ -288,6 +303,7 @@ pub async fn supervise<W: PipeWorker>(worker: Arc<W>, mut shutdown: watch::Recei
                     SessionEnd::Died | SessionEnd::Shutdown => {
                         policy.record_session_end(started.elapsed());
                     }
+                    SessionEnd::DiedOverItsWork => {}
                 }
                 ended
             }
@@ -297,23 +313,38 @@ pub async fn supervise<W: PipeWorker>(worker: Arc<W>, mut shutdown: watch::Recei
                 SessionEnd::NeverStarted
             }
         };
-        if ended == SessionEnd::Shutdown {
-            return;
-        }
-        if !wait_to_restart(&mut policy, &*worker, &mut shutdown).await {
+        let restart = match ended {
+            SessionEnd::Shutdown => return,
+            SessionEnd::DiedOverItsWork => uncounted_restart::<W>(),
+            SessionEnd::NeverStarted | SessionEnd::Died => policy.next_restart(Instant::now()),
+        };
+        if !wait_to_restart(restart, &*worker, &mut shutdown).await {
             return;
         }
     }
 }
 
-/// Sleep out the policy's delay, with `worker` starting through a backoff and
+/// The restart after an exit the policy does not count, at the shortest backoff.
+fn uncounted_restart<W: PipeWorker>() -> RestartDecision {
+    info!(
+        target: "assistd::pipe_worker",
+        "the {} died over the same work twice; the exit is not held against it",
+        W::NAME
+    );
+    RestartDecision::Backoff {
+        delay: backoff_delay(0),
+        failures: 0,
+    }
+}
+
+/// Sleep out `restart`'s delay, with `worker` starting through a backoff and
 /// unavailable through a slow retry; false when shutdown flips first.
 async fn wait_to_restart<W: PipeWorker>(
-    policy: &mut RestartPolicy,
+    restart: RestartDecision,
     worker: &W,
     shutdown: &mut watch::Receiver<bool>,
 ) -> bool {
-    let delay = match policy.next_restart(Instant::now()) {
+    let delay = match restart {
         RestartDecision::Backoff { delay, failures } => {
             info!(
                 target: "assistd::pipe_worker",

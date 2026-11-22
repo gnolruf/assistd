@@ -227,8 +227,9 @@ impl DocumentsService {
         .await
     }
 
-    /// Ask for a round of passes and stream the one that answers until it ends or the
-    /// client goes away. Errors when no extraction worker will run.
+    /// Forget the skipped files, ask for a round of passes and stream the one that
+    /// answers until it ends or the client goes away. Errors when no extraction
+    /// worker will run.
     pub(super) async fn handle_documents_reindex(
         &self,
         id: String,
@@ -237,6 +238,7 @@ impl DocumentsService {
         if let Err(not_ready @ NotReady::Unavailable(_)) = self.extractor.readiness() {
             return Err(DispatchError::DocumentsUnavailable(not_ready));
         }
+        self.store.forget_skipped_files().await?;
         let mut progress = self.index.subscribe_progress();
         let answered_at = self.index.request_pass();
         loop {

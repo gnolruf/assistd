@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use assistd_config::VoiceConfig;
-use assistd_utils::pipe_worker::{self, PipeWorker};
+use assistd_utils::pipe_worker::{self, ExitBlame, PipeWorker};
 use assistd_utils::readiness::{NotReady, Readiness};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -104,9 +104,10 @@ impl PipeWorker for VoiceWorker {
         }
     }
 
-    fn disconnect(&self) {
+    fn disconnect(&self) -> ExitBlame {
         self.link.disconnect();
         *self.resumes.lock() = JoinSet::new();
+        ExitBlame::Worker
     }
 
     fn set_not_ready(&self, not_ready: NotReady) {

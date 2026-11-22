@@ -139,6 +139,14 @@ extract is skipped.
 
 Hidden, ignored and excluded files and symlinks are not counted.
 
+A file skipped for any reason from `unsupported type` down to
+`extraction timed out` is remembered with its modification time and
+size. Later passes count it under the same reason without reading it,
+until the file changes or you run `assistd documents reindex`, which
+reads every remembered file again. Run it after an upgrade that reads
+a new format, or when a file timed out only because the machine was
+busy.
+
 ## Scanned PDFs
 
 A scanned page is an image with no text. By default such pages are left
@@ -178,8 +186,9 @@ model above; another model's card gives its own.
   folder that reads only new and changed files,
 - as files change: each folder is watched, and a change is picked up
   about two seconds later,
-- when you ask: `assistd documents reindex` walks every folder now and
-  prints what each pass did.
+- when you ask: `assistd documents reindex` walks every folder now,
+  reads again the files earlier passes skipped, and prints what each
+  pass did.
 
 The worker runs at idle CPU and disk priority, so indexing only uses
 time nothing else wants. An edited `.gitignore` takes effect at the
