@@ -50,12 +50,7 @@ impl StatusService {
         let keeper = spawn_supervised(
             "document_embed_gate",
             Component::Embed,
-            keep_document_embed_gate(
-                Arc::clone(&self.config),
-                Arc::clone(&self.admission),
-                Arc::clone(&self.presence),
-                gate,
-            ),
+            keep_document_embed_gate(Arc::clone(&self.config), Arc::clone(&self.admission), gate),
         );
         (open, keeper)
     }

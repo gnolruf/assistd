@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, OwnedMutexGuard, watch};
 
-use assistd_ipc::{LaneHolder, TaskRunId};
+use assistd_ipc::TaskRunId;
 use assistd_llm::{SlotAssignment, SlotHolder};
 
 /// The main backend's lane, and the slot its requests are pinned to.
-const MAIN_LANE: u32 = 0;
+pub(super) const MAIN_LANE: u32 = 0;
 
 /// The model's lanes. With one slot a task run takes the main lane only between user
 /// turns; with more, task runs take the others, one each.
@@ -66,40 +66,14 @@ impl ModelLanes {
         Arc::clone(&self.main).lock_owned().await
     }
 
-    /// Whether user turns and task runs share the model's only lane.
-    pub(super) fn is_single(&self) -> bool {
-        self.slots.borrow().get() == 1
+    /// Watch the task run on each lane that one holds.
+    pub(super) fn subscribe_runs(&self) -> watch::Receiver<BTreeMap<u32, TaskRunId>> {
+        self.held.subscribe()
     }
 
-    /// Whether a task run holds the main lane.
-    pub(super) fn main_held_by_run(&self) -> bool {
-        self.held.borrow().contains_key(&MAIN_LANE)
-    }
-
-    /// Whether a task run holds any lane.
-    pub(crate) fn held_by_run(&self) -> bool {
-        !self.held.borrow().is_empty()
-    }
-
-    /// What holds each lane now.
-    pub(super) fn holders(&self) -> Vec<LaneHolder> {
-        let total = self.slots.borrow().get();
-        let held = self.held.borrow();
-        (0..total)
-            .map(|lane| match held.get(&lane) {
-                Some(&run) => LaneHolder::Task { run },
-                None if lane == MAIN_LANE => LaneHolder::Main,
-                None => LaneHolder::Idle,
-            })
-            .collect()
-    }
-
-    /// Watch the lanes' holders and the slot count, yielding when either changes.
-    pub(crate) fn watch(&self) -> LanesWatch {
-        LanesWatch {
-            held: self.held.subscribe(),
-            slots: self.slots.clone(),
-        }
+    /// Watch the number of lanes.
+    pub(super) fn subscribe_count(&self) -> watch::Receiver<NonZeroU32> {
+        self.slots.clone()
     }
 
     fn claim_task_lane(&self, run: TaskRunId, total: u32) -> Option<u32> {
@@ -165,25 +139,6 @@ impl Drop for LaneLease {
     }
 }
 
-/// Receivers on a [`ModelLanes`]' holders and slot count.
-#[derive(Debug)]
-pub(crate) struct LanesWatch {
-    held: watch::Receiver<BTreeMap<u32, TaskRunId>>,
-    slots: watch::Receiver<NonZeroU32>,
-}
-
-impl LanesWatch {
-    /// Wait for the holders or the slot count to change. Cancel-safe.
-    pub(crate) async fn changed(&mut self) {
-        tokio::select! {
-            _ = self.held.changed() => {}
-            () = changed_or_pending(&mut self.slots) => {}
-        }
-        self.held.mark_unchanged();
-        self.slots.mark_unchanged();
-    }
-}
-
 /// Wait for `rx` to change; never returns once its sender is gone.
 pub(crate) async fn changed_or_pending<T>(rx: &mut watch::Receiver<T>) {
     if rx.changed().await.is_err() {
@@ -226,12 +181,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!third.is_finished(), "a third run took a lane");
         assert_eq!(
-            lanes.holders(),
-            [
-                LaneHolder::Main,
-                LaneHolder::Task { run: TaskRunId(1) },
-                LaneHolder::Task { run: TaskRunId(2) },
-            ]
+            *lanes.held.borrow(),
+            BTreeMap::from([(1, TaskRunId(1)), (2, TaskRunId(2))])
         );
 
         drop(first);
@@ -260,11 +211,14 @@ mod tests {
             .unwrap();
         let holder = SlotHolder::TaskRun(TaskRunId(1));
         assert_eq!(lease.slot(holder), SlotAssignment::Shared(holder));
-        assert_eq!(lanes.holders(), [LaneHolder::Task { run: TaskRunId(1) }]);
+        assert_eq!(
+            *lanes.held.borrow(),
+            BTreeMap::from([(MAIN_LANE, TaskRunId(1))])
+        );
         assert!(lanes.main.try_lock().is_err(), "a user turn could start");
 
         drop(lease);
         assert!(lanes.main.try_lock().is_ok());
-        assert_eq!(lanes.holders(), [LaneHolder::Main]);
+        assert!(lanes.held.borrow().is_empty());
     }
 }

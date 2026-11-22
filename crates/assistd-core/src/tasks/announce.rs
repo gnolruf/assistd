@@ -7,7 +7,6 @@ use assistd_ipc::{Event, EventBody, TaskName, TaskRunId};
 use assistd_voice::SentenceBuffer;
 
 use super::TaskService;
-use crate::admission::interaction::InteractionState;
 use crate::turn_driver::run_speech_worker;
 
 /// A finished run's reply to announce, and the request id its events carry.
@@ -55,22 +54,19 @@ impl TaskService {
 
     /// Return once no user turn is in flight and nothing is being spoken.
     async fn wait_for_quiet_interaction(&self) {
-        let mut interaction = self.deps.admission.interaction.subscribe();
+        let mut activity = self.deps.admission.watch_activity();
         let mut speaking = self.deps.voice.speech().subscribe_speaking();
         loop {
-            let talking = matches!(
-                *interaction.borrow_and_update(),
-                InteractionState::Talking { .. }
-            );
-            if !talking && !*speaking.borrow_and_update() {
+            if !activity.current().turn_in_flight() && !*speaking.borrow_and_update() {
                 return;
             }
-            let changed = tokio::select! {
-                changed = interaction.changed() => changed,
-                changed = speaking.changed() => changed,
-            };
-            if changed.is_err() {
-                return;
+            tokio::select! {
+                () = activity.changed() => {}
+                changed = speaking.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
             }
         }
     }

@@ -14,8 +14,7 @@ use assistd_memory::{TaskRunEnd, WaitingRun};
 
 use super::TaskService;
 use super::runs::DAEMON_STOPPED;
-use crate::admission::interaction::InteractionState;
-use crate::admission::lanes::{LaneLease, ModelLanes, changed_or_pending};
+use crate::admission::lanes::{LaneLease, ModelLanes};
 use crate::admission::queue::{Cancelled, NextStart, QueueOpError, TurnStart};
 
 /// The `id` broadcast `TaskQueue` events carry.
@@ -128,14 +127,12 @@ impl TaskService {
     /// quiet long enough, and broadcast the queue after every change, until `stopping` fires.
     async fn dispatch_queued_runs(self: Arc<Self>, stopping: CancellationToken) {
         let mut queue_changes = self.deps.admission.task_queue.subscribe();
-        let mut lane_changes = self.deps.admission.lanes.watch();
-        let mut settled = self.deps.presence.subscribe_settled();
-        let mut interaction = self.deps.admission.interaction.subscribe();
+        let mut activity_changes = self.deps.admission.watch_activity();
         let mut published = None;
         loop {
-            let gpu_held = settled.borrow_and_update().asleep_for_gpu();
-            let interaction_now = *interaction.borrow_and_update();
-            self.suspend_waiting_runs(gpu_held).await;
+            let activity = activity_changes.current();
+            self.suspend_waiting_runs(activity.waiting_runs_held())
+                .await;
             queue_changes.mark_unchanged();
             self.publish_task_queue(&mut published);
             let next = self.deps.admission.task_queue.next_to_start();
@@ -143,10 +140,8 @@ impl TaskService {
                 biased;
                 () = stopping.cancelled() => return,
                 _ = queue_changes.changed() => {}
-                () = lane_changes.changed() => {}
-                () = changed_or_pending(&mut settled) => {}
-                () = changed_or_pending(&mut interaction) => {}
-                () = quiet_ends(interaction_now) => {
+                () = activity_changes.changed() => {}
+                () = quiet_ends(activity.quiet_until()) => {
                     self.deps.admission.interaction.end_if_quiet_by(Instant::now());
                 }
                 admitted = admit(&self.deps.admission.lanes, next) => self.start_admitted(admitted),
@@ -159,7 +154,8 @@ impl TaskService {
     fn start_admitted(self: &Arc<Self>, admitted: Admitted) {
         match admitted {
             Admitted::Run(_, lease)
-                if lease.on_main_lane() && self.deps.admission.interaction_holds_queue() =>
+                if lease.on_main_lane()
+                    && self.deps.admission.activity().interaction_holds_queue() =>
             {
                 debug!(target: "assistd::tasks", "the user's conversation took the lane first");
             }
@@ -190,18 +186,9 @@ impl TaskService {
         }
     }
 
-    /// Suspend every waiting run while the daemon sleeps for the GPU or the
-    /// user's interaction holds the only lane, and queue them again once both let go,
+    /// Suspend every waiting run for `reason`, or queue them again when `None`,
     /// recording each change.
-    async fn suspend_waiting_runs(&self, gpu_held: bool) {
-        let reason = if gpu_held {
-            Some(SuspendReason::GpuBusy)
-        } else {
-            self.deps
-                .admission
-                .interaction_holds_queue()
-                .then_some(SuspendReason::UserInteraction)
-        };
+    async fn suspend_waiting_runs(&self, reason: Option<SuspendReason>) {
         for run in self.deps.admission.task_queue.suspend_waiting(reason) {
             if let Err(e) = self.deps.store.set_run_waiting(run, reason).await {
                 warn!(
@@ -245,9 +232,9 @@ async fn admit(lanes: &Arc<ModelLanes>, next: Option<NextStart>) -> Admitted {
 }
 
 /// When a quiet interaction's quiet time runs out; never for any other.
-async fn quiet_ends(interaction: InteractionState) {
-    match interaction {
-        InteractionState::Quiet { until, .. } => tokio::time::sleep_until(until).await,
-        InteractionState::Idle | InteractionState::Talking { .. } => pending().await,
+async fn quiet_ends(quiet_until: Option<Instant>) {
+    match quiet_until {
+        Some(until) => tokio::time::sleep_until(until).await,
+        None => pending().await,
     }
 }

@@ -8,28 +8,21 @@ use tokio::sync::watch;
 use assistd_config::Config;
 
 use crate::admission::TurnAdmission;
-use crate::admission::interaction::InteractionState;
-use crate::admission::lanes::changed_or_pending;
-use crate::presence::PresenceManager;
 
 /// Keep `gate` at whether document chunks may be embedded now, until its last
 /// receiver is dropped.
 pub(crate) async fn keep_document_embed_gate(
     config: Arc<Config>,
     admission: Arc<TurnAdmission>,
-    presence: Arc<PresenceManager>,
     gate: watch::Sender<bool>,
 ) {
     let documents = &config.documents;
-    let mut interaction = admission.interaction.subscribe();
-    let mut lanes = admission.lanes.watch();
-    let mut settled = presence.subscribe_settled();
+    let mut activity_changes = admission.watch_activity();
     loop {
-        let interaction_open = *interaction.borrow_and_update() != InteractionState::Idle;
-        let asleep_for_gpu = settled.borrow_and_update().asleep_for_gpu();
-        let open = (documents.embed_during_interaction || !interaction_open)
-            && (documents.embed_during_tasks || !admission.lanes.held_by_run())
-            && (documents.embed_during_gpu_sleep || !asleep_for_gpu);
+        let activity = activity_changes.current();
+        let open = (documents.embed_during_interaction || !activity.interaction_open())
+            && (documents.embed_during_tasks || !activity.task_running())
+            && (documents.embed_during_gpu_sleep || !activity.asleep_for_gpu());
         gate.send_if_modified(|current| {
             let changed = *current != open;
             *current = open;
@@ -37,9 +30,7 @@ pub(crate) async fn keep_document_embed_gate(
         });
         tokio::select! {
             () = gate.closed() => return,
-            () = changed_or_pending(&mut interaction) => {}
-            () = lanes.changed() => {}
-            () = changed_or_pending(&mut settled) => {}
+            () = activity_changes.changed() => {}
         }
     }
 }
@@ -53,8 +44,8 @@ mod tests {
     use assistd_ipc::{PresenceTarget, TaskRunId};
 
     use super::*;
-    use crate::presence::SleepCause;
     use crate::presence::tests::{settle_stub_active, stub_presence};
+    use crate::presence::{PresenceManager, SleepCause};
 
     /// Long enough for the gate's task to act on a change, in paused time.
     const SETTLE: Duration = Duration::from_millis(10);
@@ -73,13 +64,16 @@ mod tests {
                 ..Config::default()
             });
             let slots = watch::channel(NonZeroU32::MIN).1;
-            let admission = Arc::new(TurnAdmission::new(Arc::clone(&config), slots));
             let presence = stub_presence(PresenceTarget::Active);
+            let admission = Arc::new(TurnAdmission::new(
+                Arc::clone(&config),
+                slots,
+                presence.subscribe_settled(),
+            ));
             let (gate_tx, gate) = watch::channel(false);
             tokio::spawn(keep_document_embed_gate(
                 config,
                 Arc::clone(&admission),
-                Arc::clone(&presence),
                 gate_tx,
             ));
             Self {

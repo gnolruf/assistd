@@ -10,13 +10,16 @@ use tokio::sync::{Mutex, OwnedMutexGuard, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use assistd_config::{Config, TaskInterruption};
-use assistd_ipc::{Event, EventBody, InteractionHold, TaskQueueSnapshot};
+use assistd_ipc::{Event, EventBody, TaskQueueSnapshot};
 
-use self::interaction::{InteractionState, InteractionTurn, UserInteraction};
+use self::activity::{Activity, ActivityWatch};
+use self::interaction::{InteractionTurn, UserInteraction};
 use self::lanes::ModelLanes;
 use self::queue::{TaskQueue, TurnStart};
 use crate::bus::EventSink;
+use crate::presence::SettledPresence;
 
+pub(crate) mod activity;
 pub(crate) mod interaction;
 pub(crate) mod lanes;
 pub(crate) mod queue;
@@ -59,21 +62,35 @@ pub(crate) struct TurnAdmission {
     /// The user's interaction, which holds the task queue off a lone lane.
     pub(crate) interaction: Arc<UserInteraction>,
     pub(crate) task_queue: TaskQueue,
+    activity: ActivityWatch,
     /// Parent of every turn's cancellation token; an interrupt cancels it
     /// and installs a fresh one, a stop cancels it for good.
     interrupt: StdMutex<CancellationToken>,
 }
 
 impl TurnAdmission {
-    /// Admission over as many lanes as `slots`, the server's slot count, reports.
-    pub(crate) fn new(config: Arc<Config>, slots: watch::Receiver<NonZeroU32>) -> Self {
+    /// Admission over as many lanes as `slots`, the server's slot count, reports,
+    /// beside presence's settled state `presence`.
+    pub(crate) fn new(
+        config: Arc<Config>,
+        slots: watch::Receiver<NonZeroU32>,
+        presence: watch::Receiver<SettledPresence>,
+    ) -> Self {
         let agent_turn_lock = Arc::new(Mutex::new(()));
+        let lanes = ModelLanes::new(Arc::clone(&agent_turn_lock), slots);
+        let interaction = Arc::<UserInteraction>::default();
         Self {
             config,
-            lanes: ModelLanes::new(Arc::clone(&agent_turn_lock), slots),
+            activity: ActivityWatch::new(
+                interaction.subscribe(),
+                lanes.subscribe_runs(),
+                lanes.subscribe_count(),
+                presence,
+            ),
+            lanes,
             agent_turn_lock,
             user_turn_lock: Arc::default(),
-            interaction: Arc::default(),
+            interaction,
             task_queue: TaskQueue::default(),
             interrupt: StdMutex::new(CancellationToken::new()),
         }
@@ -99,34 +116,19 @@ impl TurnAdmission {
         self.interrupt.lock().cancel();
     }
 
+    /// Who is using the model now.
+    pub(crate) fn activity(&self) -> Activity {
+        self.watch_activity().current()
+    }
+
+    /// Watch who is using the model.
+    pub(crate) fn watch_activity(&self) -> ActivityWatch {
+        self.activity.clone()
+    }
+
     /// The task queue and the model lanes as they stand.
     pub(crate) fn queue_snapshot(&self) -> TaskQueueSnapshot {
-        self.task_queue
-            .snapshot(self.lanes.holders(), self.interaction_hold())
-    }
-
-    /// Whether the user's interaction keeps task runs off the model's only lane.
-    pub(crate) fn interaction_holds_queue(&self) -> bool {
-        self.lanes.is_single() && self.interaction.is_open()
-    }
-
-    /// Whether a run on the main lane must give it to the user's interaction now.
-    pub(crate) fn run_must_yield(&self) -> bool {
-        self.config.tasks.interruption == TaskInterruption::Interrupt
-            && self.interaction_holds_queue()
-    }
-
-    fn interaction_hold(&self) -> Option<InteractionHold> {
-        if !self.lanes.is_single() {
-            return None;
-        }
-        match self.interaction.state() {
-            InteractionState::Idle => None,
-            InteractionState::Talking { .. } => Some(InteractionHold { resumes_at: None }),
-            InteractionState::Quiet { resumes_at, .. } => Some(InteractionHold {
-                resumes_at: Some(resumes_at),
-            }),
-        }
+        self.task_queue.snapshot(&self.activity())
     }
 
     /// How long the user's interaction stays open after its last reply finishes:
@@ -151,12 +153,12 @@ impl TurnAdmission {
         text: &str,
         tx: &EventSink,
     ) -> Option<MainLaneTurn> {
-        let lanes = &self.lanes;
+        let activity = self.activity();
         match self.config.tasks.interruption {
-            _ if !lanes.is_single() => Some(self.join_interaction().await),
+            _ if !activity.single_lane() => Some(self.join_interaction().await),
             TaskInterruption::AfterTask => {
                 let turn = self.interaction.begin_turn(self.interaction_quiet_time());
-                if lanes.main_held_by_run() {
+                if activity.main_held_by_run() {
                     let _ = tx
                         .send(Event::new(id.to_string(), EventBody::Queued { behind: 1 }))
                         .await;
@@ -164,7 +166,7 @@ impl TurnAdmission {
                 let lane = self.agent_turn_lock.clone().lock_owned().await;
                 Some(self.main_lane_turn(lane, turn).await)
             }
-            TaskInterruption::AfterQueue if self.turn_waits_for_queue() => {
+            TaskInterruption::AfterQueue if self.turn_waits_for_queue(&activity) => {
                 self.queue_behind_tasks(id, text, tx).await
             }
             TaskInterruption::Interrupt | TaskInterruption::AfterQueue => {
@@ -198,9 +200,9 @@ impl TurnAdmission {
 
     /// Whether an `after_queue` turn joins the queue: no interaction holds it, and a task
     /// run holds the lane or user turns already wait.
-    fn turn_waits_for_queue(&self) -> bool {
-        !self.interaction.is_open()
-            && (self.lanes.main_held_by_run() || self.task_queue.has_waiting_turns())
+    fn turn_waits_for_queue(&self, activity: &Activity) -> bool {
+        !activity.interaction_open()
+            && (activity.main_held_by_run() || self.task_queue.has_waiting_turns())
     }
 
     async fn queue_behind_tasks(
