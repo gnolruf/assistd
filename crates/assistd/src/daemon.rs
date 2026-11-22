@@ -16,7 +16,7 @@ use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::socket::StartupLock;
 use assistd_core::{
     AgentSpec, AppState, MemoryStack, PresenceManager, RelayDeps, SessionContext, SubAgentRunner,
-    Subsystems, VisionRevalidator, VramLedger, gpu_monitor, idle_monitor,
+    Subsystems, VisionRevalidator, VramLedger, presence_policy,
 };
 use assistd_llm::{
     HistoryReplay, LlamaClient, LlamaServerControl, LlmBackend, LlmHealthProbe, ModelPresets,
@@ -137,8 +137,7 @@ async fn start(
     let vision_revalidator = build_vision_revalidator(&config, &api_key, &presence, &health_probe)?;
     let voice = VoiceManager::new(config.voice.synthesis.enabled);
 
-    let (gpu_monitor_handle, idle_monitor_handle) =
-        spawn_presence_monitors(&config, &presence, stages);
+    let presence_policy_handle = spawn_presence_policy(&config, &presence, stages);
 
     let (embed, embed_startup) = embed_init::prepare(&config, &api_key, &memory.sqlite_handle);
     let (web_search, search_startup) = search_init::prepare(&config);
@@ -220,8 +219,7 @@ async fn start(
             window,
             mcp: background.mcp,
             intake_tasks: IntakeTasks {
-                gpu_monitor: gpu_monitor_handle,
-                idle_monitor: idle_monitor_handle,
+                presence_policy: presence_policy_handle,
                 warmup: background.warmup,
             },
         },
@@ -490,25 +488,19 @@ fn build_main_backend(
     Ok(Arc::new(llm))
 }
 
-/// Start the GPU-contention and idle monitors that drive `presence`, each `None`
-/// when it is off; both stop on the intake stage.
-fn spawn_presence_monitors(
+/// Start the policy task that drives `presence` from idle time and GPU contention,
+/// `None` when both are off; it stops on the intake stage.
+fn spawn_presence_policy(
     config: &Config,
     presence: &Arc<PresenceManager>,
     stages: &ShutdownStages,
-) -> (Option<JoinHandle<()>>, Option<JoinHandle<()>>) {
-    let gpu_monitor = gpu_monitor::spawn_monitor(
+) -> Option<JoinHandle<()>> {
+    presence_policy::spawn_policy(
         &config.sleep,
         open_vram_ledger(config, presence),
         Arc::clone(presence),
         stages.intake.subscribe(),
-    );
-    let idle_monitor = idle_monitor::spawn_monitor(
-        &config.sleep,
-        Arc::clone(presence),
-        stages.intake.subscribe(),
-    );
-    (gpu_monitor, idle_monitor)
+    )
 }
 
 /// The VRAM ledger, checked by `presence` before every wake; `None` when the GPU

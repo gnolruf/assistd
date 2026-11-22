@@ -590,11 +590,11 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
         (
             event(EventBody::Status {
                 severity: StatusSeverity::Warning,
-                component: Component::IdleMonitor,
+                component: Component::PresencePolicy,
                 event: StatusKind::ToolsWithdrawn,
                 message: "m".into(),
             }),
-            r#"{"id":"r","type":"status","severity":"warning","component":"idle_monitor","event":"tools_withdrawn","message":"m"}"#,
+            r#"{"id":"r","type":"status","severity":"warning","component":"presence_policy","event":"tools_withdrawn","message":"m"}"#,
         ),
     ]
 }
@@ -722,8 +722,7 @@ fn wire_spelling_helpers_agree_with_serde() {
         Component::Embed,
         Component::Documents,
         Component::Daemon,
-        Component::IdleMonitor,
-        Component::GpuMonitor,
+        Component::PresencePolicy,
         Component::ListenDispatcher,
     ] {
         check(v, v.as_str());

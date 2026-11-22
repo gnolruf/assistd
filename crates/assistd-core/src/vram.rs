@@ -1,5 +1,5 @@
 //! Who holds the GPU's VRAM and how much the model needs, shared by the
-//! contention monitor, the pre-wake room check, and transcription's GPU probe.
+//! presence policy, the pre-wake room check, and transcription's GPU probe.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -93,7 +93,7 @@ impl Learned {
     }
 }
 
-/// NVML plus what the monitor has learned from it.
+/// NVML plus what its polls have taught.
 #[derive(Debug)]
 pub struct VramLedger {
     nvml: Nvml,

@@ -42,6 +42,7 @@ use assistd_voice::{
 use assistd_wm::FocusedWindowContext;
 
 use super::*;
+use crate::presence::SleepCause;
 use crate::presence::tests::stub_presence;
 use crate::state::context::{format_memory_line, format_window_context_block};
 
@@ -1126,10 +1127,13 @@ async fn a_turn_waiting_to_start_does_not_hold_the_daemon_awake() {
     let queued = tokio::spawn(async move { dispatch(&query_state, query("q", "waiting")).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    tokio::time::timeout(Duration::from_secs(5), state.subsystems.presence.sleep())
-        .await
-        .expect("a queued turn kept the daemon from sleeping")
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        state.subsystems.presence.sleep(SleepCause::Requested),
+    )
+    .await
+    .expect("a queued turn kept the daemon from sleeping")
+    .unwrap();
     assert_eq!(state.subsystems.presence.state(), PresenceState::Sleeping);
     queued.abort();
     drop(earlier_turn);

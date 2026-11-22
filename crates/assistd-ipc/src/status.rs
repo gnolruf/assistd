@@ -43,8 +43,7 @@ pub enum Component {
     Embed,
     Documents,
     Daemon,
-    IdleMonitor,
-    GpuMonitor,
+    PresencePolicy,
     ListenDispatcher,
 }
 
@@ -60,8 +59,7 @@ impl Component {
             Component::Embed => "embed",
             Component::Documents => "documents",
             Component::Daemon => "daemon",
-            Component::IdleMonitor => "idle_monitor",
-            Component::GpuMonitor => "gpu_monitor",
+            Component::PresencePolicy => "presence_policy",
             Component::ListenDispatcher => "listen_dispatcher",
         }
     }

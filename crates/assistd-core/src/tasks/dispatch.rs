@@ -123,17 +123,17 @@ impl TaskService {
         }
     }
 
-    /// Start the next queued item whenever a lane can take it, hold waiting runs while the
-    /// GPU monitor or the user's interaction does, end that interaction once it has been
+    /// Start the next queued item whenever a lane can take it, hold waiting runs while a
+    /// sleep for the GPU or the user's interaction does, end that interaction once it has been
     /// quiet long enough, and broadcast the queue after every change, until `stopping` fires.
     async fn dispatch_queued_runs(self: Arc<Self>, stopping: CancellationToken) {
         let mut queue_changes = self.deps.admission.task_queue.subscribe();
         let mut lane_changes = self.deps.admission.lanes.watch();
-        let mut gpu_hold = self.deps.presence.gpu_hold();
+        let mut settled = self.deps.presence.subscribe_settled();
         let mut interaction = self.deps.admission.interaction.subscribe();
         let mut published = None;
         loop {
-            let gpu_held = *gpu_hold.borrow_and_update();
+            let gpu_held = settled.borrow_and_update().asleep_for_gpu();
             let interaction_now = *interaction.borrow_and_update();
             self.suspend_waiting_runs(gpu_held).await;
             queue_changes.mark_unchanged();
@@ -144,7 +144,7 @@ impl TaskService {
                 () = stopping.cancelled() => return,
                 _ = queue_changes.changed() => {}
                 () = lane_changes.changed() => {}
-                () = changed_or_pending(&mut gpu_hold) => {}
+                () = changed_or_pending(&mut settled) => {}
                 () = changed_or_pending(&mut interaction) => {}
                 () = quiet_ends(interaction_now) => {
                     self.deps.admission.interaction.end_if_quiet_by(Instant::now());
@@ -190,7 +190,7 @@ impl TaskService {
         }
     }
 
-    /// Suspend every waiting run while the GPU monitor holds the daemon asleep or the
+    /// Suspend every waiting run while the daemon sleeps for the GPU or the
     /// user's interaction holds the only lane, and queue them again once both let go,
     /// recording each change.
     async fn suspend_waiting_runs(&self, gpu_held: bool) {

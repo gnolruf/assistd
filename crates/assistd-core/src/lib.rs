@@ -7,12 +7,11 @@ mod build_tools;
 pub mod bus;
 mod dir_watch;
 mod documents;
-pub mod gpu_monitor;
-pub mod idle_monitor;
 mod judge;
 pub mod listen_dispatcher;
 pub mod planner;
 pub mod presence;
+pub mod presence_policy;
 pub mod recovery;
 mod relay;
 mod scratch;
@@ -44,7 +43,8 @@ pub use recovery::{
 pub use relay::{RelayDeps, sweep_relay_answers};
 
 pub use presence::{
-    BorrowedModel, PresenceError, PresenceManager, RequestGuard, VramShortfall, WakeRoom,
+    BorrowedModel, PresenceError, PresenceManager, RequestGuard, SleepCause, VramShortfall,
+    WakeRoom,
 };
 pub use state::{
     AppState, BranchService, DispatchError, DocumentsService, McpAccountError, McpAccounts,
