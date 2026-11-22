@@ -184,7 +184,7 @@ impl TurnService {
             debug!(
                 target: "assistd::state",
                 id = %id,
-                "turn interrupted before reaching the model; dropping the prompt"
+                "turn interrupted or abandoned before reaching the model; dropping the prompt"
             );
         }
         tx.reply(id, EventBody::Done).await;
@@ -195,7 +195,7 @@ impl TurnService {
     }
 
     /// Run `query`'s turn until its reply is complete; `None` when the turn was
-    /// interrupted before it reached the model, its prompt dropped.
+    /// interrupted or its client left before it reached the model, its prompt dropped.
     async fn reply_to(
         &self,
         query: Query,
@@ -220,7 +220,7 @@ impl TurnService {
             user_turn,
             turn: interaction,
         } = main_lane;
-        if !self.revalidate_vision(&cancel).await {
+        if !self.revalidate_vision(tx, &cancel).await {
             return Ok(None);
         }
         self.require_vision_for(&attachments)?;
@@ -296,7 +296,7 @@ impl TurnService {
     }
 
     /// The main lane and the daemon awake for query `id`'s turn; `None` when `cancel`
-    /// fired or the turn was dropped from the queue first.
+    /// fired, the client left or the turn was dropped from the queue first.
     async fn admit_turn(
         &self,
         id: &str,
@@ -314,18 +314,20 @@ impl TurnService {
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(None),
+            () = tx.closed() => Ok(None),
             admitted = admission => admitted,
         }
     }
 
-    /// Re-probe vision support if stale; `false` when `cancel` fired first.
-    async fn revalidate_vision(&self, cancel: &CancellationToken) -> bool {
+    /// Re-probe vision support if stale; `false` when `cancel` fired or the client left first.
+    async fn revalidate_vision(&self, tx: &EventSink, cancel: &CancellationToken) -> bool {
         let Some(revalidator) = &self.deps.vision_revalidator else {
             return !cancel.is_cancelled();
         };
         tokio::select! {
             biased;
             () = cancel.cancelled() => false,
+            () = tx.closed() => false,
             () = revalidator.revalidate_if_stale(&self.deps.presence) => true,
         }
     }

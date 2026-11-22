@@ -230,3 +230,28 @@ async fn after_queue_turns_wait_behind_queued_runs_and_hold_the_runs_queued_afte
     assert_eq!(harness.logged()[5], "third task");
     harness.settle(3).await;
 }
+
+#[tokio::test]
+async fn a_waiting_query_whose_client_left_ends_without_taking_the_lane() {
+    let first_step = Gate::new();
+    let tasks = [("task", Some(&first_step))];
+    let harness = Harness::new(TaskInterruption::AfterTask, &tasks).await;
+    queue_task_run(&harness.state, harness.task).await;
+    first_step.reached().await;
+
+    let (reply, mut events) = harness.start_query("hi");
+    assert_eq!(
+        first_event(&mut events).await,
+        Event::new("hi", EventBody::Queued { behind: 1 })
+    );
+    drop(events);
+    tokio::time::timeout(Duration::from_secs(5), reply)
+        .await
+        .expect("the query kept waiting for the lane")
+        .unwrap();
+
+    first_step.release();
+    await_task_queue(&harness.state, |queue| queue.items.is_empty().then_some(())).await;
+    harness.settle(1).await;
+    assert_eq!(harness.logged(), ["task"]);
+}
