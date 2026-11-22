@@ -2,7 +2,6 @@
 //! while it waits on the user or yields to the user's interaction, and the backend
 //! that makes each model step yield.
 
-use std::future::pending;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -19,6 +18,7 @@ use assistd_llm::{
 use assistd_tools::YieldableLane;
 
 use super::TaskService;
+use crate::admission::activity::Activity;
 use crate::admission::lanes::LaneLease;
 use crate::presence::RequestGuard;
 use crate::recovery::{Component, StatusSeverity};
@@ -104,30 +104,22 @@ impl RunLane {
         true
     }
 
-    fn must_yield(&self) -> bool {
-        self.tasks.deps.admission.run_must_yield() && self.on_main_lane()
+    fn must_yield(&self, activity: &Activity) -> bool {
+        activity.run_must_yield(self.run, self.tasks.deps.config.tasks.interruption)
     }
 }
 
 #[async_trait]
 impl YieldableLane for RunLane {
     async fn yield_requested(&self) {
-        let mut interaction = self.tasks.deps.admission.interaction.subscribe();
-        let mut held = self.held.0.subscribe();
-        while !self.must_yield() {
-            tokio::select! {
-                changed = interaction.changed() => {
-                    if changed.is_err() {
-                        pending::<()>().await;
-                    }
-                }
-                _ = held.changed() => {}
-            }
+        let mut activity = self.tasks.deps.admission.watch_activity();
+        while !self.must_yield(&activity.current()) {
+            activity.changed().await;
         }
     }
 
     async fn give_way(&self) -> bool {
-        if !self.must_yield() {
+        if !self.must_yield(&self.tasks.deps.admission.activity()) {
             return true;
         }
         info!(target: "assistd::tasks", run = %self.run, "task run yields to the user's conversation");

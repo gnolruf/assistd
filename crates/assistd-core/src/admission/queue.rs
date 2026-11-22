@@ -9,11 +9,11 @@ use thiserror::Error;
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, oneshot, watch};
 
 use assistd_ipc::{
-    InteractionHold, LaneHolder, PausedPrompt, QueueItem, SuspendReason, TaskId, TaskQueueSnapshot,
-    TaskRunId, TaskRunState,
+    PausedPrompt, QueueItem, SuspendReason, TaskId, TaskQueueSnapshot, TaskRunId, TaskRunState,
 };
 use assistd_memory::{MemoryError, TaskRecord};
 
+use super::activity::Activity;
 use super::interaction::InteractionTurn;
 use super::lanes::LaneLease;
 
@@ -315,13 +315,9 @@ impl TaskQueue {
         changed
     }
 
-    /// The queue as the wire shows it, beside the lanes' `holders` and the interaction's
-    /// `held`.
-    pub(super) fn snapshot(
-        &self,
-        holders: Vec<LaneHolder>,
-        held: Option<InteractionHold>,
-    ) -> TaskQueueSnapshot {
+    /// The queue as the wire shows it, beside the lanes' holders and the interaction's
+    /// hold in `activity`.
+    pub(super) fn snapshot(&self, activity: &Activity) -> TaskQueueSnapshot {
         let state = self.state.borrow();
         let running = state.running.iter().map(|queued| match &queued.stage {
             RunStage::NeedsInput(prompt) => {
@@ -344,9 +340,9 @@ impl TaskQueue {
         });
         TaskQueueSnapshot {
             items: running.chain(waiting).collect(),
-            lanes: holders,
+            lanes: activity.lane_holders(),
             paused: state.paused,
-            held,
+            held: activity.interaction_hold(),
         }
     }
 }

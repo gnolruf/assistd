@@ -35,16 +35,8 @@ pub(crate) struct UserInteraction {
 }
 
 impl UserInteraction {
-    pub(crate) fn subscribe(&self) -> watch::Receiver<InteractionState> {
+    pub(super) fn subscribe(&self) -> watch::Receiver<InteractionState> {
         self.state.subscribe()
-    }
-
-    pub(super) fn state(&self) -> InteractionState {
-        *self.state.borrow()
-    }
-
-    pub(super) fn is_open(&self) -> bool {
-        self.state() != InteractionState::Idle
     }
 
     /// Open or continue the interaction with a turn; once its last turn ends the

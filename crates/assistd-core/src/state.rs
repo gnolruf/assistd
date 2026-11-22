@@ -206,7 +206,11 @@ impl AppState {
     ) -> Self {
         let config = Arc::new(config);
         let bus = EventBus::new();
-        let admission = Arc::new(TurnAdmission::new(Arc::clone(&config), slots));
+        let admission = Arc::new(TurnAdmission::new(
+            Arc::clone(&config),
+            slots,
+            subsystems.presence.subscribe_settled(),
+        ));
         let transcript = Arc::new(TranscriptLog::new(
             Arc::clone(&memory.transcripts),
             Arc::clone(&session_ctx),
