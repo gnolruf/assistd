@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
 use super::App;
-use crate::selection::Selection;
+use crate::selection::{Selection, numbered};
 
 /// What this chat's messages do; Shift+Tab cycles it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,12 +48,24 @@ impl PlanReview {
             PlanChoice::Accept(PermissionMode::Manual),
             PlanChoice::KeepPlanning,
         ]);
-        Self {
+        let mut review = Self {
             review_id,
             choices,
             selected: Selection::default(),
             feedback: String::new(),
+        };
+        review.select_feedback_row();
+        review
+    }
+
+    /// The accept numbered `digit`; the keep-planning row's number selects it instead.
+    fn numbered_answer(&mut self, digit: char) -> Option<PlanChoice> {
+        let choice = numbered(&self.choices, digit)?;
+        if choice == PlanChoice::KeepPlanning {
+            self.select_feedback_row();
+            return None;
         }
+        Some(choice)
     }
 
     fn select_feedback_row(&mut self) {
@@ -118,8 +130,9 @@ impl App {
         self.type_ahead.arm(Instant::now());
     }
 
-    /// Arrows move the selection, Enter or a row's number answers, typing writes what to
-    /// change on the keep-planning row, and Esc keeps planning without feedback.
+    /// Arrows move the selection and Enter answers. On the keep-planning row, where the
+    /// review opens, every character typed is what to change; on the others a row's number
+    /// answers. Esc keeps planning.
     pub(super) fn on_plan_review_key(&mut self, ev: KeyEvent) {
         let Some(review) = self.plan_review.as_mut() else {
             return;
@@ -143,14 +156,11 @@ impl App {
                 review.feedback.pop();
                 None
             }
-            KeyCode::Char(digit) if review.feedback.is_empty() && digit.is_ascii_digit() => {
-                numbered_choice(&review.choices, digit)
-            }
-            KeyCode::Char(typed) => {
-                review.select_feedback_row();
+            KeyCode::Char(typed) if on_feedback_row => {
                 review.feedback.push(typed);
                 None
             }
+            KeyCode::Char(digit) => review.numbered_answer(digit),
             KeyCode::PageUp => {
                 self.output.scroll_page_up(self.last_output_height);
                 None
@@ -203,10 +213,4 @@ impl App {
             }
         });
     }
-}
-
-/// The choice shown as `digit`, counting from 1.
-fn numbered_choice(choices: &[PlanChoice], digit: char) -> Option<PlanChoice> {
-    let number = usize::try_from(digit.to_digit(10)?).ok()?;
-    choices.get(number.checked_sub(1)?).copied()
 }
