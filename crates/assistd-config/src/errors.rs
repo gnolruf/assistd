@@ -211,11 +211,6 @@ pub enum SearchCommandError {
     Empty,
 }
 
-/// A number refused by [`crate::voice::UnitInterval`].
-#[derive(Debug, Error)]
-#[error("{0} is outside the range 0.0..=1.0")]
-pub struct UnitIntervalError(pub f32);
-
 /// A number refused by a bounded decimal such as [`crate::values::Temperature`].
 #[derive(Debug, Error)]
 #[error("{value} must be {expected}")]

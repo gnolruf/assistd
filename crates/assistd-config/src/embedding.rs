@@ -1,6 +1,5 @@
 //! Embedding-server and semantic-search configuration.
 
-use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU16, NonZeroU64};
 use std::str::FromStr;
@@ -12,7 +11,7 @@ use crate::custom_args::{CustomArgs, EmbeddingServer};
 use crate::defaults::{bounded, nz16, nz64, unit};
 use crate::errors::EmbeddingModelError;
 use crate::settings::{DescribeSettings, describe_fields};
-use crate::values::{Bounded, HfFile};
+use crate::values::{Bounded, HfFile, string_setting};
 use crate::voice::UnitInterval;
 
 /// Semantic-recall settings and the embedding server behind them, which runs
@@ -138,12 +137,6 @@ impl EmbeddingConfig {
 #[serde(try_from = "String", into = "String")]
 pub struct EmbeddingModel(HfFileId);
 
-impl fmt::Display for EmbeddingModel {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
 impl FromStr for EmbeddingModel {
     type Err = EmbeddingModelError;
 
@@ -157,16 +150,4 @@ impl FromStr for EmbeddingModel {
     }
 }
 
-impl TryFrom<String> for EmbeddingModel {
-    type Error = EmbeddingModelError;
-
-    fn try_from(model: String) -> Result<Self, Self::Error> {
-        model.parse()
-    }
-}
-
-impl From<EmbeddingModel> for String {
-    fn from(model: EmbeddingModel) -> Self {
-        model.to_string()
-    }
-}
+string_setting!(EmbeddingModel, |model| model.to_string(), display);

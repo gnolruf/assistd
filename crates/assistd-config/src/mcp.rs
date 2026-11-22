@@ -16,6 +16,7 @@ use url::{Host, Url};
 use crate::defaults::nz64;
 use crate::errors::McpServerNameError;
 use crate::settings::{DescribeSettings, describe_fields};
+use crate::values::string_setting;
 
 /// Model Context Protocol client settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -274,37 +275,19 @@ impl FromStr for McpServerName {
     type Err = McpServerNameError;
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
-        Self::try_from(name.to_owned())
-    }
-}
-
-impl TryFrom<String> for McpServerName {
-    type Error = McpServerNameError;
-
-    fn try_from(name: String) -> Result<Self, Self::Error> {
         let unambiguous = !name.is_empty()
             && name.chars().all(is_server_name_char)
             && !name.contains("__")
             && !name.ends_with('_');
         if unambiguous {
-            Ok(Self(name))
+            Ok(Self(name.to_owned()))
         } else {
-            Err(McpServerNameError(name))
+            Err(McpServerNameError(name.to_owned()))
         }
     }
 }
 
-impl From<McpServerName> for String {
-    fn from(name: McpServerName) -> Self {
-        name.0
-    }
-}
-
-impl fmt::Display for McpServerName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+string_setting!(McpServerName, |name| name.0, display);
 
 impl McpTransport {
     /// Whether the entry holds credentials: stdio `env`, HTTP `headers` or

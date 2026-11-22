@@ -1,7 +1,7 @@
 //! Tool subsystem configuration: scratch directory, output limits and per-command policy.
 
 use std::num::{NonZeroU32, NonZeroU64};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use assistd_utils::path::tilde_remainder;
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::defaults::{nz32, nz64};
 use crate::errors::{NoDefaultDirError, WritablePathError};
 use crate::settings::{DescribeSettings, choice_setting, describe_fields};
-use crate::values::{AbsoluteDir, NonEmpty};
+use crate::values::{AbsoluteDir, NonEmpty, string_setting};
 
 const SCRATCH_DIR_KEY: &str = "tools.scratch.dir";
 const OVERFLOW_DIR_KEY: &str = "tools.output.overflow_dir";
@@ -298,27 +298,15 @@ impl FromStr for WritablePath {
     type Err = WritablePathError;
 
     fn from_str(path: &str) -> Result<Self, Self::Err> {
-        Self::try_from(path.to_owned())
-    }
-}
-
-impl TryFrom<String> for WritablePath {
-    type Error = WritablePathError;
-
-    fn try_from(path: String) -> Result<Self, Self::Error> {
-        if tilde_remainder(&path).is_some() || PathBuf::from(&path).is_absolute() {
-            Ok(Self(path))
+        if tilde_remainder(path).is_some() || Path::new(path).is_absolute() {
+            Ok(Self(path.to_owned()))
         } else {
-            Err(WritablePathError(path))
+            Err(WritablePathError(path.to_owned()))
         }
     }
 }
 
-impl From<WritablePath> for String {
-    fn from(path: WritablePath) -> Self {
-        path.0
-    }
-}
+string_setting!(WritablePath, |path| path.0);
 
 fn resolve_tools_dir(
     configured: Option<&AbsoluteDir>,
