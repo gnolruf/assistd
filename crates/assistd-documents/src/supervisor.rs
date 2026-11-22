@@ -5,7 +5,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_utils::pipe_worker::{self, PipeWorker};
+use assistd_utils::pipe_worker::{self, ExitBlame, PipeWorker};
 use assistd_utils::readiness::NotReady;
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -54,8 +54,8 @@ impl PipeWorker for ExtractionWorker {
         }
     }
 
-    fn disconnect(&self) {
-        self.extractor.disconnect();
+    fn disconnect(&self) -> ExitBlame {
+        self.extractor.disconnect()
     }
 
     fn set_not_ready(&self, not_ready: NotReady) {
@@ -66,6 +66,7 @@ impl PipeWorker for ExtractionWorker {
 /// Run the extraction worker `command` builds until `shutdown` flips, restarting
 /// it with backoff when it dies. `extractor` is starting until the worker says
 /// it is ready, and unavailable between the slow retries of a worker that keeps dying.
+/// A second exit in a row over the same file does not count toward that.
 pub async fn supervise(
     command: WorkerCommand,
     extractor: Arc<Extractor>,

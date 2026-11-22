@@ -923,7 +923,10 @@ The supervisor is `assistd-utils`'s `pipe_worker`, shared with the voice worker.
 until the worker's first line says it is ready, and appears in `GetReadiness`
 as document indexing; a worker that writes no line within 30 seconds of its spawn is killed and counts as a failed start. A request has two minutes; a worker that misses that
 is killed, the file is skipped (or the page failed) as timed out, and the worker restarts under
-`RestartPolicy` backoff, as it does when it dies. The daemon reads no line
+`RestartPolicy` backoff, as it does when it dies. The `Extractor` remembers
+the file a worker exited over: a second exit in a row over the same file is
+held against the file, so the supervisor restarts the worker after a second
+without counting the exit toward the policy. The daemon reads no line
 longer than the largest reply can be, so a compromised worker cannot grow
 the daemon's memory.
 
@@ -933,9 +936,12 @@ A pass brings the index in step with one root of `documents.roots`. It walks
 the root with the `ignore` crate, asks the store which of the files it found
 have a changed stamp, sends those to the extraction worker one at a time,
 stores each file's pages, wakes the embedding worker, and finishes by removing
-the root's documents it did not see. A file none of whose pages has text is
+the root's documents it did not see. A file the worker skips is recorded in
+`skipped_files` with its stamp and the cause, and while its stamp matches,
+later passes count it under that cause without reading it. Only
+`assistd documents reindex` forgets those rows. A file none of whose pages has text is
 skipped as having no text layer instead of stored empty, unless it is a PDF and
-`documents.ocr.model` is set. Every PDF page without text is recorded as waiting
+`documents.ocr.model` is set; setting the model has such a PDF read again. Every PDF page without text is recorded as waiting
 for transcription, model or not. Passes run over every root in turn, one at a
 time: once the embedder is ready after daemon start, which is also when a
 changed `[documents]` takes effect, and again whenever `DocumentIndex` is
@@ -953,12 +959,14 @@ large unchanged root holds the database's only writer briefly and seldom.
 A pass removes documents only when it has seen the whole root. A root that is
 missing, cannot be listed, or is empty, as the mount point of an unmounted
 drive is, is skipped before its pass begins. A pass that could not list part
-of the root, that shutdown interrupted, or whose worker became unavailable
+of the root or that shutdown interrupted
 ends without removing anything, and so does one whose root has gone by the
-time the walk ends. A directory the daemon may not read does not count as
+time the walk ends. A pass whose worker is restarting, or unavailable between
+the slow retries of one that keeps dying, waits for it with a warning in the log. A directory the daemon may not read does not count as
 unlisted; it is a skipped file. When the worker exits over a file it is
-restarted and asked again, and a file it exits over twice is skipped, so one
-file that crashes the extractor cannot stop the pass.
+restarted and asked again, and a file it exits over twice is skipped and
+recorded like any other, so files that crash the extractor neither stop the
+pass nor are tried again by the next one.
 
 Between passes every root is watched recursively with `notify` (inotify), one
 watcher per root, set up on the blocking pool before the first pass. A root's
@@ -1000,7 +1008,7 @@ of its ceiling, and where page transcription stands: how many pages wait for
 the OCR model and how many it failed on, whether a run is under way, that
 none ever starts while `documents.ocr.model` is unset or
 `sleep.idle_to_drowsy_mins` is `0`, and why the last run stopped early. `assistd documents reindex` (`DocumentsReindex`)
-asks for a round of passes and streams the progress of the round that answers
+forgets the skipped files, asks for a round of passes and streams the progress of the round that answers
 it, which is the next one when a round is already under way; it is refused
 when no worker will run, and is not held to the dispatch timeout.
 `assistd documents search <query>` (`DocumentsSearch`) ranks the documents as
@@ -1458,7 +1466,7 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
    The pass walks to the path, leaving out what is hidden, ignored,
    excluded, oversized or a sensitive read. The store compares the
    file's modification time and size with its row, and a file whose
-   stamp matches is not read
+   stamp matches is not read, whether it is stored or was skipped
    ([index passes](#document-index-passes-assistd-core)).
 
 3. **Extraction** ([`crates/assistd-documents/src/extract.rs`](../crates/assistd-documents/src/extract.rs)).
@@ -1466,7 +1474,7 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
    extraction worker, which runs in a reader sandbox that shows the
    roots read-only and has no network, at idle CPU and IO priority. The
    worker answers with the file's text page by page, or a `SkipReason`
-   the pass counts
+   the pass counts and records
    ([extraction](#document-extraction-assistd-documents)).
 
 4. **Store** ([`crates/assistd-core/src/documents/pass.rs`](../crates/assistd-core/src/documents/pass.rs)).

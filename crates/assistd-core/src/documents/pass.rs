@@ -8,13 +8,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_documents::{Extraction, Extractor, ExtractorError, SkipReason, renders_pages};
-use assistd_memory::{DocumentStore, EmptyPages, FileStamp, IndexPass, MemoryError};
+use assistd_memory::{
+    DocumentStore, EmptyPages, FileStamp, IndexPass, MemoryError, SkippedRead, UnindexedFile,
+};
 use assistd_tools::policy::{PathGuards, on_blocking_pool};
 use assistd_utils::readiness::NotReady;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::sync::{Notify, mpsc, watch};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::indexer::DocumentIndex;
 use super::walk::{IndexRoot, WalkScope, Walked, root_unavailable};
@@ -51,18 +53,18 @@ pub enum SkipCause {
     IndexFull,
 }
 
-impl From<&SkipReason> for SkipCause {
-    fn from(reason: &SkipReason) -> Self {
-        match reason {
-            SkipReason::Unsupported { .. } => Self::Unsupported,
-            SkipReason::Binary => Self::Binary,
-            SkipReason::TooLarge => Self::TooLarge,
-            SkipReason::NotDecodable => Self::NotDecodable,
-            SkipReason::PasswordProtected => Self::PasswordProtected,
-            SkipReason::NoTextLayer => Self::NoTextLayer,
-            SkipReason::Unreadable { .. } => Self::Unreadable,
-            SkipReason::ExtractorFailed { .. } => Self::ExtractorFailed,
-            SkipReason::TimedOut => Self::TimedOut,
+impl From<SkippedRead> for SkipCause {
+    fn from(skipped: SkippedRead) -> Self {
+        match skipped {
+            SkippedRead::Unsupported => Self::Unsupported,
+            SkippedRead::Binary => Self::Binary,
+            SkippedRead::TooLarge => Self::TooLarge,
+            SkippedRead::NotDecodable => Self::NotDecodable,
+            SkippedRead::PasswordProtected => Self::PasswordProtected,
+            SkippedRead::NoTextLayer => Self::NoTextLayer,
+            SkippedRead::Unreadable => Self::Unreadable,
+            SkippedRead::ExtractorFailed => Self::ExtractorFailed,
+            SkippedRead::TimedOut => Self::TimedOut,
         }
     }
 }
@@ -76,6 +78,8 @@ pub struct PassCounts {
     pub unchanged: u64,
     /// Documents removed because the pass no longer found their file.
     pub removed: u64,
+    /// Files left out by cause, those skipped at an earlier read of the same
+    /// stamp among them.
     pub skipped: BTreeMap<SkipCause, u64>,
 }
 
@@ -111,6 +115,7 @@ pub struct RootPass {
 #[derive(Debug, Clone)]
 pub struct IndexDeps {
     pub store: Arc<dyn DocumentStore>,
+    /// A pass with a file to read waits until its worker is ready, however long.
     pub extractor: Arc<Extractor>,
     /// Wakes the embedding worker after a document leaves chunks to embed.
     pub embed_wake: Arc<Notify>,
@@ -121,8 +126,6 @@ pub struct IndexDeps {
 enum PassStopped {
     #[error("the daemon is shutting down")]
     Shutdown,
-    #[error("document extraction is {0}")]
-    Worker(NotReady),
     #[error(transparent)]
     Store(#[from] MemoryError),
     #[error("part of the folder could not be listed: {0}")]
@@ -161,14 +164,23 @@ impl RunningPass<'_> {
             }
         }
         let walked = files.len() as u64;
-        let changed = self.deps.store.changed_documents(self.pass, files).await?;
-        self.counts.unchanged += walked - changed.len() as u64;
+        let unindexed = self.deps.store.unindexed_files(self.pass, files).await?;
+        self.counts.unchanged += walked - unindexed.len() as u64;
+        let mut to_read = Vec::with_capacity(unindexed.len());
+        for file in unindexed {
+            match file.skipped {
+                Some(skipped) if !self.reads_again(&file.path, skipped) => {
+                    self.counts.skip(skipped.into());
+                }
+                _ => to_read.push(file),
+            }
+        }
         self.index.report_progress(self.root, self.counts);
-        if changed.is_empty() {
+        if to_read.is_empty() {
             return Ok(());
         }
         let mut chunks = self.deps.store.count_document_chunks().await?;
-        for (path, stamp) in changed {
+        for UnindexedFile { path, stamp, .. } in to_read {
             if chunks >= MAX_DOCUMENT_CHUNKS {
                 self.counts.skip(SkipCause::IndexFull);
             } else {
@@ -179,8 +191,15 @@ impl RunningPass<'_> {
         Ok(())
     }
 
-    /// Extract and store the file at `path`, returning how many chunks that added.
-    /// Its pages without text wait for transcription when they can be rendered.
+    /// Whether the unchanged file at `path`, `skipped` when it was last read, is read
+    /// again: only a scan skipped for its missing text that would now be kept.
+    fn reads_again(&self, path: &Path, skipped: SkippedRead) -> bool {
+        skipped == SkippedRead::NoTextLayer && self.keeps_scans && renders_pages(path)
+    }
+
+    /// Extract and store the file at `path`, returning how many chunks that added,
+    /// or record why it is skipped. Its pages without text wait for transcription
+    /// when they can be rendered.
     async fn index_file(&mut self, path: PathBuf, stamp: FileStamp) -> Result<u64, PassStopped> {
         let empty_pages = if renders_pages(&path) {
             EmptyPages::AwaitTranscription
@@ -192,7 +211,11 @@ impl RunningPass<'_> {
             Ok(pages) => pages,
             Err(reason) => {
                 debug!(target: "assistd::documents", "skipped {}: {reason}", path.display());
-                self.counts.skip(SkipCause::from(&reason));
+                let skipped = skipped_read(&reason);
+                let store = &self.deps.store;
+                let recorded = store.record_skipped_file(self.pass, path, stamp, skipped);
+                recorded.await?;
+                self.counts.skip(skipped.into());
                 return Ok(0);
             }
         };
@@ -236,16 +259,21 @@ impl RunningPass<'_> {
         }
     }
 
-    /// Wait out a worker that is starting; errors on shutdown, or when no worker
-    /// is coming.
+    /// Wait out a worker that is starting, or unavailable between the slow retries
+    /// of one that keeps dying; errors on shutdown.
     async fn worker_ready(&mut self) -> Result<(), PassStopped> {
-        let started = |readiness: &Result<(), NotReady>| *readiness != Err(NotReady::Starting);
+        if let Err(NotReady::Unavailable(why)) = &*self.worker.borrow() {
+            warn!(
+                target: "assistd::documents",
+                "the pass over {} waits for the extraction worker: {why}",
+                self.root.display()
+            );
+        }
         tokio::select! {
             biased;
             _ = self.shutdown.wait_for(|stop| *stop) => Err(PassStopped::Shutdown),
-            readiness = self.worker.wait_for(started) => match readiness.as_deref() {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(not_ready)) => Err(PassStopped::Worker(not_ready.clone())),
+            ready = self.worker.wait_for(Result::is_ok) => match ready {
+                Ok(_) => Ok(()),
                 Err(_) => Err(PassStopped::Shutdown),
             },
         }
@@ -367,6 +395,20 @@ fn walk_in_batches(
     });
     if !batch.is_empty() {
         let _ = batches.blocking_send(batch);
+    }
+}
+
+fn skipped_read(reason: &SkipReason) -> SkippedRead {
+    match reason {
+        SkipReason::Unsupported { .. } => SkippedRead::Unsupported,
+        SkipReason::Binary => SkippedRead::Binary,
+        SkipReason::TooLarge => SkippedRead::TooLarge,
+        SkipReason::NotDecodable => SkippedRead::NotDecodable,
+        SkipReason::PasswordProtected => SkippedRead::PasswordProtected,
+        SkipReason::NoTextLayer => SkippedRead::NoTextLayer,
+        SkipReason::Unreadable { .. } => SkippedRead::Unreadable,
+        SkipReason::ExtractorFailed { .. } => SkippedRead::ExtractorFailed,
+        SkipReason::TimedOut => SkippedRead::TimedOut,
     }
 }
 

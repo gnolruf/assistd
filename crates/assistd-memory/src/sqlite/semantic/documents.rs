@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::sqlite::timestamp::now_millis;
 use crate::{
-    ChunkId, DocumentId, EmptyPages, FileStamp, IndexPass, PageReading, TranscriptionCounts,
-    WaitingPage,
+    ChunkId, DocumentId, EmptyPages, FileStamp, IndexPass, PageReading, SkippedRead,
+    TranscriptionCounts, WaitingPage,
 };
 
 /// The byte after `/`: every path inside a directory sorts between the directory's
@@ -259,8 +259,73 @@ pub(super) fn mark_seen_if_unchanged(
     Ok(marked > 0)
 }
 
+/// Mark the file at `path` seen by `pass` when it is recorded as skipped with
+/// `stamp`, returning why it was.
+pub(super) fn mark_seen_if_skipped(
+    conn: &Connection,
+    pass: IndexPass,
+    path: &Path,
+    stamp: FileStamp,
+) -> rusqlite::Result<Option<SkippedRead>> {
+    conn.prepare_cached(
+        "UPDATE skipped_files SET root_id = ?1, seen_pass = ?2
+         WHERE path = ?3 AND mtime_ns = ?4 AND size = ?5
+         RETURNING cause",
+    )?
+    .query_row(
+        rusqlite::params![
+            pass.root,
+            pass.pass,
+            path.as_os_str().as_bytes(),
+            stamp.mtime_ns,
+            stamp.size,
+        ],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// Record the file at `path` as skipped for `cause` with `stamp`, seen by `pass`,
+/// and remove the document stored at that path.
+pub(super) fn record_skipped(
+    tx: &Transaction<'_>,
+    pass: IndexPass,
+    path: &Path,
+    stamp: FileStamp,
+    cause: SkippedRead,
+) -> rusqlite::Result<()> {
+    let path = path.as_os_str().as_bytes();
+    tx.prepare_cached("DELETE FROM documents WHERE path = ?1")?
+        .execute(rusqlite::params![path])?;
+    tx.prepare_cached(
+        "INSERT INTO skipped_files (path, root_id, mtime_ns, size, cause, seen_pass)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(path) DO UPDATE
+         SET root_id = excluded.root_id, mtime_ns = excluded.mtime_ns, size = excluded.size,
+             cause = excluded.cause, seen_pass = excluded.seen_pass",
+    )?
+    .execute(rusqlite::params![
+        path,
+        pass.root,
+        stamp.mtime_ns,
+        stamp.size,
+        cause,
+        pass.pass
+    ])?;
+    Ok(())
+}
+
+/// Forget every skipped file, returning how many.
+pub(super) fn forget_skipped(conn: &Connection) -> rusqlite::Result<u64> {
+    let forgotten = conn
+        .prepare_cached("DELETE FROM skipped_files")?
+        .execute([])?;
+    Ok(u64::try_from(forgotten).unwrap_or(u64::MAX))
+}
+
 /// Store `pages` as the document at `path`, seen by `pass`, returning the chunks
 /// added. Pages with the stored hash and chunking only have their stamp refreshed.
+/// A skip recorded for the path is dropped.
 pub(super) fn store_document(
     tx: &Transaction<'_>,
     pass: IndexPass,
@@ -269,6 +334,8 @@ pub(super) fn store_document(
     pages: &[String],
     empty_pages: EmptyPages,
 ) -> rusqlite::Result<Vec<ChunkId>> {
+    tx.prepare_cached("DELETE FROM skipped_files WHERE path = ?1")?
+        .execute(rusqlite::params![path.as_os_str().as_bytes()])?;
     let document = DocumentRow {
         pass,
         path: path.as_os_str().as_bytes(),
@@ -371,8 +438,11 @@ pub(super) fn count_transcriptions(conn: &Connection) -> rusqlite::Result<Transc
     })
 }
 
-/// Remove the documents of `pass`'s root that it did not see, returning how many.
+/// Remove the documents of `pass`'s root that it did not see, returning how many,
+/// and the skipped files it did not see.
 pub(super) fn remove_unseen(conn: &Connection, pass: IndexPass) -> rusqlite::Result<u64> {
+    conn.prepare_cached("DELETE FROM skipped_files WHERE root_id = ?1 AND seen_pass < ?2")?
+        .execute(rusqlite::params![pass.root, pass.pass])?;
     let removed = conn
         .prepare_cached("DELETE FROM documents WHERE root_id = ?1 AND seen_pass < ?2")?
         .execute(rusqlite::params![pass.root, pass.pass])?;
@@ -380,7 +450,8 @@ pub(super) fn remove_unseen(conn: &Connection, pass: IndexPass) -> rusqlite::Res
 }
 
 /// Remove the documents of `pass`'s root at or under `path` that it did not see,
-/// returning how many. The `+` keeps the planner on the index over `path`.
+/// returning how many, and the skipped files there it did not see. The `+` keeps the
+/// planner on the index over `path`.
 pub(super) fn remove_unseen_under(
     conn: &Connection,
     pass: IndexPass,
@@ -388,27 +459,38 @@ pub(super) fn remove_unseen_under(
 ) -> rusqlite::Result<u64> {
     let path = path.as_os_str().as_bytes();
     let directory = path.strip_suffix(b"/").unwrap_or(path);
+    let unseen_under = rusqlite::params![
+        path,
+        [directory, b"/"].concat(),
+        [directory, PAST_SEPARATOR].concat(),
+        pass.root,
+        pass.pass
+    ];
+    conn.prepare_cached(
+        "DELETE FROM skipped_files
+         WHERE (path = ?1 OR (path > ?2 AND path < ?3))
+           AND +root_id = ?4 AND seen_pass < ?5",
+    )?
+    .execute(unseen_under)?;
     let removed = conn
         .prepare_cached(
             "DELETE FROM documents
              WHERE (path = ?1 OR (path > ?2 AND path < ?3))
                AND +root_id = ?4 AND seen_pass < ?5",
         )?
-        .execute(rusqlite::params![
-            path,
-            [directory, b"/"].concat(),
-            [directory, PAST_SEPARATOR].concat(),
-            pass.root,
-            pass.pass
-        ])?;
+        .execute(unseen_under)?;
     Ok(u64::try_from(removed).unwrap_or(u64::MAX))
 }
 
-/// Remove the document at `path`, returning whether one was stored.
+/// Remove the document at `path`, returning whether one was stored, and any skip
+/// recorded for it.
 pub(super) fn remove_document(conn: &Connection, path: &Path) -> rusqlite::Result<bool> {
+    let path = path.as_os_str().as_bytes();
+    conn.prepare_cached("DELETE FROM skipped_files WHERE path = ?1")?
+        .execute(rusqlite::params![path])?;
     let removed = conn
         .prepare_cached("DELETE FROM documents WHERE path = ?1")?
-        .execute(rusqlite::params![path.as_os_str().as_bytes()])?;
+        .execute(rusqlite::params![path])?;
     Ok(removed > 0)
 }
 

@@ -18,8 +18,8 @@ use crate::{
     AdjacentChunks, ChunkId, ChunkLocator, ChunkSource, ContextChunk, DocumentHit, DocumentId,
     DocumentStore, DocumentText, Embedding, EmbeddingHit, EmbeddingQueue, EmbeddingSpace,
     EmbeddingTarget, EmptyPages, FileStamp, IndexPass, IndexRootCounts, MemoryHit, MemoryId,
-    MessageId, PageReading, RecallStore, Result, SessionId, SessionScope, TranscriptionCounts,
-    UnindexedRows, WaitingPage,
+    MessageId, PageReading, RecallStore, Result, SessionId, SessionScope, SkippedRead,
+    TranscriptionCounts, UnindexedFile, UnindexedRows, WaitingPage,
 };
 
 use super::connection::SqliteHandle;
@@ -397,21 +397,47 @@ impl DocumentStore for SqliteSemanticStore {
             .await
     }
 
-    async fn changed_documents(
+    async fn unindexed_files(
         &self,
         pass: IndexPass,
         files: Vec<(PathBuf, FileStamp)>,
-    ) -> Result<Vec<(PathBuf, FileStamp)>> {
+    ) -> Result<Vec<UnindexedFile>> {
         self.handle
-            .write("changed_documents", move |tx| {
-                let mut changed = Vec::new();
+            .write("unindexed_files", move |tx| {
+                let mut unindexed = Vec::new();
                 for (path, stamp) in files {
-                    if !documents::mark_seen_if_unchanged(tx, pass, &path, stamp)? {
-                        changed.push((path, stamp));
+                    if documents::mark_seen_if_unchanged(tx, pass, &path, stamp)? {
+                        continue;
                     }
+                    let skipped = documents::mark_seen_if_skipped(tx, pass, &path, stamp)?;
+                    unindexed.push(UnindexedFile {
+                        path,
+                        stamp,
+                        skipped,
+                    });
                 }
-                Ok(changed)
+                Ok(unindexed)
             })
+            .await
+    }
+
+    async fn record_skipped_file(
+        &self,
+        pass: IndexPass,
+        path: PathBuf,
+        stamp: FileStamp,
+        cause: SkippedRead,
+    ) -> Result<()> {
+        self.handle
+            .write("record_skipped_file", move |tx| {
+                documents::record_skipped(tx, pass, &path, stamp, cause)
+            })
+            .await
+    }
+
+    async fn forget_skipped_files(&self) -> Result<u64> {
+        self.handle
+            .write("forget_skipped_files", |tx| documents::forget_skipped(tx))
             .await
     }
 

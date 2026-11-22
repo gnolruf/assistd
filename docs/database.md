@@ -21,6 +21,7 @@ erDiagram
     branches ||--o| branch_summaries : "compacted by"
     messages ||--o{ chunks : "split into"
     index_roots ||--o{ documents : "found under"
+    index_roots ||--o{ skipped_files : "found under"
     documents ||--o{ document_pages : "made of"
     document_pages ||--o{ chunks : "split into"
     document_pages ||--o| page_transcriptions : "read from its image as"
@@ -137,6 +138,14 @@ erDiagram
         int overlap_chars
         int seen_pass "the root's pass that last saw it"
         int indexed_at
+    }
+    skipped_files {
+        blob path PK
+        int root_id FK
+        int mtime_ns "the file's stamp when read"
+        int size
+        int cause "why the read left nothing to index"
+        int seen_pass "the root's pass that last saw it"
     }
     document_pages {
         int document_id PK, FK
@@ -317,6 +326,16 @@ resumed, saying which.
   not see: all of the root's, or for a pass over changed paths those at
   or under them. The rows are a rebuildable cache of files on disk,
   so a reset of `memory.db` costs only a re-index.
+- **`skipped_files`**: files that were read and left nothing to
+  index, one row per path, each with the stamp it had and why:
+  unsupported, binary, undecodable, password protected, without text,
+  unreadable, too large once expanded, or a read that failed or timed
+  out. A path has a row here or in `documents`, never both. A pass
+  counts a file whose stamp matches its row as skipped for that cause
+  without reading it; only a PDF without text is read again once
+  `documents.ocr.model` is set. Rows go when their file changes and is
+  read, when a pass no longer sees it, and all at once on
+  `assistd documents reindex`.
 - **`document_pages`**: a document's text as it was indexed, one row
   per page. What a page is follows the file's format: a PDF's pages
   are its own, a presentation's slides, a spreadsheet's sheets and an

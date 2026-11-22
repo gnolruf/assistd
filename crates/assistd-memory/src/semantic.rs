@@ -283,6 +283,30 @@ impl FileStamp {
     }
 }
 
+/// Why reading a file left nothing to index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkippedRead {
+    Unsupported,
+    Binary,
+    TooLarge,
+    NotDecodable,
+    PasswordProtected,
+    NoTextLayer,
+    Unreadable,
+    ExtractorFailed,
+    TimedOut,
+}
+
+/// A file a pass found that is not stored as a document with the stamp it has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnindexedFile {
+    pub path: PathBuf,
+    pub stamp: FileStamp,
+    /// Why its read at this stamp left nothing to index; `None` when it has not
+    /// been read at this stamp.
+    pub skipped: Option<SkippedRead>,
+}
+
 /// What a document's pages without text are stored as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmptyPages {
@@ -420,18 +444,32 @@ pub trait DocumentStore: fmt::Debug + Send + Sync + 'static {
     /// when it is new.
     async fn begin_index_pass(&self, root: &Path) -> Result<IndexPass>;
 
-    /// The files among `files`, in their order, that must be read and indexed: those not
-    /// stored at their path with their stamp and the current chunking. `pass` has seen
-    /// the rest. One transaction covers them all.
-    async fn changed_documents(
+    /// The files among `files`, in their order, not stored as documents at their path
+    /// with their stamp and the current chunking, each with why when it was skipped at
+    /// that stamp. `pass` has seen the rest and the skipped. One transaction covers them all.
+    async fn unindexed_files(
         &self,
         pass: IndexPass,
         files: Vec<(PathBuf, FileStamp)>,
-    ) -> Result<Vec<(PathBuf, FileStamp)>>;
+    ) -> Result<Vec<UnindexedFile>>;
+
+    /// Record that reading the file at `path` with `stamp` left nothing to index and
+    /// why, seen by `pass`, removing the document stored at that path.
+    async fn record_skipped_file(
+        &self,
+        pass: IndexPass,
+        path: PathBuf,
+        stamp: FileStamp,
+        cause: SkippedRead,
+    ) -> Result<()>;
+
+    /// Forget every skipped file, returning how many, so the next pass reads each again.
+    async fn forget_skipped_files(&self) -> Result<u64>;
 
     /// Store `pages`, in file order, as the document at `path`, seen by `pass`, dropping
-    /// what was transcribed of it before. No chunk spans two pages, and one whose text is
-    /// unchanged keeps its vector wherever it sits; returns the new chunks, which have none.
+    /// what was transcribed of it before and any skip recorded for it. No chunk spans two
+    /// pages, and one whose text is unchanged keeps its vector wherever it sits; returns
+    /// the new chunks, which have none.
     async fn index_document(
         &self,
         pass: IndexPass,
@@ -460,11 +498,12 @@ pub trait DocumentStore: fmt::Debug + Send + Sync + 'static {
     async fn retry_failed_transcriptions(&self) -> Result<u64>;
 
     /// Remove every document of `pass`'s root that the pass did not see, returning
-    /// how many.
+    /// how many, and every skipped file it did not see.
     async fn finish_index_pass(&self, pass: IndexPass) -> Result<u64>;
 
     /// Remove the documents at or under any of `paths` that `pass` did not see,
-    /// returning how many; for a pass that walked only those parts of its root.
+    /// returning how many, and the skipped files there it did not see; for a pass
+    /// that walked only those parts of its root.
     async fn finish_index_pass_under(&self, pass: IndexPass, paths: Vec<PathBuf>) -> Result<u64>;
 
     /// Remove the document at `path` with its chunks and vectors; `false` when
@@ -571,12 +610,29 @@ impl DocumentStore for NoSemanticStore {
     async fn begin_index_pass(&self, _root: &Path) -> Result<IndexPass> {
         Ok(IndexPass { root: 0, pass: 0 })
     }
-    async fn changed_documents(
+    async fn unindexed_files(
         &self,
         _pass: IndexPass,
         files: Vec<(PathBuf, FileStamp)>,
-    ) -> Result<Vec<(PathBuf, FileStamp)>> {
-        Ok(files)
+    ) -> Result<Vec<UnindexedFile>> {
+        let unread = |(path, stamp)| UnindexedFile {
+            path,
+            stamp,
+            skipped: None,
+        };
+        Ok(files.into_iter().map(unread).collect())
+    }
+    async fn record_skipped_file(
+        &self,
+        _pass: IndexPass,
+        _path: PathBuf,
+        _stamp: FileStamp,
+        _cause: SkippedRead,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn forget_skipped_files(&self) -> Result<u64> {
+        Ok(0)
     }
     async fn index_document(
         &self,

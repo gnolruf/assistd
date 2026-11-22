@@ -298,6 +298,7 @@ dependencies = [
  "image",
  "num-traits",
  "office_oxide",
+ "parking_lot 0.13.0",
  "pdf_oxide",
  "quick-xml",
  "serde",
