@@ -506,11 +506,11 @@ fn memory_event_cases() -> Vec<(Event, &'static str)> {
         ),
         (
             event(EventBody::ReindexProgress {
-                kind: ReindexKind::Chunks,
-                done: 3,
-                total: 10,
+                message_chunks: 3,
+                document_chunks: 10,
+                memories: 1,
             }),
-            r#"{"id":"r","type":"reindex_progress","kind":"chunks","done":3,"total":10}"#,
+            r#"{"id":"r","type":"reindex_progress","message_chunks":3,"document_chunks":10,"memories":1}"#,
         ),
     ]
 }
@@ -729,9 +729,6 @@ fn wire_spelling_helpers_agree_with_serde() {
         check(v, v.as_str());
     }
     for v in [Role::User, Role::Assistant, Role::Tool] {
-        check(v, v.as_str());
-    }
-    for v in [ReindexKind::Chunks, ReindexKind::Memories] {
         check(v, v.as_str());
     }
 }

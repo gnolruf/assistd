@@ -28,7 +28,7 @@ pub use documents::{
     DocumentActivity, DocumentPass, DocumentPassCounts, DocumentPassEnd, DocumentRootStatus,
     DocumentSkipReason, PageTranscriptionState, PageTranscriptionStatus, SkippedFiles,
 };
-pub use event::{Event, EventBody, EventKind, ReindexKind, Role, TurnStats};
+pub use event::{Event, EventBody, EventKind, Role, TurnStats};
 pub use mcp::{McpServerState, McpTransportKind, TokenRevocation};
 pub use permission::{ConfirmSource, PermissionMode, PlanMode, PlanVerdict};
 pub use presence::{DownloadProgress, PresenceState, PresenceTarget};

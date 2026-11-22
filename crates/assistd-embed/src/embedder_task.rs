@@ -2,16 +2,26 @@
 //! embedding, a batch at a time, each time it is woken: message chunks and memories
 //! at once, document chunks only while a gate is open.
 
-use std::future::{Future, pending};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use assistd_memory::{ChunkSource, EmbeddingQueue, EmbeddingTarget, MemoryError};
+use assistd_memory::{
+    ChunkId, ChunkSource, Embedding, EmbeddingQueue, EmbeddingTarget, MemoryError, MemoryId,
+};
+use assistd_utils::backlog::{Backlog, DrainEnd, Pass, Signals, drain, keep_drained};
 use assistd_utils::backoff::backoff_delay;
 use thiserror::Error;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
-use crate::{BATCH_SIZE, EmbedError, Embedder, embed_rows};
+use crate::{BATCH_SIZE, EmbedError, Embedder};
+
+/// Times a row may fail alone, the server answering other inputs, before it is
+/// marked as refused.
+const FAILURES_BEFORE_REFUSAL: u32 = 3;
+
+/// The text a server is asked to embed to show that it still works.
+const SERVER_CHECK_TEXT: &str = "ping";
 
 /// Why a pass over the missing rows stopped before reaching the end.
 #[derive(Debug, Error)]
@@ -22,105 +32,206 @@ enum PassError {
     Store(#[from] MemoryError),
 }
 
-/// How a pass over the missing rows ended without failing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PassEnd {
-    /// No row is left to embed, or shutdown was signalled.
-    Finished,
-    /// The worker was woken while document chunks were still left or held back.
-    Woken,
+/// The rows one [`EmbeddingBacklog`] lists.
+#[derive(Debug, Clone, Copy)]
+enum RowKind {
+    MessageChunks,
+    Memories,
+    DocumentChunks,
 }
 
-/// What the worker embeds with and into, and the signals it runs on.
-struct EmbedWorker {
-    embedder: Arc<dyn Embedder>,
-    store: Arc<dyn EmbeddingQueue>,
-    wake: Arc<Notify>,
-    documents_gate: watch::Receiver<bool>,
-    shutdown: watch::Receiver<bool>,
-}
-
-impl EmbedWorker {
-    async fn run(mut self) {
-        let mut failed_passes = 0u32;
-        loop {
-            let retry_in = match self.embed_missing_rows().await {
-                Ok(PassEnd::Woken) => {
-                    failed_passes = 0;
-                    continue;
-                }
-                Ok(PassEnd::Finished) => {
-                    failed_passes = 0;
-                    None
-                }
-                Err(err) => {
-                    let delay = backoff_delay(failed_passes);
-                    log_stopped_pass(&err, failed_passes);
-                    failed_passes = failed_passes.saturating_add(1);
-                    Some(delay)
-                }
-            };
-            tokio::select! {
-                biased;
-                _ = self.shutdown.wait_for(|stop| *stop) => break,
-                () = self.wake.notified() => {}
-                () = tokio::time::sleep(retry_in.unwrap_or_default()), if retry_in.is_some() => {}
-            }
+impl RowKind {
+    fn target(self, id: i64) -> EmbeddingTarget {
+        match self {
+            Self::MessageChunks | Self::DocumentChunks => EmbeddingTarget::Chunk(ChunkId(id)),
+            Self::Memories => EmbeddingTarget::Memory(MemoryId(id)),
         }
-        tracing::debug!(target: "assistd::embed", "embed worker exiting");
     }
+}
 
-    /// Embed and store every message chunk, then every memory, then the document
-    /// chunks, missing an embedding.
-    async fn embed_missing_rows(&mut self) -> Result<PassEnd, PassError> {
-        let store = &*self.store;
-        embed_missing_of_kind(
-            &*self.embedder,
-            store,
-            &self.shutdown,
-            |after, limit| store.chunks_missing_embedding(ChunkSource::Message, after, limit),
-            EmbeddingTarget::Chunk,
-        )
-        .await?;
-        embed_missing_of_kind(
-            &*self.embedder,
-            store,
-            &self.shutdown,
-            |after, limit| store.memories_missing_embedding(after, limit),
-            EmbeddingTarget::Memory,
-        )
-        .await?;
-        self.embed_missing_document_chunks().await
-    }
+/// The rows of one kind missing an embedding, keyed by row id.
+#[derive(Debug)]
+struct EmbeddingBacklog<'a> {
+    kind: RowKind,
+    embedder: &'a dyn Embedder,
+    store: &'a dyn EmbeddingQueue,
+    permit: Option<watch::Receiver<bool>>,
+    /// Times each row still missing has failed alone while the server worked.
+    failures: HashMap<i64, u32>,
+}
 
-    /// Page through the document chunks missing an embedding in id order, waiting
-    /// before each page for the gate to be open, until they run out, the worker is
-    /// woken, shutdown flips, or a page has rows left for a later attempt.
-    async fn embed_missing_document_chunks(&mut self) -> Result<PassEnd, PassError> {
-        let mut after = None;
-        loop {
-            tokio::select! {
-                biased;
-                _ = self.shutdown.wait_for(|stop| *stop) => return Ok(PassEnd::Finished),
-                () = self.wake.notified() => return Ok(PassEnd::Woken),
-                () = gate_open(&mut self.documents_gate) => {}
+impl EmbeddingBacklog<'_> {
+    /// What to store for row `id` after `outcome`, or `None` to leave it missing.
+    fn embedding_to_store(
+        &mut self,
+        id: i64,
+        text: String,
+        outcome: InputOutcome,
+    ) -> Option<Embedding> {
+        let target = self.kind.target(id);
+        let vector = match outcome {
+            InputOutcome::Embedded(vector) => Some(vector),
+            InputOutcome::Refused(err) => {
+                log_refused_row(target, &err);
+                None
             }
+            InputOutcome::FailedAlone(err) => {
+                let failures = self.failures.entry(id).or_default();
+                *failures += 1;
+                if *failures < FAILURES_BEFORE_REFUSAL {
+                    tracing::debug!(
+                        target: "assistd::embed",
+                        row = %target,
+                        error = %err,
+                        failures = *failures,
+                        "row failed alone while the server answered; leaving it for a retry"
+                    );
+                    return None;
+                }
+                log_refused_row(target, &err);
+                None
+            }
+            InputOutcome::Unsettled => return None,
+        };
+        self.failures.remove(&id);
+        Some(Embedding {
+            target,
+            text,
+            vector,
+        })
+    }
+}
+
+impl Backlog for EmbeddingBacklog<'_> {
+    type RowId = i64;
+    type Row = String;
+    type Error = PassError;
+
+    fn permit(&mut self) -> Option<&mut watch::Receiver<bool>> {
+        self.permit.as_mut()
+    }
+
+    async fn page_after(&self, after: Option<i64>) -> Result<Vec<(i64, String)>, PassError> {
+        let chunks = async |source| {
             let page = self
                 .store
-                .chunks_missing_embedding(ChunkSource::Document, after, BATCH_SIZE)
+                .chunks_missing_embedding(source, after.map(ChunkId), BATCH_SIZE)
                 .await?;
-            let Some(&(last_id, _)) = page.last() else {
-                return Ok(PassEnd::Finished);
-            };
-            after = Some(last_id);
-            embed_page(&*self.embedder, &*self.store, page, EmbeddingTarget::Chunk).await?;
+            Ok(page.into_iter().map(|(id, text)| (id.0, text)).collect())
+        };
+        match self.kind {
+            RowKind::MessageChunks => chunks(ChunkSource::Message).await,
+            RowKind::DocumentChunks => chunks(ChunkSource::Document).await,
+            RowKind::Memories => {
+                let page = self
+                    .store
+                    .memories_missing_embedding(after.map(MemoryId), BATCH_SIZE)
+                    .await?;
+                Ok(page.into_iter().map(|(id, text)| (id.0, text)).collect())
+            }
         }
+    }
+
+    async fn do_page(&mut self, page: Vec<(i64, String)>) -> Result<usize, PassError> {
+        let texts: Vec<&str> = page.iter().map(|(_, text)| text.as_str()).collect();
+        let (outcomes, server_away) = embed_page(self.embedder, &texts).await;
+        let rows = page.len();
+        let embeddings: Vec<Embedding> = page
+            .into_iter()
+            .zip(outcomes)
+            .filter_map(|((id, text), outcome)| self.embedding_to_store(id, text, outcome))
+            .collect();
+        let rows_left = rows - embeddings.len();
+        self.store.store_embeddings(embeddings).await?;
+        server_away.map_or(Ok(rows_left), |err| Err(err.into()))
+    }
+}
+
+/// Message chunks, memories, then document chunks, each drained in turn.
+struct EmbeddingPass<'a> {
+    backlogs: [EmbeddingBacklog<'a>; 3],
+}
+
+impl Pass for EmbeddingPass<'_> {
+    type Error = PassError;
+
+    async fn run(&mut self, signals: &Signals) -> Result<DrainEnd, PassError> {
+        let mut rows_left = 0usize;
+        for backlog in &mut self.backlogs {
+            match drain(backlog, signals).await? {
+                DrainEnd::Emptied { rows_left: left } => rows_left += left,
+                cut_short => return Ok(cut_short),
+            }
+        }
+        Ok(DrainEnd::Emptied { rows_left })
+    }
+}
+
+/// What became of one input of a page.
+#[derive(Debug)]
+enum InputOutcome {
+    Embedded(Vec<f32>),
+    /// The server refused it for its own content.
+    Refused(EmbedError),
+    /// It failed alone for another reason, and the server then showed that it works.
+    FailedAlone(EmbedError),
+    /// It failed with nothing to show whether the server works.
+    Unsettled,
+}
+
+/// The inputs of a page sent one request each, telling an input that fails alone from
+/// a server that is away.
+struct SingleInputs<'a> {
+    embedder: &'a dyn Embedder,
+    outcomes: Vec<InputOutcome>,
+    /// The last input to fail for a reason other than its content, by its place in
+    /// `outcomes`, while no later request has succeeded.
+    unconfirmed: Option<(usize, EmbedError)>,
+}
+
+impl SingleInputs<'_> {
+    /// Take in the result of sending the next input alone; errors when the server is away.
+    async fn record(&mut self, result: Result<Vec<f32>, EmbedError>) -> Result<(), EmbedError> {
+        let outcome = match result {
+            Ok(vector) => {
+                if let Some((failed, err)) = self.unconfirmed.take() {
+                    self.outcomes[failed] = InputOutcome::FailedAlone(err);
+                }
+                InputOutcome::Embedded(vector)
+            }
+            Err(err) if err.is_input_caused() => InputOutcome::Refused(err),
+            Err(EmbedError::NotReady) => return Err(EmbedError::NotReady),
+            Err(err) => {
+                self.confirm_server_works().await?;
+                self.unconfirmed = Some((self.outcomes.len(), err));
+                InputOutcome::Unsettled
+            }
+        };
+        self.outcomes.push(outcome);
+        Ok(())
+    }
+
+    /// Settle the unconfirmed failure, when there is one, by having the server embed
+    /// [`SERVER_CHECK_TEXT`]; errors with that failure when the server cannot.
+    async fn confirm_server_works(&mut self) -> Result<(), EmbedError> {
+        let Some((failed, err)) = self.unconfirmed.take() else {
+            return Ok(());
+        };
+        if embed_document(self.embedder, SERVER_CHECK_TEXT)
+            .await
+            .is_err()
+        {
+            return Err(err);
+        }
+        self.outcomes[failed] = InputOutcome::FailedAlone(err);
+        Ok(())
     }
 }
 
 /// Spawn the worker. It embeds the rows missing an embedding at once and again after each
-/// `wake`, document chunks last and only while `documents_gate` reads `true`, retrying a failed
-/// pass with backoff. It exits on `shutdown` between batches; `store`'s database must outlive it.
+/// `wake`, document chunks last and only while `documents_gate` reads `true`, retrying with
+/// backoff a pass that stopped early or left rows. It exits on `shutdown` between batches;
+/// `store`'s database must outlive it.
 pub fn spawn_embedder_task(
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn EmbeddingQueue>,
@@ -128,81 +239,99 @@ pub fn spawn_embedder_task(
     documents_gate: watch::Receiver<bool>,
     shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
-    let worker = EmbedWorker {
-        embedder,
-        store,
-        wake,
-        documents_gate,
-        shutdown,
-    };
-    tokio::spawn(worker.run())
+    tokio::spawn(async move {
+        let signals = Signals { wake, shutdown };
+        let backlogs = [
+            (RowKind::MessageChunks, None),
+            (RowKind::Memories, None),
+            (RowKind::DocumentChunks, Some(documents_gate)),
+        ]
+        .map(|(kind, permit)| EmbeddingBacklog {
+            kind,
+            embedder: &*embedder,
+            store: &*store,
+            permit,
+            failures: HashMap::new(),
+        });
+        keep_drained(
+            "embedding",
+            &signals,
+            backoff_delay,
+            EmbeddingPass { backlogs },
+        )
+        .await;
+        tracing::debug!(target: "assistd::embed", "embed worker exiting");
+    })
 }
 
-fn log_stopped_pass(err: &PassError, earlier_failures: u32) {
-    if earlier_failures == 0 {
-        tracing::warn!(
-            target: "assistd::embed",
-            error = %err,
-            "embedding pass stopped early; rows stay unindexed until a retry succeeds"
-        );
-    } else {
-        tracing::debug!(
-            target: "assistd::embed",
-            error = %err,
-            earlier_failures,
-            "embedding pass stopped early again"
-        );
-    }
-}
-
-/// Wait until `gate` reads `true`; never returns once it can no longer do so.
-async fn gate_open(gate: &mut watch::Receiver<bool>) {
-    if gate.wait_for(|open| *open).await.is_err() {
-        pending::<()>().await;
-    }
-}
-
-/// Page through `list` in id order, embedding and storing each page, until it runs
-/// out, `shutdown` flips, or a page has rows left for a later attempt.
-async fn embed_missing_of_kind<Id, L, LFut>(
+/// Embed `texts` in one request, or one input at a time when that fails. Returns an
+/// outcome for each input reached, in order, and why the server is taken to be away
+/// when it is.
+async fn embed_page(
     embedder: &dyn Embedder,
-    store: &dyn EmbeddingQueue,
-    shutdown: &watch::Receiver<bool>,
-    list: L,
-    to_target: fn(Id) -> EmbeddingTarget,
-) -> Result<(), PassError>
-where
-    Id: Copy,
-    L: Fn(Option<Id>, usize) -> LFut,
-    LFut: Future<Output = Result<Vec<(Id, String)>, MemoryError>>,
-{
-    let mut after = None;
-    while !*shutdown.borrow() {
-        let page = list(after, BATCH_SIZE).await?;
-        let Some(&(last_id, _)) = page.last() else {
-            break;
-        };
-        after = Some(last_id);
-        embed_page(embedder, store, page, to_target).await?;
+    texts: &[&str],
+) -> (Vec<InputOutcome>, Option<EmbedError>) {
+    let batch_failure = match embedder.embed_documents(texts).await {
+        Ok(vectors) => {
+            let outcomes = vectors.into_iter().map(InputOutcome::Embedded).collect();
+            return (outcomes, None);
+        }
+        Err(EmbedError::NotReady) => return (Vec::new(), Some(EmbedError::NotReady)),
+        Err(err) => err,
+    };
+    let mut singles = SingleInputs {
+        embedder,
+        outcomes: Vec::with_capacity(texts.len()),
+        unconfirmed: None,
+    };
+    let server_away = match texts {
+        [_] => singles.record(Err(batch_failure)).await,
+        _ => {
+            tracing::debug!(
+                target: "assistd::embed",
+                batch = texts.len(),
+                error = %batch_failure,
+                "batch embed failed; retrying inputs individually"
+            );
+            record_each_alone(&mut singles, texts).await
+        }
+    };
+    let server_away = match server_away {
+        Ok(()) => singles.confirm_server_works().await.err(),
+        Err(err) => Some(err),
+    };
+    (singles.outcomes, server_away)
+}
+
+async fn record_each_alone(
+    singles: &mut SingleInputs<'_>,
+    texts: &[&str],
+) -> Result<(), EmbedError> {
+    for &text in texts {
+        let result = embed_document(singles.embedder, text).await;
+        singles.record(result).await?;
     }
     Ok(())
 }
 
-/// Embed `page` in one batch and store what came back; fails when rows of it are
-/// left for a later attempt.
-async fn embed_page<Id>(
-    embedder: &dyn Embedder,
-    store: &dyn EmbeddingQueue,
-    page: Vec<(Id, String)>,
-    to_target: fn(Id) -> EmbeddingTarget,
-) -> Result<(), PassError> {
-    let rows = page
-        .into_iter()
-        .map(|(id, text)| (to_target(id), text))
-        .collect();
-    let embedded = embed_rows(embedder, rows).await;
-    store.store_embeddings(embedded.embeddings).await?;
-    embedded.deferred.map_or(Ok(()), |err| Err(err.into()))
+async fn embed_document(embedder: &dyn Embedder, text: &str) -> Result<Vec<f32>, EmbedError> {
+    embedder
+        .embed_documents(&[text])
+        .await?
+        .pop()
+        .ok_or(EmbedError::CountMismatch {
+            got: 0,
+            expected: 1,
+        })
+}
+
+fn log_refused_row(target: EmbeddingTarget, err: &EmbedError) {
+    tracing::warn!(
+        target: "assistd::embed",
+        row = %target,
+        error = %err,
+        "row cannot be embedded; marking it so it is not retried"
+    );
 }
 
 #[cfg(test)]
@@ -224,8 +353,9 @@ mod tests {
     use super::*;
 
     /// Embeds every text as `[1.0]` after `batch_time`, except that `"bad"` fails for its
-    /// own content and every call fails with a server error while `down`. Records the
-    /// inputs of every call.
+    /// own content, `"stuck"` fails with a server error, `"crowded"` does so unless sent
+    /// alone, and every call fails with a server error while `down`. Records the inputs
+    /// of every call.
     #[derive(Debug, Default)]
     struct ScriptedEmbedder {
         down: AtomicBool,
@@ -254,6 +384,8 @@ mod tests {
                 Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
             } else if texts.contains(&"bad") {
                 Some(reqwest::StatusCode::BAD_REQUEST)
+            } else if texts.contains(&"stuck") || (texts.len() > 1 && texts.contains(&"crowded")) {
+                Some(reqwest::StatusCode::INTERNAL_SERVER_ERROR)
             } else {
                 None
             };
@@ -485,11 +617,20 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn worker_retries_rows_left_by_a_server_failure_without_being_woken() {
+    async fn worker_marks_no_row_while_the_server_answers_nothing_and_embeds_them_once_it_does() {
         let harness = Harness::spawn(&["a", "b"], true);
 
-        assert_eq!(harness.stored_after(Duration::from_millis(10)).await, []);
+        assert_eq!(harness.stored_after(Duration::from_secs(600)).await, []);
         assert_eq!(harness.missing_chunks(), 2);
+        assert!(
+            harness
+                .embedder
+                .calls
+                .lock()
+                .unwrap()
+                .contains(&vec![SERVER_CHECK_TEXT.to_owned()]),
+            "the server was never asked for the fixed text"
+        );
 
         harness.embedder.down.store(false, Ordering::SeqCst);
         assert_eq!(
@@ -511,6 +652,58 @@ mod tests {
             harness.shut_down().await,
             [vec!["a", "bad", "c"], vec!["a"], vec!["bad"], vec!["c"]]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn worker_stores_a_whole_batch_that_fails_together_when_its_inputs_succeed_alone() {
+        let harness = Harness::spawn(&["a", "crowded", "c"], false);
+
+        assert_eq!(
+            harness.stored_after(Duration::from_millis(10)).await,
+            [
+                (0, Some(vec![1.0])),
+                (1, Some(vec![1.0])),
+                (2, Some(vec![1.0]))
+            ]
+        );
+        assert_eq!(
+            harness.shut_down().await,
+            [
+                vec!["a", "crowded", "c"],
+                vec!["a"],
+                vec!["crowded"],
+                vec!["c"]
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn worker_marks_a_row_that_fails_alone_three_times_beside_rows_that_embed() {
+        let mut texts = vec!["a", "stuck"];
+        texts.resize(BATCH_SIZE + 1, "later");
+        let harness = Harness::spawn(&texts, false);
+
+        let stored = harness.stored_after(Duration::from_millis(10)).await;
+        assert_eq!(
+            stored.len(),
+            BATCH_SIZE,
+            "a row behind the failing one waited"
+        );
+        assert!(
+            stored
+                .iter()
+                .all(|(id, vector)| *id != 1 && vector.is_some())
+        );
+
+        let stored = harness.stored_after(Duration::from_secs(600)).await;
+        assert_eq!(stored.last(), Some(&(1, None)));
+        assert_eq!(stored.len(), BATCH_SIZE + 1);
+        let calls = harness.shut_down().await;
+        let attempts = calls
+            .iter()
+            .filter(|texts| texts.iter().any(|text| text == "stuck"))
+            .count();
+        assert_eq!(attempts, 1 + FAILURES_BEFORE_REFUSAL as usize);
     }
 
     #[tokio::test(start_paused = true)]
