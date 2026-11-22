@@ -12,12 +12,13 @@ use tokio_util::sync::CancellationToken;
 use assistd_config::{Config, TaskInterruption};
 use assistd_ipc::{Event, EventBody, TaskQueueSnapshot};
 
-use self::activity::{Activity, ActivityWatch};
+use self::activity::{Activity, ActivityWatch, Work};
 use self::interaction::{InteractionTurn, UserInteraction};
 use self::lanes::ModelLanes;
 use self::queue::{TaskQueue, TurnStart};
 use crate::bus::EventSink;
 use crate::presence::SettledPresence;
+use crate::recovery::spawn_supervised;
 
 pub(crate) mod activity;
 pub(crate) mod interaction;
@@ -126,6 +127,20 @@ impl TurnAdmission {
         self.activity.clone()
     }
 
+    /// Watch whether `work` may run now. A supervised task keeps the answer current
+    /// until every receiver is dropped.
+    pub(crate) fn permit(&self, work: Work) -> watch::Receiver<bool> {
+        let mut activity = self.watch_activity();
+        let permitted_now = activity.current().permits(work, &self.config);
+        let (permit, permitted) = watch::channel(permitted_now);
+        spawn_supervised(
+            "work_permit",
+            work.component(),
+            keep_permit(Arc::clone(&self.config), activity, work, permit),
+        );
+        permitted
+    }
+
     /// The task queue and the model lanes as they stand.
     pub(crate) fn queue_snapshot(&self) -> TaskQueueSnapshot {
         self.task_queue.snapshot(&self.activity())
@@ -224,5 +239,26 @@ impl TurnAdmission {
             .await;
         let TurnStart { lane, turn } = started.await.ok()?;
         Some(self.main_lane_turn(lane, turn).await)
+    }
+}
+
+/// Keep `permit` at whether `activity` permits `work`, until its last receiver is dropped.
+async fn keep_permit(
+    config: Arc<Config>,
+    mut activity: ActivityWatch,
+    work: Work,
+    permit: watch::Sender<bool>,
+) {
+    loop {
+        tokio::select! {
+            () = permit.closed() => return,
+            () = activity.changed() => {}
+        }
+        let permitted = activity.current().permits(work, &config);
+        permit.send_if_modified(|current| {
+            let changed = *current != permitted;
+            *current = permitted;
+            changed
+        });
     }
 }

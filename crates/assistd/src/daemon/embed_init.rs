@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_config::{Config, NonBlankString};
-use assistd_core::AppState;
+use assistd_core::{AppState, Work};
 use assistd_embed::{
     EmbedServerSpec, Embedder, EmbedderHandle, LlamaEmbedder, TaskPrefixes, spawn_embedder_task,
 };
@@ -54,14 +54,7 @@ pub(super) type EmbeddingService = BackgroundService<Option<RunningEmbedding>>;
 /// rows missing an embedding.
 pub(super) struct RunningEmbedding {
     server: ChildServer,
-    worker: Option<EmbedWorker>,
-}
-
-/// The worker, and the task keeping the gate on its document chunks; that task
-/// ends when the worker does.
-struct EmbedWorker {
-    worker: JoinHandle<()>,
-    documents_gate: JoinHandle<()>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl EmbeddingStartup {
@@ -113,11 +106,7 @@ pub(super) async fn shutdown(
     }
 }
 
-async fn join_worker_within_budget(embed_worker: EmbedWorker, deadline: Instant) {
-    let EmbedWorker {
-        mut worker,
-        documents_gate,
-    } = embed_worker;
+async fn join_worker_within_budget(mut worker: JoinHandle<()>, deadline: Instant) {
     let drain_until = deadline.min(Instant::now() + EMBED_DRAIN_BUDGET);
     if tokio::time::timeout_at(drain_until, &mut worker)
         .await
@@ -130,7 +119,6 @@ async fn join_worker_within_budget(embed_worker: EmbedWorker, deadline: Instant)
         worker.abort();
         let _ = worker.await;
     }
-    let _ = documents_gate.await;
 }
 
 /// The handles requests use from startup and, when embedding is enabled,
@@ -219,7 +207,7 @@ async fn adopt_space_then_serve(
     embedder: Arc<dyn Embedder>,
     startup: &EmbeddingStartup,
     worker_shutdown: watch::Receiver<bool>,
-) -> Option<EmbedWorker> {
+) -> Option<JoinHandle<()>> {
     let space = EmbeddingSpace {
         model: embedder.model().to_owned(),
         dim: embedder.dim(),
@@ -241,20 +229,16 @@ fn serve_embedder(
     state: &AppState,
     embedder: Arc<dyn Embedder>,
     worker_shutdown: watch::Receiver<bool>,
-) -> EmbedWorker {
-    let (documents_gate_open, documents_gate) = state.status.document_embed_gate();
+) -> JoinHandle<()> {
     let worker = spawn_embedder_task(
         embedder.clone(),
         state.memory.embedding_queue.clone(),
-        documents_gate_open,
+        state.permit(Work::DocumentEmbedding),
         worker_shutdown,
     );
     state.memory.embedder.set(Readiness::Ready(embedder));
     state.subsystems.document_index.request_pass();
-    EmbedWorker {
-        worker,
-        documents_gate,
-    }
+    worker
 }
 
 /// Why the embedder did not come up, with the server when it started

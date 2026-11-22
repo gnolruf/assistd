@@ -843,15 +843,22 @@ The worker is three backlogs on `assistd-utils`'s `backlog` loop, drained
 in one pass: message chunks, memories, then document chunks. The first
 two are few and feed recall, so every pass embeds them first and at once. Document chunks
 can number in the hundreds of thousands and the embedding server takes
-every CPU thread it is given, so each batch of them waits for a gate that
-`assistd-core` publishes: open unless the user's interaction is open (the
-quiet time after a reply included), a task run holds a model lane, or the
-daemon sleeps for another process's VRAM. `documents.embed_during_interaction`,
-`embed_during_tasks` and `embed_during_gpu_sleep` each let document chunks
-through one of those states. The gate is read between batches, so a turn
-waits for at most the batch in flight, and a wake in the middle of the
-document backlog sends the worker back to the messages first. Drowsy and
-Sleeping leave the gate open; the embedding server stays up in both.
+every CPU thread it is given, so each batch of them waits for a permit that
+admission publishes (`TurnAdmission::permit(Work::DocumentEmbedding)`): held
+unless the user's interaction is open (the quiet time after a reply
+included), a task run holds a model lane, or the daemon sleeps for another
+process's VRAM. `documents.embed_during_interaction`, `embed_during_tasks`
+and `embed_during_gpu_sleep` each let document chunks through one of those
+states. The permit is read between batches, so a turn waits for at most the
+batch in flight, and a wake in the middle of the document backlog sends the
+worker back to the messages first. Drowsy and Sleeping leave the permit
+held; the embedding server stays up in both.
+
+Every class of background work that waits for the machine is a `Work`, and
+`Activity::permits` is the one function that says whether a class may run,
+from the same snapshot the task queue is scheduled from. `permit` returns a
+`watch::Receiver<bool>` that a supervised task keeps current until its
+receivers are dropped, so a crate below `assistd-core` can wait on it.
 
 The semantic store exists from daemon start, but the
 embedder sits behind an `EmbedderHandle` that is `Starting` until the
@@ -1037,7 +1044,9 @@ transcription never takes VRAM or time from a turn. With
 `sleep.idle_to_drowsy_mins = 0` the daemon never drowses on its own, so
 nothing is transcribed unless it is made drowsy by hand.
 
-Each time presence reaches `Drowsy` with a page waiting, and again when a pass
+Transcription waits on its permit (`Work::PageTranscription`), held while
+presence has settled in `Drowsy`. Each time it is granted with a page waiting,
+and again when a pass
 stores a PDF meanwhile, a run borrows the server for the OCR model and takes
 the waiting pages in document and page order. The extraction worker renders
 the page; a blank one is recorded as read with no text and never sent, since
@@ -1500,10 +1509,10 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
    transaction commits the store wakes the embedding worker for new
    chunks, and page transcription for a waiting page.
 
-5. **Embed gate** ([`crates/assistd-core/src/documents/embed_gate.rs`](../crates/assistd-core/src/documents/embed_gate.rs)).
+5. **Embed permit** ([`crates/assistd-core/src/admission/activity.rs`](../crates/assistd-core/src/admission/activity.rs)).
    The embedding worker embeds pending message chunks and memories
    first, then document chunks a batch at a time, each batch waiting on
-   the gate `assistd-core` publishes. The gate is shut while the
+   the permit admission publishes. The permit is withheld while the
    user's interaction is open, a task run holds a model lane, or the
    daemon sleeps for another process's VRAM, unless `[documents]` lets
    embedding through that state. Each vector is quantised into
