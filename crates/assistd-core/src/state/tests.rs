@@ -1036,10 +1036,11 @@ async fn interrupt_drops_a_turn_still_waiting_to_start() {
         .turns
         .deps
         .admission
-        .agent_turn_lock
-        .clone()
-        .lock_owned()
-        .await;
+        .task_queue
+        .queue_refine()
+        .granted()
+        .await
+        .expect("the main lane was free");
     let query_state = state.clone();
     let queued = tokio::spawn(async move { dispatch(&query_state, query("q", "abandoned")).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1051,7 +1052,8 @@ async fn interrupt_drops_a_turn_still_waiting_to_start() {
         .expect("InterruptTurn left the queued turn waiting")
         .unwrap();
     res.unwrap();
-    assert_eq!(events, [done("q")]);
+    let queued = Event::new("q", EventBody::Queued { behind: 1 });
+    assert_eq!(events, [queued, done("q")]);
 
     drop(earlier_turn);
     let (res, events) = dispatch(&state, query("q2", "kept")).await;
@@ -1119,10 +1121,11 @@ async fn a_turn_waiting_to_start_does_not_hold_the_daemon_awake() {
         .turns
         .deps
         .admission
-        .agent_turn_lock
-        .clone()
-        .lock_owned()
-        .await;
+        .task_queue
+        .queue_refine()
+        .granted()
+        .await
+        .expect("the main lane was free");
     let query_state = state.clone();
     let queued = tokio::spawn(async move { dispatch(&query_state, query("q", "waiting")).await });
     tokio::time::sleep(Duration::from_millis(100)).await;

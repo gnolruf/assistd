@@ -161,10 +161,11 @@ async fn branch_operations_do_not_wait_for_the_model_lane() {
         .turns
         .deps
         .admission
-        .agent_turn_lock
-        .clone()
-        .lock_owned()
-        .await;
+        .task_queue
+        .queue_refine()
+        .granted()
+        .await
+        .expect("the main lane was free");
     for request in [
         Request::new("undo", RequestBody::Undo),
         Request::new("new", RequestBody::NewSession),

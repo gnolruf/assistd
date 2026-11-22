@@ -89,8 +89,8 @@ impl TaskService {
         Ok(())
     }
 
-    /// Refine the asked prompt, or revise its last rewrite, on the main lane, as a user
-    /// turn takes it. The planning turn's events go unread.
+    /// Refine the asked prompt, or revise its last rewrite, on the main lane, queued for
+    /// it beside user turns. The planning turn's events go unread.
     async fn refine_prompt(
         &self,
         id: &str,
@@ -101,10 +101,14 @@ impl TaskService {
         if ask.mode == PermissionMode::Auto && !self.deps.config.tools.allow_auto_mode {
             return Err(TaskError::AutoModeOff);
         }
+        let granted = self.deps.admission.task_queue.queue_refine().granted();
         let lane = tokio::select! {
             biased;
-            () = cancel.cancelled() => return Err(PlanError::Cancelled.into()),
-            lane = Arc::clone(&self.deps.admission.agent_turn_lock).lock_owned() => lane,
+            () = cancel.cancelled() => None,
+            lane = granted => lane,
+        };
+        let Some(lane) = lane else {
+            return Err(PlanError::Cancelled.into());
         };
         let Some(_awake) = self.wake_for_task_run(Some((id, tx)), cancel).await? else {
             return Err(PlanError::Cancelled.into());

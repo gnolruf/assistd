@@ -379,14 +379,17 @@ A saved task runs through the same loop with no user present.
 `TaskRequest::Run` records a queued run and appends it to the `TaskQueue`,
 returning at once. The queue is FIFO, its order kept in `task_runs.queue_pos`;
 at startup runs still queued are reloaded in that order, while any left
-running are recorded as failed, since their side effects may have happened. A
-dispatcher on the `TaskRunner` starts the head run whenever `ModelLanes` has a
-lane for it. There is one lane per slot the server reports as `total_slots` in
-`/props`, probed with vision support and re-probed after a reload. Lane 0 is
-the main backend's and is the agent turn lock itself, so with one slot a
+running are recorded as failed, since their side effects may have happened.
+There is one lane per slot the server reports as `total_slots` in
+`/props`, probed with vision support and re-probed after a reload. The queue
+records what holds each lane, and a `LaneLease` is the only way to hold one:
+a user turn, a task prompt's refine, a session title and a task run each wait
+in the queue as an entry, and one function says which entries may take a lane,
+applied after every change. Lane 0 is the main backend's, so with one slot a
 run waits out the user's turn and holds the next one off. With more slots, runs
 take lanes 1..N, each pinned to its slot with `id_slot`, and the main
-backend stays on slot 0. While the daemon sleeps for the GPU, until any wake, waiting runs are `Suspended(GpuBusy)` instead of waking the
+backend stays on slot 0. A dispatcher on the `TaskRunner` starts each run granted
+its first lane. While the daemon sleeps for the GPU, until any wake, waiting runs are `Suspended(GpuBusy)` instead of waking the
 model. `TaskRequest::Queue` moves, cancels, pauses and resumes the queue (the pause is
 kept in the `task_queue` table, so it outlasts a restart), and
 `EventBody::TaskQueue` broadcasts the items, lane holders and pause flag after each

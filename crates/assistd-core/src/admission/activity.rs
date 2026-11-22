@@ -1,7 +1,7 @@
 //! `Activity`: who is using the model at one moment, and the scheduling rules read
 //! off it. `ActivityWatch` assembles it and resolves when any part of it changes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
 use tokio::sync::watch;
@@ -11,7 +11,8 @@ use assistd_config::{Config, TaskInterruption};
 use assistd_ipc::{Component, InteractionHold, LaneHolder, SuspendReason, TaskRunId};
 
 use super::interaction::InteractionState;
-use super::lanes::{MAIN_LANE, changed_or_pending};
+use super::lanes::{LaneUse, MAIN_LANE, changed_or_pending};
+use super::queue::QueueState;
 use crate::presence::SettledPresence;
 
 /// A class of background work that waits until the machine is free for it.
@@ -32,17 +33,31 @@ impl Work {
     }
 }
 
-/// Who is using the model: the user's interaction, the task run on each lane that one
-/// holds, the number of lanes, and presence's settled state.
+/// Who is using the model: the user's interaction, what holds each lane that is held,
+/// the number of lanes, and presence's settled state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Activity {
     interaction: InteractionState,
-    runs: BTreeMap<u32, TaskRunId>,
+    holders: BTreeMap<u32, LaneUse>,
     lanes: NonZeroU32,
     presence: SettledPresence,
 }
 
 impl Activity {
+    pub(super) fn new(
+        interaction: InteractionState,
+        holders: BTreeMap<u32, LaneUse>,
+        lanes: NonZeroU32,
+        presence: SettledPresence,
+    ) -> Self {
+        Self {
+            interaction,
+            holders,
+            lanes,
+            presence,
+        }
+    }
+
     /// Whether `work` may run now. Document embedding may outside the user's interaction,
     /// a task run and a sleep for the GPU, and during each one `[documents]` embeds
     /// during; page transcription may while presence has settled in `Drowsy`.
@@ -74,7 +89,7 @@ impl Activity {
     pub(crate) fn run_must_yield(&self, run: TaskRunId, interruption: TaskInterruption) -> bool {
         interruption == TaskInterruption::Interrupt
             && self.interaction_holds_queue()
-            && self.runs.get(&MAIN_LANE) == Some(&run)
+            && self.holders.get(&MAIN_LANE) == Some(&LaneUse::Run(run))
     }
 
     /// The hold the queue snapshot shows: the user's interaction on the only lane,
@@ -117,7 +132,9 @@ impl Activity {
 
     /// Whether a task run holds any lane.
     pub(crate) fn task_running(&self) -> bool {
-        !self.runs.is_empty()
+        self.holders
+            .values()
+            .any(|holder| matches!(holder, LaneUse::Run(_)))
     }
 
     pub(crate) fn asleep_for_gpu(&self) -> bool {
@@ -131,16 +148,33 @@ impl Activity {
 
     /// Whether a task run holds the main lane.
     pub(super) fn main_held_by_run(&self) -> bool {
-        self.runs.contains_key(&MAIN_LANE)
+        matches!(self.holders.get(&MAIN_LANE), Some(LaneUse::Run(_)))
     }
 
-    /// What holds each lane.
+    pub(super) fn main_lane_free(&self) -> bool {
+        !self.holders.contains_key(&MAIN_LANE)
+    }
+
+    /// The lanes nothing holds.
+    pub(super) fn free_lanes(&self) -> BTreeSet<u32> {
+        (0..self.lanes.get())
+            .filter(|lane| !self.holders.contains_key(lane))
+            .collect()
+    }
+
+    /// Whether presence has settled in `Active`.
+    pub(super) fn settled_active(&self) -> bool {
+        self.presence == SettledPresence::Active
+    }
+
+    /// Each lane's holder as the wire shows it: a task run, else the main backend on
+    /// its own lane.
     pub(super) fn lane_holders(&self) -> Vec<LaneHolder> {
         (0..self.lanes.get())
-            .map(|lane| match self.runs.get(&lane) {
-                Some(&run) => LaneHolder::Task { run },
-                None if lane == MAIN_LANE => LaneHolder::Main,
-                None => LaneHolder::Idle,
+            .map(|lane| match self.holders.get(&lane) {
+                Some(&LaneUse::Run(run)) => LaneHolder::Task { run },
+                _ if lane == MAIN_LANE => LaneHolder::Main,
+                _ => LaneHolder::Idle,
             })
             .collect()
     }
@@ -150,7 +184,7 @@ impl Activity {
 #[derive(Debug, Clone)]
 pub(crate) struct ActivityWatch {
     interaction: watch::Receiver<InteractionState>,
-    runs: watch::Receiver<BTreeMap<u32, TaskRunId>>,
+    queue: watch::Receiver<QueueState>,
     lanes: watch::Receiver<NonZeroU32>,
     presence: watch::Receiver<SettledPresence>,
 }
@@ -158,13 +192,13 @@ pub(crate) struct ActivityWatch {
 impl ActivityWatch {
     pub(super) fn new(
         interaction: watch::Receiver<InteractionState>,
-        runs: watch::Receiver<BTreeMap<u32, TaskRunId>>,
+        queue: watch::Receiver<QueueState>,
         lanes: watch::Receiver<NonZeroU32>,
         presence: watch::Receiver<SettledPresence>,
     ) -> Self {
         Self {
             interaction,
-            runs,
+            queue,
             lanes,
             presence,
         }
@@ -174,7 +208,7 @@ impl ActivityWatch {
     pub(crate) fn current(&mut self) -> Activity {
         Activity {
             interaction: *self.interaction.borrow_and_update(),
-            runs: self.runs.borrow_and_update().clone(),
+            holders: self.queue.borrow_and_update().lane_holders().clone(),
             lanes: *self.lanes.borrow_and_update(),
             presence: *self.presence.borrow_and_update(),
         }
@@ -184,7 +218,7 @@ impl ActivityWatch {
     pub(crate) async fn changed(&mut self) {
         tokio::select! {
             () = changed_or_pending(&mut self.interaction) => {}
-            () = changed_or_pending(&mut self.runs) => {}
+            () = changed_or_pending(&mut self.queue) => {}
             () = changed_or_pending(&mut self.lanes) => {}
             () = changed_or_pending(&mut self.presence) => {}
         }
@@ -222,7 +256,10 @@ mod tests {
     ) -> Activity {
         Activity {
             interaction,
-            runs: runs.iter().copied().collect(),
+            holders: runs
+                .iter()
+                .map(|&(lane, run)| (lane, LaneUse::Run(run)))
+                .collect(),
             lanes: NonZeroU32::new(lanes).unwrap(),
             presence,
         }

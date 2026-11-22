@@ -185,7 +185,7 @@ impl BranchService {
     /// only while `Active`. `None` when asleep, or the call fails or yields
     /// no usable text.
     async fn generate_title(&self, user_text: &str) -> Option<String> {
-        let _agent_guard = self.admission.agent_turn_lock.clone().lock_owned().await;
+        let _lane = self.admission.task_queue.queue_title().granted().await?;
         let Some(_request_guard) = self.presence.request_guard_if_active().await else {
             debug!(
                 target: "assistd::completion",
