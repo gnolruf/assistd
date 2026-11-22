@@ -139,7 +139,7 @@ pub async fn keep_drained<P: Pass>(
 }
 
 /// Wait until `permit` reads `true`; never returns once it can no longer do so.
-async fn permitted(permit: Option<&mut watch::Receiver<bool>>) {
+pub async fn permitted(permit: Option<&mut watch::Receiver<bool>>) {
     if let Some(permit) = permit
         && permit.wait_for(|open| *open).await.is_err()
     {

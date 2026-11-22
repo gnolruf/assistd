@@ -1044,11 +1044,12 @@ transcription never takes VRAM or time from a turn. With
 `sleep.idle_to_drowsy_mins = 0` the daemon never drowses on its own, so
 nothing is transcribed unless it is made drowsy by hand.
 
-Transcription waits on its permit (`Work::PageTranscription`), held while
-presence has settled in `Drowsy`. Each time it is granted with a page waiting,
-and again when a pass
-stores a PDF meanwhile, a run borrows the server for the OCR model and takes
-the waiting pages in document and page order. The extraction worker renders
+The waiting pages are a backlog on `assistd-utils`'s `backlog` loop, woken by
+the write that leaves a page waiting. A run waits on its permit
+(`Work::PageTranscription`), held while presence has settled in `Drowsy`,
+then, with a page waiting, borrows the server for the OCR model and drains the
+backlog inside the loan, in document and page order. A PDF stored meanwhile
+joins the same run. The extraction worker renders
 the page; a blank one is recorded as read with no text and never sent, since
 the recommended model answers a blank image with a sentence about it. The
 image goes to the model in one request (`PageTranscriber`): the image, then
@@ -1074,7 +1075,7 @@ the model is gone, the model refuses three requests in a row (as one without
 a vision projector refuses every page), the worker is unavailable, the store
 fails, or the loan is refused (no room on the GPU, a download or load that
 fails); the status keeps the reason, and the next run starts after five
-minutes or when the daemon next drowses.
+minutes, or sooner when a page is left waiting, once the permit holds.
 
 The daemon broadcasts a `DocumentActivity` whenever the root being walked or
 the number of document chunks left to embed changes. It counts those chunks
