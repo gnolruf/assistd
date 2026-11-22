@@ -12,7 +12,7 @@ use assistd_mcp::{
 };
 use axum::Router;
 use axum::extract::Request;
-use axum::http::{StatusCode, header};
+use axum::http::{Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -141,6 +141,30 @@ async fn lists_and_calls_tools_and_survives_an_oversized_reply() {
         );
         server.shutdown().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_asks_the_server_to_delete_the_session() {
+    let deletes = Arc::new(AtomicUsize::new(0));
+    let deletes_seen = deletes.clone();
+    let config = StreamableHttpServerConfig::default().with_legacy_session_mode(true);
+    let service: StreamableHttpService<EchoServer, LocalSessionManager> =
+        StreamableHttpService::new(|| Ok(EchoServer), Arc::default(), config);
+    let router = Router::new()
+        .nest_service("/mcp", service)
+        .layer(middleware::from_fn(move |request: Request, next: Next| {
+            if request.method() == Method::DELETE {
+                deletes_seen.fetch_add(1, Ordering::SeqCst);
+            }
+            next.run(request)
+        }));
+    let (url, _server) = serve(router).await;
+    let server = start(url).await.expect("server starts");
+    assert_eq!(echo(&server, "hi").await.as_deref(), Some("hi"));
+
+    server.shutdown().await;
+
+    assert_eq!(deletes.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
