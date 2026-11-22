@@ -36,7 +36,7 @@ pub use errors::{
     AbsoluteDirError, BlankStringError, ConfigError, ConfigIssue, CustomArgsError,
     DecimalRangeError, EmbeddingModelError, EmptyListError, HfFileError, IntegerRangeError,
     McpServerNameError, NoDefaultDirError, SearchCommandError, SttEncoderError, ThemeColorError,
-    ThemeNameError, UnitIntervalError, WakePhraseError, WritablePathError,
+    ThemeNameError, WakePhraseError, WritablePathError,
 };
 pub use mcp::{
     McpAuth, McpConfig, McpHeaders, McpHttpTransport, McpOAuthClient, McpServerConfig,

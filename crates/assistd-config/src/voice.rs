@@ -1,6 +1,5 @@
 //! Voice input, wake word and speech output configuration.
 
-use std::fmt;
 use std::num::NonZeroU32;
 use std::str::FromStr;
 
@@ -8,9 +7,9 @@ use assistd_utils::hf::HfFileId;
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{bounded, nz32, unit};
-use crate::errors::{SttEncoderError, UnitIntervalError, WakePhraseError};
+use crate::errors::{SttEncoderError, WakePhraseError};
 use crate::settings::{DescribeSettings, choice_setting, describe_fields};
-use crate::values::{AbsoluteDir, Bounded, HfFile, LengthScale};
+use crate::values::{AbsoluteDir, Bounded, HfFile, LengthScale, decimal_range, string_setting};
 
 const STT_ENCODER_PREFIX: &str = "encoder";
 const MAX_WAKE_PHRASE_WORDS: usize = 6;
@@ -221,38 +220,9 @@ impl Default for WakeWordConfig {
     }
 }
 
-/// An `f32` in `0.0..=1.0`; never NaN.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(try_from = "f32", into = "f32")]
-pub struct UnitInterval(f32);
-
-impl UnitInterval {
-    /// Returns `None` when `value` is outside `0.0..=1.0` or NaN.
-    pub const fn new(value: f32) -> Option<Self> {
-        if value >= 0.0 && value <= 1.0 {
-            Some(Self(value))
-        } else {
-            None
-        }
-    }
-
-    pub const fn get(self) -> f32 {
-        self.0
-    }
-}
-
-impl TryFrom<f32> for UnitInterval {
-    type Error = UnitIntervalError;
-
-    fn try_from(value: f32) -> Result<Self, Self::Error> {
-        Self::new(value).ok_or(UnitIntervalError(value))
-    }
-}
-
-impl From<UnitInterval> for f32 {
-    fn from(value: UnitInterval) -> Self {
-        value.0
-    }
+decimal_range! {
+    /// An `f32` in `0.0..=1.0`; never NaN.
+    UnitInterval, |value| value >= 0.0 && value <= 1.0, "in the range 0.0..=1.0"
 }
 
 /// A speech-to-text model's encoder: a Hugging Face `.onnx` file whose name
@@ -275,12 +245,6 @@ impl SttEncoder {
     }
 }
 
-impl fmt::Display for SttEncoder {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
 impl FromStr for SttEncoder {
     type Err = SttEncoderError;
 
@@ -294,19 +258,7 @@ impl FromStr for SttEncoder {
     }
 }
 
-impl TryFrom<String> for SttEncoder {
-    type Error = SttEncoderError;
-
-    fn try_from(id: String) -> Result<Self, Self::Error> {
-        id.parse()
-    }
-}
-
-impl From<SttEncoder> for String {
-    fn from(encoder: SttEncoder) -> Self {
-        encoder.0.to_string()
-    }
-}
+string_setting!(SttEncoder, |encoder| encoder.to_string(), display);
 
 /// A wake phrase: one to six words of letters and apostrophes, held with a
 /// single space between words whatever whitespace it was written with.
@@ -320,24 +272,10 @@ impl WakePhrase {
     }
 }
 
-impl fmt::Display for WakePhrase {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
 impl FromStr for WakePhrase {
     type Err = WakePhraseError;
 
     fn from_str(phrase: &str) -> Result<Self, Self::Err> {
-        Self::try_from(phrase.to_owned())
-    }
-}
-
-impl TryFrom<String> for WakePhrase {
-    type Error = WakePhraseError;
-
-    fn try_from(phrase: String) -> Result<Self, Self::Error> {
         let words: Vec<&str> = phrase.split_whitespace().collect();
         let letters_only = words
             .iter()
@@ -345,16 +283,12 @@ impl TryFrom<String> for WakePhrase {
         if (1..=MAX_WAKE_PHRASE_WORDS).contains(&words.len()) && letters_only {
             Ok(Self(words.join(" ")))
         } else {
-            Err(WakePhraseError(phrase))
+            Err(WakePhraseError(phrase.to_owned()))
         }
     }
 }
 
-impl From<WakePhrase> for String {
-    fn from(phrase: WakePhrase) -> Self {
-        phrase.0
-    }
-}
+string_setting!(WakePhrase, |phrase| phrase.0, display);
 
 /// The sherpa-onnx model family a voice belongs to, which fixes the files
 /// fetched beside its `.onnx` and how text becomes phonemes.

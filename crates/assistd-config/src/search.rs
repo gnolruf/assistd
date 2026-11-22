@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::defaults::{nz16, nz64};
 use crate::errors::SearchCommandError;
 use crate::settings::{DescribeSettings, describe_fields};
-use crate::values::{NonBlankString, NonEmpty};
+use crate::values::{NonBlankString, NonEmpty, string_setting};
 
 /// A daemon-supervised SearXNG instance.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -152,19 +152,7 @@ impl FromStr for SearchCommand {
     }
 }
 
-impl TryFrom<String> for SearchCommand {
-    type Error = SearchCommandError;
-
-    fn try_from(source: String) -> Result<Self, Self::Error> {
-        source.parse()
-    }
-}
-
-impl From<SearchCommand> for String {
-    fn from(command: SearchCommand) -> Self {
-        command.source
-    }
-}
+string_setting!(SearchCommand, |command| command.source);
 
 fn default_engine(name: &str) -> SearchEngine {
     SearchEngine::Named(

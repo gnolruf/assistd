@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{ThemeColorError, ThemeNameError};
 use crate::settings::{DescribeSettings, describe_fields};
+use crate::values::string_setting;
 
 /// Every name a [`ThemeColor`] can be written as, besides `#rrggbb`.
 const NAMED_COLORS: [(&str, ThemeColor); 18] = [
@@ -88,14 +89,6 @@ impl FromStr for ThemeColor {
     }
 }
 
-impl TryFrom<String> for ThemeColor {
-    type Error = ThemeColorError;
-
-    fn try_from(text: String) -> Result<Self, Self::Error> {
-        text.parse()
-    }
-}
-
 impl fmt::Display for ThemeColor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = NAMED_COLORS.iter().find(|(_, color)| color == self);
@@ -109,11 +102,7 @@ impl fmt::Display for ThemeColor {
     }
 }
 
-impl From<ThemeColor> for String {
-    fn from(color: ThemeColor) -> Self {
-        color.to_string()
-    }
-}
+string_setting!(ThemeColor, |color| color.to_string());
 
 /// The color of each thing the chat TUI draws. Every value is a
 /// [`ThemeColor`]; `default` leaves the terminal's own color. Bold text keeps
@@ -216,12 +205,6 @@ impl ThemeName {
     }
 }
 
-impl fmt::Display for ThemeName {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
 impl Borrow<str> for ThemeName {
     fn borrow(&self) -> &str {
         &self.0
@@ -232,33 +215,21 @@ impl FromStr for ThemeName {
     type Err = ThemeNameError;
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
-        Self::try_from(name.to_owned())
-    }
-}
-
-impl TryFrom<String> for ThemeName {
-    type Error = ThemeNameError;
-
-    fn try_from(name: String) -> Result<Self, Self::Error> {
         let well_formed = !name.is_empty()
             && name
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
         if !well_formed {
             Err(ThemeNameError::Malformed)
-        } else if ThemeConfig::built_in(&name).is_some() {
-            Err(ThemeNameError::BuiltIn(name))
+        } else if ThemeConfig::built_in(name).is_some() {
+            Err(ThemeNameError::BuiltIn(name.to_owned()))
         } else {
-            Ok(Self(name))
+            Ok(Self(name.to_owned()))
         }
     }
 }
 
-impl From<ThemeName> for String {
-    fn from(name: ThemeName) -> Self {
-        name.0
-    }
-}
+string_setting!(ThemeName, |name| name.0, display);
 
 const fn rgb(red: u8, green: u8, blue: u8) -> ThemeColor {
     ThemeColor::Rgb { red, green, blue }

@@ -8,6 +8,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::CustomArgsError;
+use crate::values::string_setting;
 
 /// Flags assistd sets on every server it launches, or whose server defaults
 /// its clients and supervisor rely on.
@@ -131,19 +132,7 @@ impl<S: ServerKind> FromStr for CustomArgs<S> {
     }
 }
 
-impl<S: ServerKind> TryFrom<String> for CustomArgs<S> {
-    type Error = CustomArgsError;
-
-    fn try_from(source: String) -> Result<Self, Self::Error> {
-        source.parse()
-    }
-}
-
-impl<S> From<CustomArgs<S>> for String {
-    fn from(custom_args: CustomArgs<S>) -> Self {
-        custom_args.source
-    }
-}
+string_setting!(CustomArgs<S> where S: ServerKind, |custom_args| custom_args.source);
 
 fn check_arg(arg: &str, server_managed_flags: &[&str]) -> Result<(), CustomArgsError> {
     if arg.chars().any(char::is_control) {
