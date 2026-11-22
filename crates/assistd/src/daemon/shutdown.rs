@@ -163,8 +163,7 @@ impl TeardownDeadline {
 
 /// Tasks that start new work and stop on the `intake` stage.
 pub(super) struct IntakeTasks {
-    pub(super) gpu_monitor: Option<JoinHandle<()>>,
-    pub(super) idle_monitor: Option<JoinHandle<()>>,
+    pub(super) presence_policy: Option<JoinHandle<()>>,
     /// Also runs the listen dispatcher once voice capture is up.
     pub(super) warmup: JoinHandle<()>,
 }
@@ -204,11 +203,7 @@ async fn forward_signals(shutdown_tx: watch::Sender<bool>) {
 }
 
 async fn join_intake_tasks(tasks: IntakeTasks) {
-    for handle in [tasks.gpu_monitor, tasks.idle_monitor]
-        .into_iter()
-        .flatten()
-        .chain([tasks.warmup])
-    {
+    for handle in tasks.presence_policy.into_iter().chain([tasks.warmup]) {
         let _ = handle.await;
     }
 }

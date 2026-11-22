@@ -10,7 +10,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use assistd_config::Config;
 use assistd_ipc::{
     Event, EventBody, EventKind, HostName, PermissionMode, PresenceTarget, Request, RequestBody,
-    SubscribeFilter, TaskQueueOp, TaskRequest, TaskRunState,
+    SubscribeFilter, SuspendReason, TaskQueueOp, TaskRequest, TaskRunState,
 };
 use assistd_llm::{EchoBackend, ScriptedBackend, Step, ToolCall, TurnBackend};
 use assistd_memory::{HistoryScope, SessionId};
@@ -21,7 +21,8 @@ use assistd_tools::{
 use assistd_utils::readiness::Readiness;
 use assistd_voice::VoiceManager;
 
-use crate::presence::tests::stub_presence;
+use crate::presence::SleepCause;
+use crate::presence::tests::{settle_stub_active, stub_presence};
 use crate::state::tests::{
     HangingTool, MockSpeechRecorder, await_task_queue, dispatch, done, listed_run_states,
     main_backend, paused_prompt, queue_task_run, queued_runs, runs_end_unasked, scripted,
@@ -49,6 +50,31 @@ async fn a_finished_task_run_leaves_the_main_backend_untouched() {
         before
     );
     assert_eq!(state.session_ctx.current().await.1, Some(branch));
+    assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
+}
+
+#[tokio::test]
+async fn a_run_held_by_a_sleep_for_the_gpu_starts_after_any_wake() {
+    let backend = main_backend(Arc::new(EchoBackend::new()));
+    let (state, conv, _branch, task) = task_state(backend, Arc::new(ToolRegistry::default())).await;
+    let presence = &state.subsystems.presence;
+    presence
+        .sleep(SleepCause::GpuBusy)
+        .await
+        .expect("stub sleep");
+
+    let run = queue_task_run(&state, task).await;
+    let held = TaskRunState::Suspended {
+        reason: SuspendReason::GpuBusy,
+    };
+    await_task_queue(&state, |_| {
+        (queued_runs(&state) == [(run, held.clone())]).then_some(())
+    })
+    .await;
+
+    settle_stub_active(presence);
+    runs_end_unasked(&state, None).await;
+    settle_task_runs(&state).await;
     assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
 }
 

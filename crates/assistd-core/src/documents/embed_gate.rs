@@ -23,10 +23,10 @@ pub(crate) async fn keep_document_embed_gate(
     let documents = &config.documents;
     let mut interaction = admission.interaction.subscribe();
     let mut lanes = admission.lanes.watch();
-    let mut gpu_sleep = presence.gpu_hold();
+    let mut settled = presence.subscribe_settled();
     loop {
         let interaction_open = *interaction.borrow_and_update() != InteractionState::Idle;
-        let asleep_for_gpu = *gpu_sleep.borrow_and_update();
+        let asleep_for_gpu = settled.borrow_and_update().asleep_for_gpu();
         let open = (documents.embed_during_interaction || !interaction_open)
             && (documents.embed_during_tasks || !admission.lanes.held_by_run())
             && (documents.embed_during_gpu_sleep || !asleep_for_gpu);
@@ -39,7 +39,7 @@ pub(crate) async fn keep_document_embed_gate(
             () = gate.closed() => return,
             () = changed_or_pending(&mut interaction) => {}
             () = lanes.changed() => {}
-            () = changed_or_pending(&mut gpu_sleep) => {}
+            () = changed_or_pending(&mut settled) => {}
         }
     }
 }
@@ -53,7 +53,8 @@ mod tests {
     use assistd_ipc::{PresenceTarget, TaskRunId};
 
     use super::*;
-    use crate::presence::tests::stub_presence;
+    use crate::presence::SleepCause;
+    use crate::presence::tests::{settle_stub_active, stub_presence};
 
     /// Long enough for the gate's task to act on a change, in paused time.
     const SETTLE: Duration = Duration::from_millis(10);
@@ -94,7 +95,7 @@ mod tests {
         }
 
         /// Whether the gate is open during the user's interaction, the quiet time
-        /// after its turn included, a task run, and a GPU sleep.
+        /// after its turn included, a task run, and a GPU sleep that a wake ends.
         async fn open_during_each_state(&self) -> [bool; 3] {
             assert!(self.open().await, "shut while idle");
             let turn = self
@@ -113,10 +114,13 @@ mod tests {
             drop(run);
             assert!(self.open().await, "shut after the task run");
 
-            self.presence.hold_for_gpu(true);
+            self.presence
+                .sleep(SleepCause::GpuBusy)
+                .await
+                .expect("stub sleep");
             let during_gpu_sleep = self.open().await;
-            self.presence.hold_for_gpu(false);
-            assert!(self.open().await, "shut after the GPU sleep");
+            settle_stub_active(&self.presence);
+            assert!(self.open().await, "shut after the wake from the GPU sleep");
             [during_interaction, during_task, during_gpu_sleep]
         }
     }

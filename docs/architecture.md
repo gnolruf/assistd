@@ -62,7 +62,7 @@ flowchart TB
 | `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | every other `assistd-*` crate                                                    |
 | `assistd-chat`   | The `assistd chat` terminal window and the `assistd settings` panel, a client that only reads and writes the socket. | `config`, `ipc`, `utils`                                                         |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
-| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, document index passes and the watches between them, page transcription while drowsy, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
+| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with the policy task that drives it from idle time and GPU contention, listen dispatcher, socket server, document index passes and the watches between them, page transcription while drowsy, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-documents` | Document text extraction (text, HTML, PDF, office files, e-books) and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
@@ -154,8 +154,10 @@ Presence decides whether the model is loaded: `Active` has it loaded,
 its cache holds `model.name`; if not, it has the router download it
 (`POST /models`), follows the bytes on `GET /models/sse` and reports
 `Downloading` with them. `model.ready_timeout_secs` bounds how long the
-download may go without new bytes, not the download. The idle timers and GPU monitor
-under `[sleep]` move it down, and a query wakes it.
+download may go without new bytes, not the download. The presence policy task moves it down
+by the idle periods and GPU headroom under `[sleep]`, counting idle time from when a
+use of the model last began or ended, and a query wakes it. `Sleeping` records why,
+and only a sleep for the GPU is woken by the policy once the model fits again.
 
 The router gives every model it loads the flags on its own command line, and
 a flag given there overrides a preset. So `model.context_length` is not passed
@@ -384,8 +386,7 @@ lane for it. There is one lane per slot the server reports as `total_slots` in
 the main backend's and is the agent turn lock itself, so with one slot a
 run waits out the user's turn and holds the next one off. With more slots, runs
 take lanes 1..N, each pinned to its slot with `id_slot`, and the main
-backend stays on slot 0. While the GPU monitor holds the daemon asleep for
-another process, waiting runs are `Suspended(GpuBusy)` instead of waking the
+backend stays on slot 0. While the daemon sleeps for the GPU, until any wake, waiting runs are `Suspended(GpuBusy)` instead of waking the
 model. `TaskRequest::Queue` moves, cancels, pauses and resumes the queue (the pause is
 kept in the `task_queue` table, so it outlasts a restart), and
 `EventBody::TaskQueue` broadcasts the items, lane holders and pause flag after each
