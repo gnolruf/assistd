@@ -12,7 +12,7 @@ use office_oxide::xlsx::XlsxError;
 use office_oxide::{Document, DocumentFormat, DocumentIR, OfficeError};
 
 use crate::archive::{MAX_ARCHIVE_BYTES, MAX_ENTRIES, MAX_ENTRY_BYTES};
-use crate::protocol::{Extraction, SkipReason};
+use crate::protocol::{PageTexts, SkipReason};
 
 /// What a file starts with when it is an OLE container, which is how Office
 /// stores a package it has encrypted.
@@ -37,14 +37,14 @@ impl From<OfficeFormat> for DocumentFormat {
 
 /// The text of the `format` file in `bytes` as Markdown: a DOCX whole, a PPTX
 /// or XLSX with a page for each slide or sheet, empty for one that holds nothing.
-pub(crate) fn page_texts(bytes: Vec<u8>, format: OfficeFormat) -> Result<Extraction, SkipReason> {
+pub(crate) fn page_texts(bytes: Vec<u8>, format: OfficeFormat) -> Result<PageTexts, SkipReason> {
     if bytes.starts_with(&OLE_MAGIC) {
         return Err(SkipReason::PasswordProtected);
     }
     let document = Document::from_reader_with(Cursor::new(bytes), format.into(), &parse_options())
         .map_err(|error| skip_reason(&error))?;
     if format == OfficeFormat::Docx {
-        return Ok(Extraction::of_one_page(document.to_markdown()));
+        return Ok(PageTexts::of_one_page(document.to_markdown()));
     }
     let texts = document.to_ir().sections.into_iter().map(|section| {
         if section.elements.is_empty() {
@@ -56,7 +56,7 @@ pub(crate) fn page_texts(bytes: Vec<u8>, format: OfficeFormat) -> Result<Extract
         };
         page.to_markdown()
     });
-    Ok(Extraction::of_pages(texts))
+    Ok(PageTexts::of_pages(texts))
 }
 
 /// The library's limits for a file nobody vouches for, with the archive held to

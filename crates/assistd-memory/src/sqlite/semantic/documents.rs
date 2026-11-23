@@ -11,10 +11,11 @@ use sha2::{Digest, Sha256};
 
 use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::sqlite::chunks::{ChunkOwner, delete_unheld_vectors, insert_chunk};
+use crate::sqlite::page_readings::{delete_unheld_readings, keep_reading, kept_reading};
 use crate::sqlite::timestamp::now_millis;
 use crate::{
-    ChunkId, ChunkSource, DocumentId, EmptyPages, FileStamp, IndexPass, PageReading, SkippedRead,
-    TranscriptionCounts, WaitingPage,
+    ChunkId, ChunkSource, DocumentId, EmptyPages, FileHash, FileStamp, IndexPass, PageReading,
+    SkippedRead, TranscriptionCounts, UnheldRemoved, WaitingPage,
 };
 
 /// The byte after `/`: every path inside a directory sorts between the directory's
@@ -36,6 +37,8 @@ struct DocumentRow<'a> {
     path: &'a [u8],
     stamp: FileStamp,
     hash: [u8; 32],
+    /// The file's bytes, when a model may read its pages.
+    file: Option<FileHash>,
     chunking: ChunkingConfig,
 }
 
@@ -46,7 +49,8 @@ impl DocumentRow<'_> {
     fn refresh_stamp_if_same_pages(&self, tx: &Transaction<'_>) -> rusqlite::Result<bool> {
         let refreshed = tx
             .prepare_cached(
-                "UPDATE documents SET root_id = ?1, seen_pass = ?2, mtime_ns = ?3, size = ?4
+                "UPDATE documents
+                 SET root_id = ?1, seen_pass = ?2, mtime_ns = ?3, size = ?4, file_hash = ?10
                  WHERE path = ?5 AND content_hash = ?6
                    AND chunker = ?7 AND chunk_chars = ?8 AND overlap_chars = ?9
                    AND NOT EXISTS (SELECT 1 FROM page_transcriptions t
@@ -62,6 +66,7 @@ impl DocumentRow<'_> {
                 self.chunking.chunker(),
                 self.chunking.chunk_chars(),
                 self.chunking.overlap_chars(),
+                self.file,
             ])?;
         Ok(refreshed > 0)
     }
@@ -70,12 +75,13 @@ impl DocumentRow<'_> {
     fn upsert(&self, tx: &Transaction<'_>) -> rusqlite::Result<DocumentId> {
         tx.prepare_cached(
             "INSERT INTO documents (root_id, seen_pass, mtime_ns, size, path, content_hash,
-                                    chunker, chunk_chars, overlap_chars, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                                    chunker, chunk_chars, overlap_chars, indexed_at, file_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(path) DO UPDATE
              SET root_id = excluded.root_id, seen_pass = excluded.seen_pass,
                  mtime_ns = excluded.mtime_ns, size = excluded.size,
-                 content_hash = excluded.content_hash, chunker = excluded.chunker,
+                 content_hash = excluded.content_hash, file_hash = excluded.file_hash,
+                 chunker = excluded.chunker,
                  chunk_chars = excluded.chunk_chars, overlap_chars = excluded.overlap_chars,
                  indexed_at = excluded.indexed_at
              RETURNING id",
@@ -92,10 +98,18 @@ impl DocumentRow<'_> {
                 self.chunking.chunk_chars(),
                 self.chunking.overlap_chars(),
                 now_millis(),
+                self.file,
             ],
             |r| r.get(0),
         )
     }
+}
+
+/// A page that had no text when its file was read, by its position from zero, and
+/// whether a reading kept for its file gave it its text.
+struct TextlessPage {
+    page: usize,
+    read: bool,
 }
 
 /// Where a chunk sits in a document: a byte range of one page's text.
@@ -221,38 +235,44 @@ pub(super) struct StoredDocument {
     pub pages_wait: bool,
 }
 
-/// Store `pages` as the document at `path`, seen by `pass`. Pages with the stored
-/// hash and chunking only have their stamp refreshed. A skip recorded for the path
-/// is dropped.
+/// Store `pages` as the document at `path`, seen by `pass`, a page without text taking
+/// the reading kept for it when `empty_pages` names its file. Pages with the stored hash
+/// and chunking only have their stamp refreshed. A skip recorded for the path is dropped.
 pub(super) fn store_document(
     tx: &Transaction<'_>,
     pass: IndexPass,
     path: &Path,
     stamp: FileStamp,
-    pages: &[String],
+    mut pages: Vec<String>,
     empty_pages: EmptyPages,
 ) -> rusqlite::Result<StoredDocument> {
     tx.prepare_cached("DELETE FROM skipped_files WHERE path = ?1")?
         .execute(rusqlite::params![path.as_os_str().as_bytes()])?;
+    let (file, textless) = match empty_pages {
+        EmptyPages::Final => (None, Vec::new()),
+        EmptyPages::AwaitTranscription { file } => {
+            (Some(file), take_kept_readings(tx, file, &mut pages)?)
+        }
+    };
     let document = DocumentRow {
         pass,
         path: path.as_os_str().as_bytes(),
         stamp,
-        hash: pages_hash(pages),
+        hash: pages_hash(&pages),
+        file,
         chunking: ChunkingConfig::DOCUMENTS,
     };
     if document.refresh_stamp_if_same_pages(tx)? {
         return Ok(StoredDocument::default());
     }
     let id = document.upsert(tx)?;
-    replace_pages(tx, id, pages)?;
-    let pages_wait = empty_pages == EmptyPages::AwaitTranscription
-        && await_transcription_of_empty_pages(tx, id, pages)?;
-    let cuts = page_cuts(pages, document.chunking);
-    let unembedded = add_chunks(tx, id, pages, &cuts)?;
+    replace_pages(tx, id, &pages)?;
+    record_textless_pages(tx, id, &textless)?;
+    let cuts = page_cuts(&pages, document.chunking);
+    let unembedded = add_chunks(tx, id, &pages, &cuts)?;
     Ok(StoredDocument {
         unembedded,
-        pages_wait,
+        pages_wait: textless.iter().any(|page| !page.read),
     })
 }
 
@@ -279,8 +299,8 @@ pub(super) fn next_waiting_page(conn: &Connection) -> rusqlite::Result<Option<Wa
 }
 
 /// Record `reading` of `waiting` when it still waits and its document still has its
-/// stamp, and cut the document's uncut pages once none of them waits. Returns the
-/// chunks added whose text has no vector.
+/// stamp, keeping its text for the document's file, and cut the document's uncut
+/// pages once none of them waits. Returns the chunks added whose text has no vector.
 pub(super) fn store_page_reading(
     tx: &Transaction<'_>,
     waiting: &WaitingPage,
@@ -318,6 +338,9 @@ pub(super) fn store_page_reading(
         "UPDATE document_pages SET content = ?3 WHERE document_id = ?1 AND page = ?2",
     )?
     .execute(rusqlite::params![document_id, page, text])?;
+    if let PageReading::Text(text) = reading {
+        keep_reading(tx, *document_id, *page, text)?;
+    }
     if has_waiting_page(tx, *document_id)? {
         return Ok(Vec::new());
     }
@@ -409,20 +432,28 @@ pub(super) fn remove_root(tx: &Transaction<'_>, root: &Path) -> rusqlite::Result
     Ok(u64::try_from(removed).unwrap_or(u64::MAX))
 }
 
-/// Remove the document vectors whose text no document chunk holds, returning how
-/// many; none unless a pass has walked the whole of each of `roots`.
-pub(super) fn remove_unheld_vectors(conn: &Connection, roots: &[PathBuf]) -> rusqlite::Result<u64> {
+/// Remove the document vectors whose text no document chunk holds and the readings
+/// of files no document is stored from; none unless a pass has walked the whole of
+/// each of `roots`.
+pub(super) fn remove_unheld(
+    conn: &Connection,
+    roots: &[PathBuf],
+) -> rusqlite::Result<UnheldRemoved> {
     let mut walked_whole = conn.prepare_cached(
         "SELECT EXISTS (SELECT 1 FROM index_roots WHERE path = ?1 AND finished_pass > 0)",
     )?;
     for root in roots {
         let root = root.as_os_str().as_bytes();
         if !walked_whole.query_row(rusqlite::params![root], |r| r.get::<_, bool>(0))? {
-            return Ok(0);
+            return Ok(UnheldRemoved::default());
         }
     }
-    let removed = delete_unheld_vectors(conn, ChunkSource::Document)?;
-    Ok(u64::try_from(removed).unwrap_or(u64::MAX))
+    let vectors = delete_unheld_vectors(conn, ChunkSource::Document)?;
+    let readings = delete_unheld_readings(conn)?;
+    Ok(UnheldRemoved {
+        vectors: u64::try_from(vectors).unwrap_or(u64::MAX),
+        readings: u64::try_from(readings).unwrap_or(u64::MAX),
+    })
 }
 
 /// Have every page whose transcription failed wait again, returning how many.
@@ -433,25 +464,45 @@ pub(super) fn retry_failed_transcriptions(conn: &Connection) -> rusqlite::Result
     Ok(u64::try_from(waiting).unwrap_or(u64::MAX))
 }
 
-/// Record each of `pages` without text, the stored pages of `document`, as waiting
-/// for transcription. Returns whether any waits.
-fn await_transcription_of_empty_pages(
+/// Give each of `pages` without text the reading kept for that page of `file`,
+/// returning every such page in order.
+fn take_kept_readings(
+    tx: &Transaction<'_>,
+    file: FileHash,
+    pages: &mut [String],
+) -> rusqlite::Result<Vec<TextlessPage>> {
+    let mut textless = Vec::new();
+    for (page, text) in pages.iter_mut().enumerate() {
+        if !text.trim().is_empty() {
+            continue;
+        }
+        let kept = kept_reading(tx, file, page)?;
+        textless.push(TextlessPage {
+            page,
+            read: kept.is_some(),
+        });
+        if let Some(kept) = kept {
+            *text = kept;
+        }
+    }
+    Ok(textless)
+}
+
+/// Record each of `textless`, stored pages of `document`, as read or as waiting for
+/// transcription.
+fn record_textless_pages(
     tx: &Transaction<'_>,
     document: DocumentId,
-    pages: &[String],
-) -> rusqlite::Result<bool> {
-    let mut wait =
-        tx.prepare_cached("INSERT INTO page_transcriptions (document_id, page) VALUES (?1, ?2)")?;
-    let empty = pages
-        .iter()
-        .enumerate()
-        .filter(|(_, text)| text.trim().is_empty());
-    let mut pages_wait = false;
-    for (page, _) in empty {
-        wait.execute(rusqlite::params![document, page])?;
-        pages_wait = true;
+    textless: &[TextlessPage],
+) -> rusqlite::Result<()> {
+    let mut record = tx.prepare_cached(
+        "INSERT INTO page_transcriptions (document_id, page, state) VALUES (?1, ?2, ?3)",
+    )?;
+    for TextlessPage { page, read } in textless {
+        let state = if *read { READ } else { WAITING };
+        record.execute(rusqlite::params![document, page, state])?;
     }
-    Ok(pages_wait)
+    Ok(())
 }
 
 fn has_waiting_page(tx: &Transaction<'_>, document: DocumentId) -> rusqlite::Result<bool> {

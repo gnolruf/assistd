@@ -9,7 +9,7 @@ use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesRef, BytesStart, Event};
 
 use crate::archive::Archive;
-use crate::protocol::{Extraction, MAX_TEXT_BYTES, SkipReason};
+use crate::protocol::{MAX_TEXT_BYTES, PageTexts, SkipReason};
 use crate::text::decode;
 use crate::xml::attribute;
 
@@ -342,18 +342,16 @@ impl Content {
 
 /// The text of the ODF file in `bytes`: a text document as one page, a
 /// spreadsheet's sheets and a presentation's slides each as a page.
-pub(crate) fn page_texts(bytes: Vec<u8>) -> Result<Extraction, SkipReason> {
+pub(crate) fn page_texts(bytes: Vec<u8>) -> Result<PageTexts, SkipReason> {
     let mut archive = Archive::open(bytes)?;
     let manifest = decode(&archive.read(MANIFEST_ENTRY)?)?;
     if lists_encryption(&manifest)? {
         return Err(SkipReason::PasswordProtected);
     }
     let content = Content::read(&decode(&archive.read(CONTENT_ENTRY)?)?)?;
-    let mut extraction = Extraction::of_pages(content.pages);
-    if let Extraction::Pages { truncated, .. } = &mut extraction {
-        *truncated |= content.cut;
-    }
-    Ok(extraction)
+    let mut texts = PageTexts::of_pages(content.pages);
+    texts.truncated |= content.cut;
+    Ok(texts)
 }
 
 fn lists_encryption(manifest: &str) -> Result<bool, quick_xml::Error> {

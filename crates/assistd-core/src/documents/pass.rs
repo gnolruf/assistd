@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use assistd_documents::{Extraction, Extractor, ExtractorError, SkipReason, renders_pages};
 use assistd_memory::{
-    DocumentStore, EmptyPages, FileStamp, IndexPass, MemoryError, SkippedRead, UnindexedFile,
+    DocumentStore, EmptyPages, FileHash, FileStamp, IndexPass, MemoryError, SkippedRead,
+    UnindexedFile,
 };
 use assistd_tools::policy::{PathGuards, on_blocking_pool};
 use assistd_utils::readiness::NotReady;
@@ -119,6 +120,12 @@ pub struct IndexDeps {
     pub extractor: Arc<Extractor>,
 }
 
+/// A file as the worker read it: its pages' text and the hash of its bytes.
+struct ReadFile {
+    pages: Vec<String>,
+    hash: FileHash,
+}
+
 /// Why a pass ended without removing the documents it did not see.
 #[derive(Debug, Error)]
 enum PassStopped {
@@ -197,16 +204,12 @@ impl RunningPass<'_> {
 
     /// Extract and store the file at `path`, returning how many chunks that added,
     /// or record why it is skipped. Its pages without text wait for transcription
-    /// when they can be rendered.
+    /// when they can be rendered and were not read from the same bytes before.
     async fn index_file(&mut self, path: PathBuf, stamp: FileStamp) -> Result<u64, PassStopped> {
-        let empty_pages = if renders_pages(&path) {
-            EmptyPages::AwaitTranscription
-        } else {
-            EmptyPages::Final
-        };
-        let keeps_textless = self.keeps_scans && empty_pages == EmptyPages::AwaitTranscription;
-        let pages = match self.extract(&path, keeps_textless).await? {
-            Ok(pages) => pages,
+        let renders = renders_pages(&path);
+        let keeps_textless = self.keeps_scans && renders;
+        let ReadFile { pages, hash } = match self.extract(&path, keeps_textless).await? {
+            Ok(read) => read,
             Err(reason) => {
                 debug!(target: "assistd::documents", "skipped {}: {reason}", path.display());
                 let skipped = skipped_read(&reason);
@@ -217,6 +220,11 @@ impl RunningPass<'_> {
                 return Ok(0);
             }
         };
+        let empty_pages = if renders {
+            EmptyPages::AwaitTranscription { file: hash }
+        } else {
+            EmptyPages::Final
+        };
         let store = &self.deps.store;
         let indexed = store.index_document(self.pass, path, stamp, pages, empty_pages);
         let added = indexed.await?;
@@ -224,14 +232,14 @@ impl RunningPass<'_> {
         Ok(added.len() as u64)
     }
 
-    /// The pages of the file at `path`, or why it is not indexed; one with no text
-    /// is indexed only when `keeps_textless`. A worker that exits is asked again,
+    /// The file at `path` as read, or why it is not indexed; one with no text is
+    /// indexed only when `keeps_textless`. A worker that exits is asked again,
     /// and the file is skipped once it has exited [`WORKER_EXITS_PER_FILE`] times.
     async fn extract(
         &mut self,
         path: &Path,
         keeps_textless: bool,
-    ) -> Result<Result<Vec<String>, SkipReason>, PassStopped> {
+    ) -> Result<Result<ReadFile, SkipReason>, PassStopped> {
         let mut worker_exits = 0;
         loop {
             self.worker_ready().await?;
@@ -404,19 +412,17 @@ fn skipped_read(reason: &SkipReason) -> SkippedRead {
     }
 }
 
-/// The pages to store for `extraction`. A file none of whose pages has text is
-/// skipped as [`SkipReason::NoTextLayer`], unless it has pages and `keeps_textless`.
-fn indexable_pages(
-    extraction: Extraction,
-    keeps_textless: bool,
-) -> Result<Vec<String>, SkipReason> {
+/// The file to store for `extraction`. One none of whose pages has text is skipped
+/// as [`SkipReason::NoTextLayer`], unless it has pages and `keeps_textless`.
+fn indexable_pages(extraction: Extraction, keeps_textless: bool) -> Result<ReadFile, SkipReason> {
     let has_text = |pages: &[String]| pages.iter().any(|page| !page.trim().is_empty());
     match extraction {
-        Extraction::Pages { pages, .. }
-            if has_text(&pages) || (keeps_textless && !pages.is_empty()) =>
-        {
-            Ok(pages)
-        }
+        Extraction::Pages {
+            pages, file_hash, ..
+        } if has_text(&pages) || (keeps_textless && !pages.is_empty()) => Ok(ReadFile {
+            pages,
+            hash: FileHash(file_hash),
+        }),
         Extraction::Pages { .. } => Err(SkipReason::NoTextLayer),
         Extraction::Skipped { reason } => Err(reason),
     }

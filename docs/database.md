@@ -10,10 +10,11 @@ what losing each would cost.
   `memory.db` and from the files on disk: document text, the chunks of
   every kind and their keyword index. The daemon builds it again itself
   when it has to ([Three files](#three-files)).
-- **`vectors.db`** holds what the embedding model computed: the vector
-  of every distinct chunk text, which takes hours of model time to
-  produce again. Nothing in it names a row of another file, so it
-  outlasts an `index.db` that is built again.
+- **`vectors.db`** holds what a model computed, which takes hours of
+  model time to produce again: the vector of every distinct chunk text,
+  and the text the OCR model read from each scanned page. Nothing in it
+  names a row of another file, so it outlasts an `index.db` that is
+  built again.
 
 Chats are saved whatever `[memory] enabled` says; turning it off only
 withholds the memory tools and recalled context from the model.
@@ -38,6 +39,7 @@ erDiagram
     documents ||--o{ document_pages : "made of"
     document_pages ||--o{ chunks : "split into"
     document_pages ||--o| page_transcriptions : "read from its image as"
+    documents }o--o{ page_readings : "file's pages read as"
     messages ||--o{ relay_steps : "relayed by"
     relay_steps ||--o{ relay_entries : "did"
     chunks }o--o| message_vectors : "text embedded as"
@@ -154,6 +156,7 @@ erDiagram
         int root_id FK
         blob path UK
         blob content_hash "SHA-256 of its pages in order"
+        blob file_hash "SHA-256 of the file's bytes; NULL unless a model may read its pages"
         int mtime_ns "the file's stamp when read"
         int size
         int chunker "0 windows, 1 paragraphs"
@@ -179,6 +182,11 @@ erDiagram
         int document_id PK, FK
         int page PK, FK
         int state "0 waiting, 1 read, 2 failed"
+    }
+    page_readings {
+        blob file_hash PK "the hash of the documents stored from the file"
+        int page PK "position in the file, from 0"
+        text text "what the OCR model read, empty for a blank page"
     }
     chunks {
         int id PK "also its rowid in chunk_words"
@@ -257,8 +265,9 @@ cascades to the rows that hang off it in its own file.
 
 `index.db` holds `chunked_source`, `index_roots`, `documents`,
 `skipped_files`, `document_pages`, `page_transcriptions`, `chunks`,
-`chunk_words` and `removed_chunk_texts`; `vectors.db` holds the three
-vector tables and `embedding_meta`; every other table is in `memory.db`.
+`chunk_words`, `removed_chunk_texts` and `removed_file_hashes`;
+`vectors.db` holds the three vector tables, `embedding_meta`,
+`page_readings` and `page_reader`; every other table is in `memory.db`.
 `chunks.source` names a row of one of three tables, which no foreign key
 can say. A trigger on `document_pages`, in the same file, deletes a
 deleted page's chunks. A message or a memory is in another file, and so
@@ -302,7 +311,9 @@ logged and left to the next start.
 `index.db` and `vectors.db` are written by one connection, in one
 transaction, but each file commits on its own, so a crash can keep one
 file's half of a write. Both ways heal: a chunk whose hash has no vector
-is embedded, and a vector whose text no chunk holds is removed.
+is embedded, and a vector whose text no chunk holds is removed. A page
+reading follows the same two rules as a document vector, with the
+file's hash in place of the text's.
 
 - **Finding a vector.** A chunk's vector is the row of its kind's table
   in `vectors.db` under `chunks.hash`. The embedding queue is the chunks
@@ -320,10 +331,20 @@ is embedded, and a vector whose text no chunk holds is removed.
   of every root in `documents.roots` since `index.db` was created, which
   `index_roots.finished_pass` records; the comparison runs at the end of
   each round of passes.
+- **Finding a page's reading.** The text read from a scanned page is the
+  row of `page_readings` under its document's `file_hash` and the page's
+  position. Storing a document looks each page without text up there
+  before setting it to wait for the OCR model.
+- **Removing a reading.** A write that removes a document, or stores
+  other bytes at its path, deletes in the same transaction the readings
+  of a file no document is stored from any more (`removed_file_hashes`
+  below). The comparison at the end of each round of passes deletes
+  every reading whose file hash no document has, on the same condition
+  as the document vectors.
 
-So an `index.db` built again finds its vectors waiting and embeds
-nothing, and so does a root that was unavailable while it was built and
-comes back. A message undone while its chunks are being cut again keeps
+So an `index.db` built again finds its vectors and its pages' readings
+waiting and asks no model for anything, and so does a root that was
+unavailable while it was built and comes back. A message undone while its chunks are being cut again keeps
 its vector until they all are; in every other case a vector goes with
 the write that removed its last chunk.
 
@@ -331,9 +352,11 @@ The daemon deletes `index.db` and creates it empty when the file is not
 a database SQLite can read, or when its `PRAGMA user_version` is not the
 one this build writes; a missing file is created. The messages and
 memories are then chunked again and the next pass over each root reads
-its files. Scanned pages go back to wait for the OCR model. `vectors.db`
+its files. A scanned page takes the reading kept for it in `vectors.db`
+and waits for the OCR model only when it has none. `vectors.db`
 is replaced on the same two conditions; every chunk text is then
-embedded again, and the daemon logs how many wait. Neither file has
+embedded again, and the daemon logs how many wait, and every scanned
+page is read again. Neither file has
 migrations: a change to its schema takes the next version number.
 
 ## Transcripts
@@ -444,7 +467,9 @@ resumed, saying which.
   not see: all of the root's, or for a pass over changed paths those at
   or under them. The rows are a rebuildable cache of files on disk,
   so losing `index.db` costs only a re-index, and the re-indexed text
-  finds its vectors in `vectors.db`.
+  finds its vectors in `vectors.db`. `file_hash` is the SHA-256 of the
+  file's bytes as the extraction worker read them, kept for a PDF,
+  whose pages a model may read, and `NULL` for any other file.
 - **`skipped_files`**: files that were read and left nothing to
   index, one row per path, each with the stamp it had and why:
   unsupported, binary, undecodable, password protected, without text,
@@ -472,9 +497,29 @@ resumed, saying which.
   rows is waiting its pages that have no chunk are cut and
   `content_hash` is taken over the pages as they now are. The rows stay
   until the file's stamp changes: indexing it again writes the pages as
-  extracted, which drops the transcribed text with its chunks, and
-  starts every empty page waiting again. A daemon start sets the failed
-  rows back to waiting.
+  extracted and gives each empty page the reading `page_readings` keeps
+  for the file's bytes: a page with one is marked read at once, and only
+  the others start waiting. A daemon start sets the failed rows back to
+  waiting.
+- **`page_readings`**, in `vectors.db`: the text the OCR model read
+  from one page, under the `file_hash` of the file and the page's
+  position in it, empty for a page that shows nothing. A failed reading
+  is not kept. The rows belong to a file's bytes and not to a path or a
+  document id, so a renamed, moved or copied scan has its text at once,
+  and so does every scan after `index.db` is built again. A reading is
+  kept only while a document is stored from its file
+  ([Three files](#three-files)), so text read from a deleted or changed
+  file does not outlive it.
+- **`page_reader`**, in `vectors.db`: the one row naming what read
+  every kept reading: `documents.ocr.model` and `documents.ocr.prompt`.
+  When the daemon starts with either changed, `page_readings` is emptied
+  before any document is stored. Pages already read keep their text
+  until their file is indexed again.
+- **`removed_file_hashes`**: empty between writes. Triggers on
+  `documents` record the `file_hash` of every row a write deletes or
+  gives another hash. Before the write commits it deletes from
+  `vectors.db` the readings under each recorded hash that no document
+  has any more, and empties the table.
 - **`message_vectors`** / **`memory_vectors`** / **`document_vectors`**,
   in `vectors.db`: one vector for each
   distinct text the chunks of that kind hold, under the text's
@@ -678,4 +723,5 @@ match.
   schema change to `memory.db` may require a reset instead of shipping a
   migration. Deleting `index.db` while the daemon is stopped loses
   nothing that is not built again, in seconds; deleting `vectors.db`
-  costs the time to embed everything again.
+  costs the time to embed everything and to transcribe every scanned
+  page again.

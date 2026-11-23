@@ -6,9 +6,10 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use assistd_utils::fs::open_regular;
+use sha2::{Digest, Sha256};
 
 use crate::office::{self, OfficeFormat};
-use crate::protocol::{Extraction, RenderedPage, SkipReason};
+use crate::protocol::{Extraction, PageTexts, RenderedPage, SkipReason};
 use crate::text::{decode, html_text};
 use crate::{epub, opendocument, pdf};
 
@@ -48,12 +49,12 @@ impl Format {
             .map_or(Self::Text, |(_, format)| *format)
     }
 
-    fn extract(self, bytes: Vec<u8>) -> Result<Extraction, SkipReason> {
+    fn extract(self, bytes: Vec<u8>) -> Result<PageTexts, SkipReason> {
         match self {
-            Self::Text => decode(&bytes).map(Extraction::of_one_page),
+            Self::Text => decode(&bytes).map(PageTexts::of_one_page),
             Self::Html => decode(&bytes)
                 .and_then(|html| html_text(&html))
-                .map(Extraction::of_one_page),
+                .map(PageTexts::of_one_page),
             Self::Pdf => pdf::page_texts(bytes),
             Self::Office(format) => office::page_texts(bytes, format),
             Self::OpenDocument => opendocument::page_texts(bytes),
@@ -71,9 +72,19 @@ pub fn renders_pages(path: &Path) -> bool {
 /// The text of the regular file at `path` page by page, or why it has none; a
 /// file larger than `max_file_bytes` is not read. Blocks on the filesystem.
 pub(crate) fn extract_text(path: &Path, max_file_bytes: u64) -> Extraction {
-    read_file(path, max_file_bytes)
-        .and_then(|bytes| Format::of(path).extract(bytes))
-        .unwrap_or_else(|reason| Extraction::Skipped { reason })
+    let extracted = read_file(path, max_file_bytes).and_then(|bytes| {
+        let file_hash = Sha256::digest(&bytes).into();
+        let texts = Format::of(path).extract(bytes)?;
+        Ok((texts, file_hash))
+    });
+    match extracted {
+        Ok((PageTexts { pages, truncated }, file_hash)) => Extraction::Pages {
+            pages,
+            truncated,
+            file_hash,
+        },
+        Err(reason) => Extraction::Skipped { reason },
+    }
 }
 
 /// Page `page` of the PDF at `path`, counted from zero, as an image; a file
@@ -207,26 +218,42 @@ mod tests {
     /// The first six bytes of a PNG in base64.
     const PNG_MAGIC_BASE64: &str = "iVBORw0K";
 
-    fn extraction_of(name: &str, contents: &[u8], max_file_bytes: u64) -> Extraction {
+    /// What the worker makes of a file of `contents`, checked to carry their hash.
+    fn extraction_of(
+        name: &str,
+        contents: &[u8],
+        max_file_bytes: u64,
+    ) -> Result<PageTexts, SkipReason> {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(name);
         std::fs::write(&path, contents).expect("file");
-        extract_text(&path, max_file_bytes)
+        match extract_text(&path, max_file_bytes) {
+            Extraction::Pages {
+                pages,
+                truncated,
+                file_hash,
+            } => {
+                let of_contents: [u8; 32] = Sha256::digest(contents).into();
+                assert_eq!(file_hash, of_contents, "{name}");
+                Ok(PageTexts { pages, truncated })
+            }
+            Extraction::Skipped { reason } => Err(reason),
+        }
     }
 
-    fn text(text: &str) -> Extraction {
+    fn text(text: &str) -> Result<PageTexts, SkipReason> {
         pages(&[text])
     }
 
-    fn skipped(reason: SkipReason) -> Extraction {
-        Extraction::Skipped { reason }
+    fn skipped(reason: SkipReason) -> Result<PageTexts, SkipReason> {
+        Err(reason)
     }
 
-    fn pages(pages: &[&str]) -> Extraction {
-        Extraction::Pages {
+    fn pages(pages: &[&str]) -> Result<PageTexts, SkipReason> {
+        Ok(PageTexts {
             pages: pages.iter().map(|page| (*page).to_owned()).collect(),
             truncated: false,
-        }
+        })
     }
 
     fn opendocument_of(manifest: &str, body: &str) -> Vec<u8> {
@@ -239,10 +266,10 @@ mod tests {
         ])
     }
 
-    fn page_texts(extraction: &Extraction) -> &[String] {
+    fn page_texts(extraction: &Result<PageTexts, SkipReason>) -> &[String] {
         match extraction {
-            Extraction::Pages { pages, .. } => pages,
-            Extraction::Skipped { reason } => panic!("the file has text: {reason}"),
+            Ok(texts) => &texts.pages,
+            Err(reason) => panic!("the file has text: {reason}"),
         }
     }
 
@@ -255,7 +282,7 @@ mod tests {
         let unsupported = SkipReason::Unsupported {
             mime: "image/png".into(),
         };
-        let cases: [(&str, &[u8], Extraction); 6] = [
+        let cases: [(&str, &[u8], Result<PageTexts, SkipReason>); 6] = [
             (
                 "notes.md",
                 "# Café\n\nBody.\n".as_bytes(),
@@ -291,15 +318,15 @@ mod tests {
         let scanned = extraction_of("scan.PDF", &pdf_of(&[IMAGE_PAGE, IMAGE_PAGE]), 4096);
         assert_eq!(
             scanned,
-            Extraction::Pages {
+            Ok(PageTexts {
                 pages: vec![String::new(), String::new()],
                 truncated: false,
-            }
+            })
         );
 
         let pages = [&text_page("Minutes"), IMAGE_PAGE, &text_page("Appendix")];
         let mixed = extraction_of("minutes.pdf", &pdf_of(&pages), 4096);
-        let Extraction::Pages { pages, truncated } = &mixed else {
+        let Ok(PageTexts { pages, truncated }) = &mixed else {
             panic!("a PDF comes back as pages: {mixed:?}");
         };
         assert!(!truncated);
@@ -370,8 +397,7 @@ mod tests {
     #[test]
     fn a_repeat_count_expands_a_spreadsheet_no_further_than_the_text_kept() {
         let file = opendocument_of(OPENDOCUMENT_MANIFEST, REPEATED_PAST_ANY_LIMIT_BODY);
-        let Extraction::Pages { pages, truncated } = extraction_of("again.ods", &file, MEBIBYTE)
-        else {
+        let Ok(PageTexts { pages, truncated }) = extraction_of("again.ods", &file, MEBIBYTE) else {
             panic!("the rows that fit are kept");
         };
         assert!(truncated);

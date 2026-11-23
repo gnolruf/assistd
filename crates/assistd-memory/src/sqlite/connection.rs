@@ -15,13 +15,15 @@ use tokio_rusqlite::Connection;
 use crate::{MemoryError, MemoryId, Result, index_schema, migrations, vectors_schema};
 
 use super::chunks::delete_vectors_of_removed_texts;
+use super::page_readings::delete_readings_of_removed_files;
 use super::reconcile;
 
 /// The file beside `memory.db` that holds what can be built again from it and from
 /// the files on disk.
 const INDEX_FILE_NAME: &str = "index.db";
 
-/// The file beside `memory.db` that holds the vectors of the texts `index.db` chunks.
+/// The file beside `memory.db` that holds the vectors of the texts `index.db` chunks
+/// and the readings of the pages a model transcribed.
 const VECTORS_FILE_NAME: &str = "vectors.db";
 
 /// The schema name `memory.db` has on the index writer.
@@ -45,7 +47,8 @@ const INDEX_FILE: ReplaceableFile = ReplaceableFile {
     version: index_schema::VERSION,
 };
 
-/// `vectors.db` as the daemon replaces it: vectors the embedding model computes again.
+/// `vectors.db` as the daemon replaces it: vectors and page readings a model computes
+/// again.
 const VECTORS_FILE: ReplaceableFile = ReplaceableFile {
     name: "vectors.db",
     version: vectors_schema::VERSION,
@@ -264,9 +267,10 @@ impl SqliteHandle {
     }
 
     /// Run `statements` in one transaction on the writable connection onto `index.db`
-    /// and `vectors.db`, drop the vectors of the texts it removed the last chunk of,
-    /// and commit it; a failure is reported as `op`. A crash can keep one file's half
-    /// of the commit without the other's.
+    /// and `vectors.db`, drop the vectors of the texts it removed the last chunk of
+    /// and the readings of the files it removed the last document of, and commit it;
+    /// a failure is reported as `op`. A crash can keep one file's half of the commit
+    /// without the other's.
     pub(super) async fn write_index<T, F>(&self, op: &'static str, statements: F) -> Result<T>
     where
         F: FnOnce(&Transaction<'_>) -> rusqlite::Result<T> + Send + 'static,
@@ -499,6 +503,7 @@ fn in_index_transaction<T>(
     let tx = c.transaction()?;
     let value = statements(&tx)?;
     delete_vectors_of_removed_texts(&tx)?;
+    delete_readings_of_removed_files(&tx)?;
     tx.commit()?;
     Ok(value)
 }

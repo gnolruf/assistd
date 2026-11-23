@@ -9,7 +9,7 @@ use quick_xml::events::{BytesStart, Event};
 use url::Url;
 
 use crate::archive::Archive;
-use crate::protocol::{Extraction, SkipReason};
+use crate::protocol::{PageTexts, SkipReason};
 use crate::text::{decode, xhtml_text};
 use crate::xml::attribute;
 
@@ -20,7 +20,7 @@ const CHAPTER_MEDIA_TYPES: [&str; 2] = ["application/xhtml+xml", "text/html"];
 
 /// The text of each chapter of the EPUB in `bytes`, read only as far as the
 /// text that is kept.
-pub(crate) fn page_texts(bytes: Vec<u8>) -> Result<Extraction, SkipReason> {
+pub(crate) fn page_texts(bytes: Vec<u8>) -> Result<PageTexts, SkipReason> {
     let mut archive = Archive::open(bytes)?;
     let container = decode(&archive.read(CONTAINER_ENTRY)?)?;
     let package_entry = package_entry(&container)?.ok_or_else(|| SkipReason::ExtractorFailed {
@@ -28,7 +28,7 @@ pub(crate) fn page_texts(bytes: Vec<u8>) -> Result<Extraction, SkipReason> {
     })?;
     let package = decode(&archive.read(&package_entry)?)?;
     let chapters = chapter_entries(&package_entry, &package)?;
-    Extraction::try_of_pages(
+    PageTexts::try_of_pages(
         chapters
             .iter()
             .map(|entry| xhtml_text(&decode(&archive.read(entry)?)?)),

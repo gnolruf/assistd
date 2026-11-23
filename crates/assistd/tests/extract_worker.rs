@@ -91,13 +91,14 @@ async fn the_worker_reads_files_under_its_roots_and_none_outside_them() {
     let indexed = extractor
         .extract(&root.path().join("notes.md"), MAX_FILE_BYTES)
         .await;
-    assert_eq!(
-        indexed,
-        Ok(Extraction::Pages {
-            pages: vec!["# Indexed\n\nvisible\n".into()],
-            truncated: false,
-        })
-    );
+    let Ok(Extraction::Pages {
+        pages, truncated, ..
+    }) = indexed
+    else {
+        panic!("a file under a root is read: {indexed:?}");
+    };
+    assert_eq!(pages, ["# Indexed\n\nvisible\n"]);
+    assert!(!truncated);
     for hidden in [
         outside.path().join("secret.txt"),
         root.path().join("link.txt"),

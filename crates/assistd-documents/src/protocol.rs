@@ -20,7 +20,7 @@ const MAX_PAGE_IMAGE_BASE64_BYTES: usize = MAX_PAGE_IMAGE_BYTES.div_ceil(3) * 4;
 
 /// Most bytes of one line the daemon reads from the worker: [`MAX_TEXT_BYTES`]
 /// with every byte escaped to JSON's six, the quotes and comma of [`MAX_PAGES`]
-/// pages, and room for the rest of the message. A page image in base64 is shorter.
+/// pages, and room for the rest of the message, the file's hash included. A page image in base64 is shorter.
 pub(crate) const MAX_REPLY_LINE_BYTES: usize = 6 * MAX_TEXT_BYTES + 3 * MAX_PAGES + 1024;
 
 /// A line from the other side that is not a message this build knows.
@@ -78,6 +78,8 @@ pub enum Extraction {
         pages: Vec<String>,
         /// Whether the file held more pages or text than `pages` carries.
         truncated: bool,
+        /// SHA-256 of the file's bytes as they were read.
+        file_hash: [u8; 32],
     },
     Skipped {
         reason: SkipReason,
@@ -85,6 +87,37 @@ pub enum Extraction {
 }
 
 impl Extraction {
+    /// This extraction with its text held to [`MAX_TEXT_BYTES`] and its pages to
+    /// [`MAX_PAGES`], whatever the worker sent.
+    pub(crate) fn capped(self) -> Self {
+        let Self::Pages {
+            pages,
+            truncated,
+            file_hash,
+        } = self
+        else {
+            return self;
+        };
+        let capped = PageTexts::of_pages(pages);
+        Self::Pages {
+            pages: capped.pages,
+            truncated: capped.truncated || truncated,
+            file_hash,
+        }
+    }
+}
+
+/// The text of one file as the pages its format divides it into, within the limits
+/// on what the worker reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PageTexts {
+    /// At most [`MAX_PAGES`] pages and [`MAX_TEXT_BYTES`] in all.
+    pub(crate) pages: Vec<String>,
+    /// Whether the file held more pages or text than `pages` carries.
+    pub(crate) truncated: bool,
+}
+
+impl PageTexts {
     /// `text` as the one page of a file whose format has no pages, cut to
     /// [`MAX_TEXT_BYTES`] at a character boundary.
     pub(crate) fn of_one_page(text: String) -> Self {
@@ -93,8 +126,8 @@ impl Extraction {
 
     /// [`Self::try_of_pages`] for texts that are already in hand.
     pub(crate) fn of_pages(texts: impl IntoIterator<Item = String>) -> Self {
-        let Ok(extraction) = Self::try_of_pages(texts.into_iter().map(Ok::<_, Infallible>));
-        extraction
+        let Ok(page_texts) = Self::try_of_pages(texts.into_iter().map(Ok::<_, Infallible>));
+        page_texts
     }
 
     /// The pages of `texts` up to [`MAX_PAGES`] pages and [`MAX_TEXT_BYTES`] in
@@ -108,7 +141,7 @@ impl Extraction {
         let mut room = MAX_TEXT_BYTES;
         while pages.len() < MAX_PAGES && room > 0 {
             let Some(text) = texts.next() else {
-                return Ok(Self::Pages {
+                return Ok(Self {
                     pages,
                     truncated: false,
                 });
@@ -117,7 +150,7 @@ impl Extraction {
             if text.len() > room {
                 text.truncate(text.floor_char_boundary(room));
                 pages.extend(Some(text).filter(|cut| !cut.is_empty()));
-                return Ok(Self::Pages {
+                return Ok(Self {
                     pages,
                     truncated: true,
                 });
@@ -126,20 +159,7 @@ impl Extraction {
             pages.push(text);
         }
         let truncated = texts.next().is_some();
-        Ok(Self::Pages { pages, truncated })
-    }
-
-    /// This extraction with its text held to [`MAX_TEXT_BYTES`] and its pages to
-    /// [`MAX_PAGES`], whatever the worker sent.
-    pub(crate) fn capped(self) -> Self {
-        let Self::Pages { pages, truncated } = self else {
-            return self;
-        };
-        let mut capped = Self::of_pages(pages);
-        if let Self::Pages { truncated: cut, .. } = &mut capped {
-            *cut |= truncated;
-        }
-        capped
+        Ok(Self { pages, truncated })
     }
 }
 
@@ -283,6 +303,7 @@ mod tests {
                         String::new(),
                     ],
                     truncated: true,
+                    file_hash: [u8::MAX; 32],
                 },
             },
             FromWorker::Rendered {
@@ -307,31 +328,26 @@ mod tests {
 
     #[test]
     fn the_longest_reply_fits_the_reply_line_however_it_escapes() {
-        let extraction = Extraction::of_pages((0..=MAX_PAGES).map(|_| "\u{1}".repeat(1024)));
-        let Extraction::Pages { pages, truncated } = &extraction else {
-            panic!("pages come back as pages");
+        let reply_of = |texts: PageTexts| FromWorker::Reply {
+            id: u64::MAX,
+            extraction: Extraction::Pages {
+                pages: texts.pages,
+                truncated: texts.truncated,
+                file_hash: [u8::MAX; 32],
+            },
         };
-        assert!(*truncated);
-        assert_eq!(pages.iter().map(String::len).sum::<usize>(), MAX_TEXT_BYTES);
-        let empty = Extraction::of_pages((0..=MAX_PAGES).map(|_| String::new()));
+        let longest = PageTexts::of_pages((0..=MAX_PAGES).map(|_| "\u{1}".repeat(1024)));
+        assert!(longest.truncated);
+        let kept: usize = longest.pages.iter().map(String::len).sum();
+        assert_eq!(kept, MAX_TEXT_BYTES);
+        let empty = PageTexts::of_pages((0..=MAX_PAGES).map(|_| String::new()));
         let image = FromWorker::Rendered {
             id: u64::MAX,
             page: RenderedPage::Image {
                 png_base64: "A".repeat(MAX_PAGE_IMAGE_BASE64_BYTES),
             },
         };
-        let replies = [
-            FromWorker::Reply {
-                id: u64::MAX,
-                extraction,
-            },
-            FromWorker::Reply {
-                id: u64::MAX,
-                extraction: empty,
-            },
-            image,
-        ];
-        for reply in replies {
+        for reply in [reply_of(longest), reply_of(empty), image] {
             assert!(encode(&reply).len() <= MAX_REPLY_LINE_BYTES);
         }
     }

@@ -7,8 +7,8 @@ use tokio::sync::watch;
 use super::*;
 use crate::sqlite::{MessageChunker, SqliteTranscriptStore};
 use crate::{
-    BranchId, MemoryId, MemoryStore, PersistedMessage, PersistedRole, SearchRanking, SessionId,
-    SessionScope, TranscriptStore,
+    BranchId, FileHash, MemoryId, MemoryStore, PersistedMessage, PersistedRole, SearchRanking,
+    SessionId, SessionScope, TranscriptStore,
 };
 
 /// The stamp of a file no test has touched since it was indexed.
@@ -111,6 +111,13 @@ fn unread(path: &Path, stamp: FileStamp) -> UnindexedFile {
 /// `text` as the pages of a file whose format has none.
 fn one_page(text: impl Into<String>) -> Vec<String> {
     vec![text.into()]
+}
+
+/// The empty pages of a PDF whose bytes hash to `file` repeated.
+fn scanned(file: u8) -> EmptyPages {
+    EmptyPages::AwaitTranscription {
+        file: FileHash([file; 32]),
+    }
 }
 
 /// The path, page, page count and byte range of a hit on a document.
@@ -1022,13 +1029,7 @@ async fn a_scanned_documents_pages_are_cut_in_page_order_once_its_last_waiting_p
     let path = PathBuf::from("/notes/scan.pdf");
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
     let extracted = ["", "typed", "", ""].map(String::from).to_vec();
-    let indexed = store.index_document(
-        pass,
-        path.clone(),
-        STAMP,
-        extracted,
-        EmptyPages::AwaitTranscription,
-    );
+    let indexed = store.index_document(pass, path.clone(), STAMP, extracted, scanned(1));
     let [typed] = indexed.await.unwrap()[..] else {
         panic!("only the page with text is cut");
     };
@@ -1109,7 +1110,7 @@ async fn a_file_whose_stamp_changes_drops_its_waiting_pages_and_its_transcriptio
             path.clone(),
             stamp,
             blank,
-            EmptyPages::AwaitTranscription,
+            scanned(u8::try_from(stamp.mtime_ns).unwrap()),
         )
     };
     let waiting = async || store.count_transcriptions().await.unwrap().waiting;
@@ -1424,8 +1425,12 @@ async fn document_vectors_outlast_a_rebuilt_index_until_every_root_is_walked_aga
     let store = SqliteSemanticStore::new(handle.clone());
     let unembedded = index(&store, &roots[0], &[("a.md", "kept on disk")]).await;
     assert!(unembedded.is_empty(), "its vector was waiting");
-    let removed = store.remove_unheld_document_vectors(roots.to_vec());
-    assert_eq!(removed.await.unwrap(), 0, "a root is still to be walked");
+    let removed = store.remove_unheld_vectors_and_readings(roots.to_vec());
+    assert_eq!(
+        removed.await.unwrap().vectors,
+        0,
+        "a root is still to be walked"
+    );
     assert_eq!(stored_vectors(&handle, "document_vectors").await, 3);
 
     let unembedded = index(&store, &roots[1], &[("b.md", "on the drive")]).await;
@@ -1433,11 +1438,148 @@ async fn document_vectors_outlast_a_rebuilt_index_until_every_root_is_walked_aga
         unembedded.is_empty(),
         "the root that came back embeds nothing"
     );
-    let removed = store.remove_unheld_document_vectors(roots.to_vec());
-    assert_eq!(removed.await.unwrap(), 1, "the deleted file's vector");
+    let removed = store.remove_unheld_vectors_and_readings(roots.to_vec());
+    assert_eq!(
+        removed.await.unwrap().vectors,
+        1,
+        "the deleted file's vector"
+    );
     assert_eq!(
         store.count_missing().await.unwrap(),
         UnindexedRows::default()
+    );
+}
+
+/// Read every waiting page as text that names it.
+async fn read_waiting_pages(store: &SqliteSemanticStore) {
+    while let Some(page) = store.next_waiting_page().await.unwrap() {
+        let text = format!("page {} of {}", page.page, page.path.display());
+        let stored = store.store_page_reading(page, PageReading::Text(text));
+        stored.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_kept_reading_fills_the_same_file_at_another_path_and_goes_with_its_last_document() {
+    let (handle, store, _temp) = fresh().await;
+    let pages_to_transcribe = store.pages_to_transcribe();
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let index = |name: &str, file: u8| {
+        let pages = ["", "typed", ""].map(String::from).to_vec();
+        store.index_document(
+            pass,
+            Path::new("/notes").join(name),
+            STAMP,
+            pages,
+            scanned(file),
+        )
+    };
+    let waiting = async || store.count_transcriptions().await.unwrap().waiting;
+
+    index("scan.pdf", 1).await.unwrap();
+    let cover = store.next_waiting_page().await.unwrap().expect("a page");
+    let reading = PageReading::Text("cover".into());
+    store.store_page_reading(cover, reading).await.unwrap();
+    let blank = store.next_waiting_page().await.unwrap().expect("a page");
+    let reading = PageReading::Text(String::new());
+    store.store_page_reading(blank, reading).await.unwrap();
+    assert!(signalled(&pages_to_transcribe));
+
+    let moved = index("moved.pdf", 1).await.unwrap();
+    assert_eq!(moved.len(), 2, "the typed page and the one read before");
+    assert_eq!(waiting().await, 0);
+    assert!(!signalled(&pages_to_transcribe), "no page is left to read");
+    assert_eq!(
+        page_texts(&store, Path::new("/notes/moved.pdf"), 3).await,
+        ["cover", "typed", ""]
+    );
+    index("other.pdf", 2).await.unwrap();
+    assert_eq!(waiting().await, 2, "other bytes have no reading");
+
+    assert!(
+        store
+            .remove_document(Path::new("/notes/scan.pdf"))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        stored_vectors(&handle, "page_readings").await,
+        2,
+        "the moved file still has those bytes"
+    );
+    index("moved.pdf", 3).await.unwrap();
+    assert_eq!(
+        stored_vectors(&handle, "page_readings").await,
+        0,
+        "no document is stored from the bytes that were read"
+    );
+}
+
+#[tokio::test]
+async fn kept_readings_outlast_a_rebuilt_index_until_every_root_is_walked_and_go_with_their_reader()
+{
+    let (handle, store, temp) = fresh().await;
+    let reader = PageReader {
+        model: "owner/ocr:Q8_0".into(),
+        prompt: "Text Recognition:".into(),
+    };
+    assert_eq!(store.adopt_page_reader(&reader).await.unwrap(), None);
+    let roots = ["/notes", "/drive"].map(PathBuf::from);
+    let walk = async |store: &SqliteSemanticStore, root: &Path, scans: &[(&str, u8)]| {
+        let pass = store.begin_index_pass(root).await.unwrap();
+        for (name, file) in scans {
+            let blank = vec![String::new()];
+            let stored = store.index_document(pass, root.join(name), STAMP, blank, scanned(*file));
+            stored.await.unwrap();
+        }
+        store.finish_index_pass(pass).await.unwrap();
+    };
+    walk(&store, &roots[0], &[("kept.pdf", 1)]).await;
+    walk(&store, &roots[1], &[("deleted.pdf", 2)]).await;
+    read_waiting_pages(&store).await;
+    handle.close().await.unwrap();
+    std::fs::remove_file(temp.path().join("index.db")).unwrap();
+
+    let handle = SqliteHandle::open(&temp.path().join("memory.db"))
+        .await
+        .unwrap();
+    let store = SqliteSemanticStore::new(handle.clone());
+    assert_eq!(store.adopt_page_reader(&reader).await.unwrap(), None);
+    walk(&store, &roots[0], &[("kept.pdf", 1)]).await;
+    assert_eq!(
+        store.count_transcriptions().await.unwrap(),
+        TranscriptionCounts::default(),
+        "the page has its text without the model"
+    );
+    assert_eq!(
+        page_texts(&store, Path::new("/notes/kept.pdf"), 1).await,
+        ["page 0 of /notes/kept.pdf"]
+    );
+    let removed = store.remove_unheld_vectors_and_readings(roots.to_vec());
+    assert_eq!(
+        removed.await.unwrap().readings,
+        0,
+        "a root is still to be walked"
+    );
+    walk(&store, &roots[1], &[]).await;
+    let removed = store.remove_unheld_vectors_and_readings(roots.to_vec());
+    assert_eq!(
+        removed.await.unwrap().readings,
+        1,
+        "the deleted file's page"
+    );
+    assert_eq!(stored_vectors(&handle, "page_readings").await, 1);
+
+    let reworded = PageReader {
+        prompt: "OCR:".into(),
+        ..reader.clone()
+    };
+    let replaced = store.adopt_page_reader(&reworded).await.unwrap();
+    assert_eq!(replaced, Some(reader));
+    assert_eq!(
+        stored_vectors(&handle, "page_readings").await,
+        0,
+        "a reading by another model or prompt is not kept"
     );
 }
 
@@ -1822,7 +1964,7 @@ async fn a_write_signals_page_transcription_only_when_it_leaves_a_page_waiting()
         store.index_document(pass, path, STAMP, pages, empty_pages)
     };
 
-    let typed = index("typed.pdf", &["typed"], EmptyPages::AwaitTranscription);
+    let typed = index("typed.pdf", &["typed"], scanned(1));
     typed.await.unwrap();
     assert!(!signalled(&pages_to_transcribe), "every page has text");
     let finished = index("slides.odp", &["", "shown"], EmptyPages::Final);
@@ -1831,11 +1973,7 @@ async fn a_write_signals_page_transcription_only_when_it_leaves_a_page_waiting()
         !signalled(&pages_to_transcribe),
         "empty pages stored as final"
     );
-    let scan = index(
-        "scan.pdf",
-        &["", "", "typed"],
-        EmptyPages::AwaitTranscription,
-    );
+    let scan = index("scan.pdf", &["", "", "typed"], scanned(2));
     scan.await.unwrap();
     assert!(
         signalled(&pages_to_transcribe),

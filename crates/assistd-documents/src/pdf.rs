@@ -11,7 +11,7 @@ use pdf_oxide::PdfDocument;
 use pdf_oxide::converters::ConversionOptions;
 use pdf_oxide::rendering::{RenderOptions, render_page_fit};
 
-use crate::protocol::{Extraction, MAX_PAGE_IMAGE_BYTES, RenderedPage, SkipReason};
+use crate::protocol::{MAX_PAGE_IMAGE_BYTES, PageTexts, RenderedPage, SkipReason};
 
 /// Pixels per inch a page is rendered at.
 const RENDER_DPI: f32 = 150.0;
@@ -32,7 +32,7 @@ const BLANK_LUMA_SPREAD: u8 = 32;
 
 /// The text of each page of the PDF in `bytes` as Markdown, empty for a page
 /// without a text layer.
-pub(crate) fn page_texts(bytes: Vec<u8>) -> Result<Extraction, SkipReason> {
+pub(crate) fn page_texts(bytes: Vec<u8>) -> Result<PageTexts, SkipReason> {
     let document = open(bytes)?;
     let page_count = document.page_count().map_err(failed)?;
     let options = ConversionOptions::default();
@@ -42,7 +42,7 @@ pub(crate) fn page_texts(bytes: Vec<u8>) -> Result<Extraction, SkipReason> {
             .filter(|text| !text.trim().is_empty())
             .unwrap_or_default())
     });
-    Extraction::try_of_pages(texts).map_err(failed)
+    PageTexts::try_of_pages(texts).map_err(failed)
 }
 
 /// Page `page` of the PDF in `bytes`, counted from zero, as a PNG, or blank

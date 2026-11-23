@@ -985,7 +985,8 @@ what exists nowhere else: a key/value `MemoryStore` for durable facts, a
 and undo), and a `TaskStore` for saved tasks and their runs. The other two
 hold the `SemanticStore`: `index.db` the document text and the chunks
 and keyword index of every kind, `vectors.db` the vector of each
-distinct chunk text under the hash of that text. The daemon produces
+distinct chunk text under the hash of that text and the text read from
+each scanned page under the hash of its file. The daemon produces
 either again when it is missing, unreadable or from another schema
 version, and because a vector names no row, an `index.db` built again
 finds its vectors waiting and embeds nothing. The semantic
@@ -1289,7 +1290,11 @@ not found by a search. A page is failed, and the run goes on, when it cannot
 be rendered, when the worker exits over it twice, or when its request fails
 with the model still loaded. A failed page is tried again when its file
 changes or the daemon restarts, which is also when a changed
-`[documents.ocr]` takes effect. A run stops with its page still waiting when
+`[documents.ocr]` takes effect. A reading that did not fail is also kept in
+`vectors.db` under the hash of the file's bytes, which the extraction worker
+reports with the file's pages, and the page's position. A PDF stored later
+from the same bytes, at another path or into an index built again, takes
+those readings for its pages without text and has only the rest wait. A run stops with its page still waiting when
 the model is gone, the model refuses three requests in a row (as one without
 a vision projector refuses every page), the worker is unavailable, the store
 fails, or the loan is refused (no room on the GPU, a download or load that
