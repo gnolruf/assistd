@@ -1,5 +1,6 @@
-//! The schema of `vectors.db`, which holds what the embedding model computed and
-//! names no row of another file: a vector is found by the hash of its text.
+//! The schema of `vectors.db`, which holds what a model computed and names no row of
+//! another file: a vector is found by the hash of its text, a page's reading by the
+//! hash of its file.
 
 use rusqlite::Connection;
 
@@ -35,6 +36,22 @@ CREATE TABLE embedding_meta (
     dim             INTEGER NOT NULL CHECK (dim > 0),
     server_args     TEXT NOT NULL,
     document_prefix TEXT NOT NULL
+) STRICT;
+
+-- The text the OCR model read from one page of a file, by the SHA-256 of the file's
+-- bytes and the page's position in it from 0; empty for a page that shows nothing.
+CREATE TABLE page_readings (
+    file_hash BLOB NOT NULL CHECK (length(file_hash) = 32),
+    page      INTEGER NOT NULL CHECK (page >= 0),
+    text      TEXT NOT NULL,
+    PRIMARY KEY (file_hash, page)
+) STRICT, WITHOUT ROWID;
+
+-- At most one row: the OCR model and prompt every stored reading was read with.
+CREATE TABLE page_reader (
+    id     INTEGER PRIMARY KEY CHECK (id = 0),
+    model  TEXT NOT NULL,
+    prompt TEXT NOT NULL
 ) STRICT;
 ";
 

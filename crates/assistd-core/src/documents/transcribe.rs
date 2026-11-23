@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use assistd_documents::{Extractor, ExtractorError, RenderedPage};
 use assistd_llm::{LlamaServerControl, PageTranscriber, TranscribeError, Transcription};
-use assistd_memory::{DocumentId, DocumentStore, MemoryError, PageReading, WaitingPage};
+use assistd_memory::{
+    DocumentId, DocumentStore, MemoryError, PageReader, PageReading, WaitingPage,
+};
 use assistd_utils::backlog::{
     Backlog, DrainEnd, Page, Pass, Signals, drain, keep_drained, permitted,
 };
@@ -91,6 +93,8 @@ pub struct TranscriptionDeps {
     /// Whether pages may be transcribed now.
     pub permit: watch::Receiver<bool>,
     pub model: BorrowedModel,
+    /// The model and prompt the readings kept from now on are by.
+    pub reader: PageReader,
     pub transcriber: PageTranscriber,
     /// Says whether the server still has the OCR model loaded.
     pub control: LlamaServerControl,
@@ -99,6 +103,23 @@ pub struct TranscriptionDeps {
 }
 
 impl TranscriptionDeps {
+    /// Have the store keep only readings by this model and prompt. Run it before the
+    /// first index pass, which gives pages the readings kept for them.
+    pub async fn adopt_reader(&self) {
+        match self.store.adopt_page_reader(&self.reader).await {
+            Ok(None) => {}
+            Ok(Some(replaced)) => info!(
+                target: "assistd::documents",
+                "dropped every kept page reading; they were read by model={}, prompt={:?}",
+                replaced.model, replaced.prompt
+            ),
+            Err(error) => warn!(
+                target: "assistd::documents",
+                "cannot check which model the kept page readings are by: {error}"
+            ),
+        }
+    }
+
     /// What `page` reads as: nothing when it is blank, and failed when it cannot be
     /// rendered or the model's reply is not its text.
     async fn read(

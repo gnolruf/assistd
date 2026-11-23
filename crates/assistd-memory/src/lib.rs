@@ -26,10 +26,10 @@ pub use relay_traces::{
 };
 pub use semantic::{
     AdjacentChunks, ChunkLocator, ChunkSearch, ChunkSource, ContextChunk, DocumentStore,
-    DocumentText, Embedding, EmbeddingQueue, EmbeddingSpace, EmptyPages, FileStamp, IndexPass,
-    IndexRootCounts, NoSemanticStore, PageReading, RecallStore, SearchHit, SearchRanking,
-    SemanticStore, SessionScope, SkippedRead, SourcePointer, TranscriptionCounts, UnindexedFile,
-    UnindexedRows, WaitingPage,
+    DocumentText, Embedding, EmbeddingQueue, EmbeddingSpace, EmptyPages, FileHash, FileStamp,
+    IndexPass, IndexRootCounts, NoSemanticStore, PageReader, PageReading, RecallStore, SearchHit,
+    SearchRanking, SemanticStore, SessionScope, SkippedRead, SourcePointer, TranscriptionCounts,
+    UnheldRemoved, UnindexedFile, UnindexedRows, WaitingPage,
 };
 pub use sqlite::{
     MemoryStore, MessageChunker, SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore,

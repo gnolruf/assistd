@@ -15,6 +15,7 @@ use assistd_core::{
 use assistd_documents::{Extractor, WorkerCommand, supervise};
 use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_llm::{LlamaServerControl, LlmHealthProbe, OCR_MODEL_ALIAS, PageTranscriber};
+use assistd_memory::PageReader;
 use assistd_tools::{SandboxInfo, ToolsDisabled};
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::readiness::NotReady;
@@ -41,6 +42,7 @@ pub(super) struct DocumentsStartup {
 /// model server.
 struct OcrModel {
     model: BorrowedModel,
+    reader: PageReader,
     transcriber: PageTranscriber,
     control: LlamaServerControl,
 }
@@ -56,6 +58,10 @@ impl OcrModel {
         };
         let addr = config.model.listen_addr();
         let prompt = config.documents.ocr.prompt.clone();
+        let reader = PageReader {
+            model: source.to_owned(),
+            prompt: prompt.clone(),
+        };
         let transcriber = PageTranscriber::new(addr, Some(api_key), prompt)
             .context("failed to construct the OCR model's client")?;
         let control = LlamaServerControl::new(addr, Some(api_key), Some(Arc::clone(health_probe)))
@@ -65,6 +71,7 @@ impl OcrModel {
                 source: source.to_owned(),
                 served_as: OCR_MODEL_ALIAS.to_owned(),
             },
+            reader,
             transcriber,
             control,
         }))
@@ -147,10 +154,14 @@ async fn run(startup: DocumentsStartup, state: Arc<AppState>, shutdown: watch::R
         presence: Arc::clone(&state.subsystems.presence),
         permit: state.permit(Work::PageTranscription),
         model: ocr.model,
+        reader: ocr.reader,
         transcriber: ocr.transcriber,
         control: ocr.control,
         max_file_bytes: state.config.documents.max_file_bytes(),
     });
+    if let Some(transcription) = &transcription {
+        transcription.adopt_reader().await;
+    }
     let index = &state.subsystems.document_index;
     tokio::join!(
         supervise(worker, Arc::clone(extractor), shutdown.clone()),

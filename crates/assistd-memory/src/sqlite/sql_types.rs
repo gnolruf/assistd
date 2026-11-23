@@ -1,13 +1,14 @@
 //! SQLite conversions for the typed columns: row ids, seqs, and role, chunker and
-//! chunk kind codes as `INTEGER`, session ids as hyphenated UUID `TEXT`.
+//! chunk kind codes as `INTEGER`, session ids as hyphenated UUID `TEXT`, file hashes
+//! as `BLOB`.
 
 use rusqlite::ToSql;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 
 use crate::chunking::Chunker;
 use crate::{
-    BranchId, ChunkId, ChunkSource, DocumentId, MemoryId, MessageId, PersistedRole, Seq, SessionId,
-    SkippedRead, TurnId,
+    BranchId, ChunkId, ChunkSource, DocumentId, FileHash, MemoryId, MessageId, PersistedRole, Seq,
+    SessionId, SkippedRead, TurnId,
 };
 
 use super::chunks::kind_code;
@@ -44,6 +45,12 @@ impl FromSql for SessionId {
             .as_str()?
             .parse()
             .map_err(|e| FromSqlError::Other(Box::new(e)))
+    }
+}
+
+impl ToSql for FileHash {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(&self.0[..]))
     }
 }
 

@@ -311,13 +311,37 @@ pub struct UnindexedFile {
     pub skipped: Option<SkippedRead>,
 }
 
+/// SHA-256 of a file's bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileHash(pub [u8; 32]);
+
 /// What a document's pages without text are stored as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmptyPages {
     /// As they are: their file has no more to give.
     Final,
-    /// As waiting for transcription: each is an image an OCR model may read.
-    AwaitTranscription,
+    /// With the text kept as read from that page of `file` before, and otherwise as
+    /// waiting for transcription: each is an image an OCR model may read.
+    AwaitTranscription { file: FileHash },
+}
+
+/// What reads the pages that wait for transcription. A reading is kept only while
+/// the reader that made it is the one in use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageReader {
+    /// The OCR model, as `<owner>/<repo>:<quant>`.
+    pub model: String,
+    /// The text sent after each page image.
+    pub prompt: String,
+}
+
+/// What a comparison against the stored documents removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnheldRemoved {
+    /// Vectors of texts no document chunk holds.
+    pub vectors: u64,
+    /// Readings of pages of files no document is stored from.
+    pub readings: u64,
 }
 
 /// A page waiting for transcription.
@@ -446,9 +470,14 @@ pub trait DocumentStore: fmt::Debug + Send + Sync + 'static {
     /// Forget every skipped file, returning how many, so the next pass reads each again.
     async fn forget_skipped_files(&self) -> Result<u64>;
 
+    /// Record `reader` as the one every kept reading is by. When another was recorded,
+    /// drop every reading and return that one. Must complete before a document is
+    /// stored or a page read with `reader`.
+    async fn adopt_page_reader(&self, reader: &PageReader) -> Result<Option<PageReader>>;
+
     /// Store `pages`, in file order, as the document at `path`, seen by `pass`, replacing
-    /// its chunks and dropping what was transcribed of it before and any skip recorded
-    /// for it. No chunk spans two pages. Returns the chunks whose text has no vector.
+    /// its chunks and the state of its transcription and dropping any skip recorded for
+    /// it. No chunk spans two pages. Returns the chunks whose text has no vector.
     async fn index_document(
         &self,
         pass: IndexPass,
@@ -466,10 +495,10 @@ pub trait DocumentStore: fmt::Debug + Send + Sync + 'static {
     /// `None` when none waits.
     async fn next_waiting_page(&self) -> Result<Option<WaitingPage>>;
 
-    /// Record `reading` of `page` with its text as the page's; ignored when the page
-    /// no longer waits or its file was indexed again. Once no page of the document
-    /// waits, its pages that have no chunk are cut, and the new chunks whose text has
-    /// no vector returned.
+    /// Record `reading` of `page` with its text as the page's, kept also for its file's
+    /// bytes; ignored when the page no longer waits or its file was indexed again. Once
+    /// none of the document's pages waits, the uncut ones are cut and the new chunks
+    /// whose text has no vector returned.
     async fn store_page_reading(
         &self,
         page: WaitingPage,
@@ -490,13 +519,17 @@ pub trait DocumentStore: fmt::Debug + Send + Sync + 'static {
     /// that walked only those parts of its root.
     async fn finish_index_pass_under(&self, pass: IndexPass, paths: Vec<PathBuf>) -> Result<u64>;
 
-    /// Remove the vectors of the texts no document chunk holds, returning how many;
-    /// none until a pass over the whole of each of `roots` has finished since the
-    /// index was last built, as a root not yet walked has chunks still to be cut.
-    async fn remove_unheld_document_vectors(&self, roots: Vec<PathBuf>) -> Result<u64>;
+    /// Remove the vectors of texts no document chunk holds and the readings of files no
+    /// document is stored from; none until a pass over the whole of each of `roots` has
+    /// finished since the index was built, as a root not yet walked has documents to store.
+    async fn remove_unheld_vectors_and_readings(
+        &self,
+        roots: Vec<PathBuf>,
+    ) -> Result<UnheldRemoved>;
 
-    /// Remove the document at `path` with its chunks, and the vectors of the texts
-    /// only they held; `false` when none was indexed.
+    /// Remove the document at `path` with its chunks, the vectors of the texts only
+    /// they held, and the readings of its pages unless another document is stored
+    /// from the same bytes; `false` when none was indexed.
     async fn remove_document(&self, path: &Path) -> Result<bool>;
 
     /// Every registered index root.
@@ -599,6 +632,9 @@ impl DocumentStore for NoSemanticStore {
     async fn forget_skipped_files(&self) -> Result<u64> {
         Ok(0)
     }
+    async fn adopt_page_reader(&self, _reader: &PageReader) -> Result<Option<PageReader>> {
+        Ok(None)
+    }
     async fn index_document(
         &self,
         _pass: IndexPass,
@@ -634,8 +670,11 @@ impl DocumentStore for NoSemanticStore {
     async fn finish_index_pass_under(&self, _pass: IndexPass, _paths: Vec<PathBuf>) -> Result<u64> {
         Ok(0)
     }
-    async fn remove_unheld_document_vectors(&self, _roots: Vec<PathBuf>) -> Result<u64> {
-        Ok(0)
+    async fn remove_unheld_vectors_and_readings(
+        &self,
+        _roots: Vec<PathBuf>,
+    ) -> Result<UnheldRemoved> {
+        Ok(UnheldRemoved::default())
     }
     async fn remove_document(&self, _path: &Path) -> Result<bool> {
         Ok(false)

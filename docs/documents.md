@@ -176,6 +176,11 @@ most the page in progress. A document's transcribed pages become
 searchable once its last waiting page is done. A page the model could
 not read is tried again when its file changes or the daemon restarts.
 
+What the model read is kept for the file's bytes, not its path: a scan
+you rename, move or copy has its text at once, and so does every scan
+after the index is rebuilt. The text is dropped when no indexed file has
+those bytes any more, and all of it when `model` or `prompt` changes.
+
 `prompt` is the text sent with each page image. The default suits the
 model above; another model's card gives its own.
 
@@ -302,7 +307,8 @@ assistd documents search lease renewal terms
   documents. `memory.db`, beside it, holds your sessions and memories
   and none of the indexed text. `vectors.db` holds the vectors computed
   from every chunk, of documents and sessions alike, which do not give
-  the text back but do reflect it. Both are produced again when they are
+  the text back but do reflect it, and the text the OCR model read from
+  scanned pages, until their file is deleted or changed. Both are produced again when they are
   missing, so a backup needs only `memory.db`. Passwords and keys are safer kept out of indexed folders
   than left to the `sensitive` rule.
 - **Nothing leaves the machine.** The worker that parses files has no

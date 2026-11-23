@@ -212,26 +212,28 @@ impl IndexPasses {
             }
             index_whole_root(deps, index, root, &guards, shutdown).await;
         }
-        self.remove_unheld_vectors(deps).await;
+        self.remove_unheld(deps).await;
         index.end_round();
     }
 
-    /// Remove the vectors of texts no indexed document holds any more, which the
-    /// store does only once every root has been walked.
-    async fn remove_unheld_vectors(&self, deps: &IndexDeps) {
+    /// Remove the vectors of texts no indexed document holds any more and the
+    /// readings of pages of files none is stored from, which the store does only
+    /// once every root has been walked.
+    async fn remove_unheld(&self, deps: &IndexDeps) {
         let roots = self.roots.iter().map(|root| root.path().to_path_buf());
         match deps
             .store
-            .remove_unheld_document_vectors(roots.collect())
+            .remove_unheld_vectors_and_readings(roots.collect())
             .await
         {
-            Ok(vectors) => debug!(
+            Ok(removed) => debug!(
                 target: "assistd::documents",
-                "removed {vectors} vector(s) of text no indexed document holds"
+                "removed {} vector(s) and {} page reading(s) no indexed document holds",
+                removed.vectors, removed.readings
             ),
             Err(error) => warn!(
                 target: "assistd::documents",
-                "cannot remove the vectors of text no indexed document holds: {error}"
+                "cannot remove the vectors and page readings no indexed document holds: {error}"
             ),
         }
     }

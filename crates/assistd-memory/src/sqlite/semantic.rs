@@ -19,14 +19,15 @@ use tokio::sync::Notify;
 use crate::{
     AdjacentChunks, ChunkId, ChunkLocator, ChunkSearch, ChunkSource, ContextChunk, DocumentId,
     DocumentStore, DocumentText, Embedding, EmbeddingQueue, EmbeddingSpace, EmptyPages, FileStamp,
-    IndexPass, IndexRootCounts, MessageId, PageReading, RecallStore, Result, SearchHit,
-    SkippedRead, TranscriptionCounts, UnindexedFile, UnindexedRows, WaitingPage,
+    IndexPass, IndexRootCounts, MessageId, PageReader, PageReading, RecallStore, Result, SearchHit,
+    SkippedRead, TranscriptionCounts, UnheldRemoved, UnindexedFile, UnindexedRows, WaitingPage,
 };
 
 use crate::chunking::text_hash;
 
 use super::chunks::{CHUNK_SOURCES, kind_code, vector_table};
-use super::connection::SqliteHandle;
+use super::connection::{Erasing, SqliteHandle};
+use super::page_readings;
 use super::timestamp::timestamp_at;
 
 mod documents;
@@ -331,6 +332,19 @@ impl DocumentStore for SqliteSemanticStore {
             .await
     }
 
+    async fn adopt_page_reader(&self, reader: &PageReader) -> Result<Option<PageReader>> {
+        let reader = reader.clone();
+        self.handle
+            .write_index_erasing("adopt_page_reader", move |tx| {
+                let replaced = page_readings::adopt_reader(tx, &reader)?;
+                Ok(Erasing {
+                    erased: replaced.is_some(),
+                    value: replaced,
+                })
+            })
+            .await
+    }
+
     async fn index_document(
         &self,
         pass: IndexPass,
@@ -342,7 +356,7 @@ impl DocumentStore for SqliteSemanticStore {
         let stored = self
             .handle
             .write_index("index_document", move |tx| {
-                documents::store_document(tx, pass, &path, stamp, &pages, empty_pages)
+                documents::store_document(tx, pass, &path, stamp, pages, empty_pages)
             })
             .await?;
         self.signal_chunks(&stored.unembedded);
@@ -415,10 +429,13 @@ impl DocumentStore for SqliteSemanticStore {
             .await
     }
 
-    async fn remove_unheld_document_vectors(&self, roots: Vec<PathBuf>) -> Result<u64> {
+    async fn remove_unheld_vectors_and_readings(
+        &self,
+        roots: Vec<PathBuf>,
+    ) -> Result<UnheldRemoved> {
         self.handle
-            .write_index("remove_unheld_document_vectors", move |tx| {
-                documents::remove_unheld_vectors(tx, &roots)
+            .write_index("remove_unheld_vectors_and_readings", move |tx| {
+                documents::remove_unheld(tx, &roots)
             })
             .await
     }

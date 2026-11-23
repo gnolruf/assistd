@@ -29,12 +29,15 @@ CREATE TABLE index_roots (
 
 -- An indexed file: the file's stamp, the hash of its pages in order, the chunking
 -- it was cut with, and the root's pass that last saw it. `chunker` is 0 character
--- windows, 1 packed paragraphs.
+-- windows, 1 packed paragraphs. `file_hash` is the SHA-256 of the file's bytes, which
+-- is what `vectors.db` keeps the readings of its pages under; NULL for a file none of
+-- whose pages a model may read.
 CREATE TABLE documents (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     root_id       INTEGER NOT NULL REFERENCES index_roots(id) ON DELETE CASCADE,
     path          BLOB NOT NULL UNIQUE CHECK (length(path) > 0),
     content_hash  BLOB NOT NULL CHECK (length(content_hash) = 32),
+    file_hash     BLOB CHECK (length(file_hash) = 32),
     mtime_ns      INTEGER NOT NULL,
     size          INTEGER NOT NULL CHECK (size >= 0),
     chunker       INTEGER NOT NULL,
@@ -44,6 +47,25 @@ CREATE TABLE documents (
     indexed_at    INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX idx_documents_root ON documents(root_id);
+CREATE INDEX idx_documents_file_hash ON documents(file_hash) WHERE file_hash IS NOT NULL;
+
+-- The files a write removed a document of, or stored other bytes in place of, by
+-- `documents.file_hash`. The write that fills it empties it before it commits.
+CREATE TABLE removed_file_hashes (
+    hash BLOB PRIMARY KEY CHECK (length(hash) = 32)
+) STRICT, WITHOUT ROWID;
+
+CREATE TRIGGER document_removed AFTER DELETE ON documents
+WHEN old.file_hash IS NOT NULL
+BEGIN
+    INSERT INTO removed_file_hashes (hash) VALUES (old.file_hash) ON CONFLICT DO NOTHING;
+END;
+
+CREATE TRIGGER document_file_replaced AFTER UPDATE OF file_hash ON documents
+WHEN old.file_hash IS NOT NULL AND old.file_hash IS NOT new.file_hash
+BEGIN
+    INSERT INTO removed_file_hashes (hash) VALUES (old.file_hash) ON CONFLICT DO NOTHING;
+END;
 
 -- A file that was read and left nothing to index, with the stamp it had and the
 -- root's pass that last saw it; no document is stored at its path. `cause` is
@@ -70,7 +92,8 @@ CREATE TABLE document_pages (
 
 -- A page that had no text when its file was read and is an image a model can read.
 -- `state` is 0 waiting for the OCR model, 1 read, its page then holding what the model
--- found, 2 failed. Rows last until the file is indexed again.
+-- found, now or of the same file before, 2 failed. Rows last until the file is indexed
+-- again.
 CREATE TABLE page_transcriptions (
     document_id INTEGER NOT NULL,
     page        INTEGER NOT NULL,

@@ -1,10 +1,11 @@
-//! SQLite implementations of the stores, sharing one [`SqliteHandle`] onto the two
+//! SQLite implementations of the stores, sharing one [`SqliteHandle`] onto the three
 //! database files.
 
 mod chunks;
 mod connection;
 mod memories;
 mod message_chunker;
+mod page_readings;
 mod reconcile;
 mod rows;
 mod semantic;
