@@ -2,8 +2,9 @@
 
 `assistd` is a Rust workspace split into fourteen library crates plus a
 binary. This page maps the crates, the external processes the daemon
-supervises, the path a user query takes from keypress to spoken
-reply, and the path a file takes into the document index.
+supervises, what decides who runs when, the path a user query takes
+from keypress to spoken reply, and the path a file takes into the
+document index.
 
 ## System overview
 
@@ -62,9 +63,9 @@ flowchart TB
 | `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | every other `assistd-*` crate                                                    |
 | `assistd-chat`   | The `assistd chat` terminal window and the `assistd settings` panel, a client that only reads and writes the socket. | `config`, `ipc`, `utils`                                                         |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
-| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with the policy task that drives it from idle time and GPU contention, listen dispatcher, socket server, document index passes and the watches between them, page transcription while drowsy, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
+| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, admission (the queue that grants every model lane, and the permits for background work), presence machine with the policy task that drives it from idle time and GPU contention, listen dispatcher, socket server, document index passes and the watches between them, page transcription while drowsy, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-documents` | Document text extraction (text, HTML, PDF, office files, e-books) and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
-| `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
+| `assistd-embed`  | Embedding HTTP client + the worker that drains the semantic store's rows without a vector, as three backlogs; launch spec for its llama-server. | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec and presets file + control plane + `PageTranscriber` for the OCR model. | `config`, `ipc`, `utils`                                                         |
 | `assistd-mcp`    | Stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools.  | `config`, `ipc`, `tools`, `utils`                                                |
@@ -97,6 +98,214 @@ always includes the daemon and the IPC client subcommands; `tray` and
 `chat` are optional features layered on top, never built standalone. The
 chat's code is the `assistd-chat` crate, which the `chat` feature pulls in
 and which depends on no daemon-side crate.
+
+## Who runs when
+
+Everything in the daemon that waits its turn waits in one of two
+mechanisms, and a third task decides whether the model is loaded at all.
+
+- **Admission** (`assistd-core`'s `admission` module, behind
+  `TurnAdmission`). Whatever needs the main model is an entry in one
+  queue, and one function grants entries a model lane.
+- **Backlogs** (`assistd-utils`'s `backlog` module). Background work is
+  the stored rows that lack their result, drained by one loop that the
+  write adding a row wakes. A class of it that would compete with the
+  user waits for a permit.
+- **The presence policy** (`assistd-core`'s `presence_policy` module)
+  unloads and stops the model when it is idle or another process needs
+  the GPU.
+
+All three read the same facts. Admission assembles them into one value,
+`Activity`, and every rule about who may run is a method on it.
+
+A new kind of work belongs to one of the two mechanisms:
+
+| The work…                                                        | It is…                                                              |
+|------------------------------------------------------------------|---------------------------------------------------------------------|
+| sends requests to the main model                                 | an entry in the queue, holding a `LaneLease` for as long as it decodes |
+| computes a result for stored rows, with nobody waiting on it     | a `Backlog` on the shared loop                                      |
+| is a backlog that takes CPU, VRAM or the server from the user    | a backlog with a new `Work` class and its clause in `Activity::permits` |
+
+Nothing takes a server slot without a lease, and background work keeps
+no list of jobs in memory, runs on no timer of its own and is handed
+nothing by the code that creates it. A request made inside a turn (a
+relay's sub-agent, the safety judge) is part of that turn and has no
+entry of its own.
+
+### Activity and permits
+
+`Activity` (`crates/assistd-core/src/admission/activity.rs`) is who is
+using the model at one moment:
+
+- the user's interaction: `Idle`, `Talking` while a user turn waits or
+  runs, or `Quiet` between the last turn's end and the end of its quiet
+  time;
+- what holds each model lane that is held;
+- how many lanes there are, the `total_slots` the server reports;
+- presence's settled state: `Active`, `Drowsy`, or `Sleeping` with its
+  cause.
+
+An `ActivityWatch` reads the four from their `watch` channels and
+resolves when any of them changes, so whoever applies a rule applies it
+again on every change. The rules:
+
+| Rule                 | Answers                                                                                                   | Read by                                         |
+|----------------------|-----------------------------------------------------------------------------------------------------------|-------------------------------------------------|
+| `waiting_runs_held`  | Why waiting task runs may not start: a sleep for the GPU, else the user's interaction on the only lane.   | The queue, and the dispatcher that marks runs `Suspended`. |
+| `run_must_yield`     | Whether a run on the main lane gives it up now: under `interrupt`, while the interaction holds the queue. | The run's `RunLane`, before and during each model step. |
+| `interaction_hold`   | The hold a client is shown, with when it lifts once the interaction is quiet.                             | The `TaskQueue` snapshot.                       |
+| `permits(work)`      | Whether a class of background work may run.                                                               | The permit of each class.                       |
+
+Every user turn opens the user's interaction or continues it. It stays
+open through its quiet time: `tasks.resume_after_idle_secs` after the
+last reply and its speech finished, or the wake word's follow-up window
+if that is longer. `/new`, `ChatClosed` and `TaskQueueOp::Resume` end it
+at once. The interaction only holds task runs back when there is one
+lane; with more, runs have lanes of their own.
+
+A class of background work that waits for the machine is a `Work`:
+
+| `Work`              | Its permit is open…                                                                                                              | Waited on by                                   |
+|---------------------|----------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------|
+| `DocumentEmbedding` | unless the interaction is open, a task run holds a lane, or the daemon sleeps for the GPU. `documents.embed_during_interaction`, `embed_during_tasks` and `embed_during_gpu_sleep` each waive one of the three. | The document chunk backlog, before each batch. |
+| `PageTranscription` | while presence has settled in `Drowsy`.                                                                                          | The waiting-page backlog, before the loan and before each page. |
+
+`TurnAdmission::permit(work)` returns a `watch::Receiver<bool>` that a
+supervised task keeps at what `permits` says until its receivers are
+dropped. A crate below `assistd-core` is handed the receiver and never
+sees `Activity`.
+
+### The queue
+
+There is one lane per server slot, probed from `/props` with vision
+support and probed again after a reload. Lane 0 is the main lane, on the
+main backend's slot. The other lanes are for task runs, each pinned to
+its slot with `id_slot`. `TaskQueue`
+(`crates/assistd-core/src/admission/queue.rs`) records what holds each
+lane and everything waiting for one, in the order it starts. A
+`LaneLease` is the only way to hold a lane, and dropping it frees the
+lane.
+
+| Entry          | Goes in                                                                                   | Takes                                          | May start when                                           |
+|----------------|-------------------------------------------------------------------------------------------|------------------------------------------------|----------------------------------------------------------|
+| User turn      | Behind the waiting turns and refines, ahead of the runs. Under `after_queue`, see below.  | The main lane.                                 | It is free.                                              |
+| Prompt refine  | Behind the waiting turns and refines, ahead of the runs.                                  | The main lane.                                 | It is free.                                              |
+| Task run       | Last. A run that gave up its lane, to a confirmation or to the user, goes back in first.  | The main lane when it is the only one, else another lane. | Its lane is free, the queue is not paused, and `waiting_runs_held` gives no reason. |
+| Session title  | Last.                                                                                     | The main lane.                                 | No other entry takes the main lane now, and presence has settled in `Active`. |
+
+`[tasks] interruption` places a user turn that arrives while a run holds
+the only lane. Under `interrupt` and `after_task` the turn goes in at
+the front, and the interaction opens as it arrives, which holds the
+waiting runs. `interrupt` also makes the run yield, through
+`run_must_yield`. Under `after_queue`, a turn that arrives with the
+interaction closed, and a run on the main lane or turns already waiting,
+goes in behind the turns already waiting, or last when none is, and
+the interaction opens once it has the lane. The
+[task run walk-through](#agent-loop-assistd-coreagent) covers what a
+yielding run does.
+
+`startable` is the one function that says which waiting entries may take
+which lane. `grant_lanes` applies it after every change to the queue (an
+entry added, a lane freed, a pause lifted), and the task dispatcher
+applies it again whenever the `Activity` changes. A waiting entry gets
+its lease over a channel, and dropping the waiting end takes the entry
+out of the queue. A run granted its first lane goes to the dispatcher,
+which starts it.
+
+A lease is not the model: the holder wakes the daemon next. A user turn,
+a refine and a task run take a request guard as a query does, which
+loads the model if it is not loaded. A title only goes ahead if the
+daemon is still `Active`, so it never wakes it. A user turn takes the
+user-turn lock last, so a branch operation never waits for a lane.
+
+`EventBody::TaskQueue` broadcasts the runs, the waiting user turns, each
+lane's holder, the pause flag and the interaction's hold. Refines and
+titles are not listed.
+
+### Backlogs
+
+A `Backlog` (`crates/assistd-utils/src/backlog.rs`) is one kind of
+stored work. Its contract has four parts.
+
+- **The listing.** `page_after(after)` returns the next page of rows
+  that still lack their result, in a fixed order, after the row named.
+  An empty page means none is left. The listing is a query on the
+  store, so a restart loses nothing and resumes where the rows say.
+- **Doing a page.** `do_page` records each row's outcome where the row
+  is stored: its result, or a mark that it cannot be done. Either takes
+  the row out of the listing. It returns how many rows it left with
+  neither, for a later pass. Its error is for what the backlog needs
+  being away (a server, the store), never for a row.
+- **A pass.** `drain` goes through the listing once. Before each page it
+  waits for the backlog's permit, if it has one. It meets each row once
+  whatever became of it, so a failing row never holds back the rows
+  behind it. It ends when the listing runs out, when a wake arrives
+  between pages, at shutdown, or with the backlog's error.
+- **The wake.** The store signals a `Notify` after each committed write
+  that leaves a row lacking its result, whoever made the write.
+  `keep_drained` runs a pass at start and after every wake. A pass that
+  failed or left rows is run again after a delay that grows with how
+  many passes in a row have ended so.
+
+| Backlog          | A row is                                             | Page | Permit              | Cannot be done                    | Wake                   | Retry               |
+|------------------|------------------------------------------------------|------|---------------------|-----------------------------------|------------------------|---------------------|
+| Message chunks   | a chunk of a message with no vector                  | 32   | none                | marked refused (a `NULL` vector)  | `rows_to_embed`        | 1 s, doubling to 60 |
+| Memories         | a saved memory with no vector                        | 32   | none                | marked refused                    | `rows_to_embed`        | the same            |
+| Document chunks  | a chunk of an indexed document with no vector        | 32   | `DocumentEmbedding` | marked refused                    | `rows_to_embed`        | the same            |
+| Waiting pages    | a PDF page without text, recorded as waiting         | 1    | `PageTranscription` | recorded as failed                | `pages_to_transcribe`  | 5 minutes           |
+
+The embedding worker drains its three backlogs in that order in one
+pass, so a wake in the middle of the document chunks sends it back to
+the messages first. Page transcription drains inside a loan of the
+drowsy server and lists again after a wake without giving the loan up.
+What a refused row or a failed page is, and what tries it again, is in
+[memory](#memory-assistd-memory--assistd-embed) and
+[page transcription](#page-transcription-assistd-core).
+
+A document index pass is not a backlog: it finds its work by walking a
+folder, and nothing is stored to list until it has. It is what fills the
+last two.
+
+### Presence policy
+
+One task (`crates/assistd-core/src/presence_policy.rs`) moves presence
+without being asked. It takes one transition at a time, from two
+sources.
+
+**Idleness.** The idle clock is one stamp on the presence manager, set
+when a use of the model begins and when it ends. The policy's own
+transitions do not set it. `Active` becomes `Drowsy` once the stamp is
+`sleep.idle_to_drowsy_mins` old, and `Drowsy` becomes `Sleeping`, with
+the cause `Idle`, once it is `idle_to_sleep_mins` old. With the first at
+`0`, `Active` goes straight to `Sleeping` at the second; with both at
+`0` nothing idles. A step is given up when a request guard is out, and
+the policy then waits for the stamp to move, which the end of that use
+does. A step that fails for any other reason is tried again after ten
+seconds.
+
+The idle clock is not the interaction's quiet time. The quiet time is
+seconds long and holds task runs and document embedding back; the idle
+clock is minutes long and unloads the model.
+
+**The GPU.** With `sleep.gpu_monitor_enabled` and an NVIDIA GPU, the
+policy polls NVML every five seconds. Another process crowds the model
+when less than `sleep.gpu_headroom_mb` of VRAM is free and the VRAM held
+outside assistd has grown by 100 MiB or more over the least seen since
+the model came up. The daemon, `Active` or `Drowsy`, then sleeps with
+the cause `GpuBusy`, once the requests in flight have finished. While it
+sleeps for the GPU:
+
+- waiting task runs are `Suspended(GpuBusy)` and are not started, so
+  none wakes the model;
+- the `DocumentEmbedding` permit is closed, unless
+  `documents.embed_during_gpu_sleep` is set.
+
+Any wake ends it: a query, `assistd wake`, or, with
+`sleep.gpu_auto_wake`, the policy itself once the model at its measured
+size fits beside the headroom. A wake that would not fit is refused, and
+the daemon stays asleep for the GPU. A sleep with any other cause is
+only ended by a use of the model or a request. After ten failed polls in
+a row the policy polls every five minutes.
 
 ## Subsystem walk-throughs
 
@@ -154,10 +363,9 @@ Presence decides whether the model is loaded: `Active` has it loaded,
 its cache holds `model.name`; if not, it has the router download it
 (`POST /models`), follows the bytes on `GET /models/sse` and reports
 `Downloading` with them. `model.ready_timeout_secs` bounds how long the
-download may go without new bytes, not the download. The presence policy task moves it down
-by the idle periods and GPU headroom under `[sleep]`, counting idle time from when a
-use of the model last began or ended, and a query wakes it. `Sleeping` records why,
-and only a sleep for the GPU is woken by the policy once the model fits again.
+download may go without new bytes, not the download. The
+[presence policy](#presence-policy) moves it down by the idle periods and GPU
+headroom under `[sleep]`, and a query wakes it. `Sleeping` records why.
 
 The router gives every model it loads the flags on its own command line, and
 a flag given there overrides a preset. So `model.context_length` is not passed
@@ -380,17 +588,11 @@ A saved task runs through the same loop with no user present.
 returning at once. The queue is FIFO, its order kept in `task_runs.queue_pos`;
 at startup runs still queued are reloaded in that order, while any left
 running are recorded as failed, since their side effects may have happened.
-There is one lane per slot the server reports as `total_slots` in
-`/props`, probed with vision support and re-probed after a reload. The queue
-records what holds each lane, and a `LaneLease` is the only way to hold one:
-a user turn, a task prompt's refine, a session title and a task run each wait
-in the queue as an entry, and one function says which entries may take a lane,
-applied after every change. Lane 0 is the main backend's, so with one slot a
-run waits out the user's turn and holds the next one off. With more slots, runs
-take lanes 1..N, each pinned to its slot with `id_slot`, and the main
-backend stays on slot 0. A dispatcher on the `TaskRunner` starts each run granted
-its first lane. While the daemon sleeps for the GPU, until any wake, waiting runs are `Suspended(GpuBusy)` instead of waking the
-model. `TaskRequest::Queue` moves, cancels, pauses and resumes the queue (the pause is
+It is the queue every use of the model waits in, and
+[who runs when](#the-queue) says how it grants lanes: with one server slot a
+run shares the main lane with the user's turns, and with more it takes a lane
+and slot of its own. A dispatcher on the `TaskRunner` starts each run granted
+its first lane. `TaskRequest::Queue` moves, cancels, pauses and resumes the queue (the pause is
 kept in the `task_queue` table, so it outlasts a restart), and
 `EventBody::TaskQueue` broadcasts the items, lane holders and pause flag after each
 change and greets every new subscriber.
@@ -467,8 +669,9 @@ latest runs with their trigger, times, final reply and session. The task's
 prompt is the only instruction a run gets; no plan is stored on the task.
 
 With one lane, a user message that finds a run on it follows
-`[tasks] interruption`. Under `interrupt` the run's turn sees the user's interaction
-open through its `RunLane` and yields at its next model step. A step in flight is
+`[tasks] interruption`, which places the turn in [the queue](#the-queue) and
+says whether the run must yield. Under `interrupt` the run's turn reads that
+rule through its `RunLane` and yields at its next model step. A step in flight is
 cancelled and announced as `StatusKind::YieldedToUser`, so its partial output is
 dropped. A tool call in flight finishes first. A relay in flight is cancelled and
 rerun from its arguments, since its effects stay in its quarantine. The yielded run
@@ -479,11 +682,9 @@ waiting, which the dispatcher hands the main lane in its turn;
 `TaskQueueOp::CancelTurn` drops it. A turn made to wait either way is told
 `EventBody::Queued` with how many items are ahead of it, which the TUI shows in
 place of "Generating…" until the turn has the model. Every user turn opens the
-`UserInteraction`, which holds waiting runs as `Suspended(UserInteraction)`. The
-interaction ends once no turn has arrived for `resume_after_idle_secs` after the
-last reply and its speech finished, or the wake word's follow-up window if longer.
-`/new`, `ChatClosed` and `TaskQueueOp::Resume` end it at once. Its hold, and when
-it lifts, rides on the `TaskQueue` snapshot.
+user's interaction, which holds waiting runs as `Suspended(UserInteraction)`
+until it ends ([activity and permits](#activity-and-permits)). Its hold, and
+when it lifts, rides on the `TaskQueue` snapshot.
 
 ### Plan mode (`assistd-core::Planner`)
 
@@ -799,10 +1000,10 @@ shows what was kept, and `assistd memory` lists and removes memories.
 Saving through the `remember` tool inserts the K/V row, and each user
 or assistant message is chunked in the transaction that saves it. With
 `embedding.enabled = false` no chunks are cut; the next start with
-embedding on cuts them for the messages stored meanwhile. The
-database is the embedding queue: a memory or chunk with no row in its
+embedding on cuts them for the messages stored meanwhile. Embedding
+is a [backlog](#backlogs): a memory or chunk with no row in its
 embeddings table is pending. The store signals after each committed
-write that leaves a row pending, whoever made it, and the signal wakes
+write that leaves a row pending, and the signal wakes
 a background task, which pages through the pending rows, sends batches to the embedding server
 (a second, smaller llama-server child process configured under
 `[embedding]`), and inserts the resulting vectors into the semantic
@@ -842,26 +1043,15 @@ embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
 meantime stays pending and is embedded by a later pass.
 
-The worker is three backlogs on `assistd-utils`'s `backlog` loop, drained
-in one pass: message chunks, memories, then document chunks. The first
-two are few and feed recall, so every pass embeds them first and at once. Document chunks
-can number in the hundreds of thousands and the embedding server takes
-every CPU thread it is given, so each batch of them waits for a permit that
-admission publishes (`TurnAdmission::permit(Work::DocumentEmbedding)`): held
-unless the user's interaction is open (the quiet time after a reply
-included), a task run holds a model lane, or the daemon sleeps for another
-process's VRAM. `documents.embed_during_interaction`, `embed_during_tasks`
-and `embed_during_gpu_sleep` each let document chunks through one of those
-states. The permit is read between batches, so a turn waits for at most the
-batch in flight, and a wake in the middle of the document backlog sends the
-worker back to the messages first. Drowsy and Sleeping leave the permit
-held; the embedding server stays up in both.
-
-Every class of background work that waits for the machine is a `Work`, and
-`Activity::permits` is the one function that says whether a class may run,
-from the same snapshot the task queue is scheduled from. `permit` returns a
-`watch::Receiver<bool>` that a supervised task keeps current until its
-receivers are dropped, so a crate below `assistd-core` can wait on it.
+The worker is three backlogs drained in one pass: message chunks,
+memories, then document chunks. The first two are few and feed recall, so
+every pass embeds them first and at once. Document chunks can number in the
+hundreds of thousands and the embedding server takes every CPU thread it is
+given, so each batch of them waits for the `DocumentEmbedding` permit
+([activity and permits](#activity-and-permits)). The permit is read between
+batches, so a turn waits for at most the batch in flight. Being drowsy or
+asleep from idleness does not close it; the embedding server stays up in
+both.
 
 The semantic store exists from daemon start, but the
 embedder sits behind an `EmbedderHandle` that is `Starting` until the
@@ -1047,10 +1237,9 @@ transcription never takes VRAM or time from a turn. With
 `sleep.idle_to_drowsy_mins = 0` the daemon never drowses on its own, so
 nothing is transcribed unless it is made drowsy by hand.
 
-The waiting pages are a backlog on `assistd-utils`'s `backlog` loop, woken by
-the write that leaves a page waiting. A run waits on its permit
-(`Work::PageTranscription`), held while presence has settled in `Drowsy`,
-then, with a page waiting, borrows the server for the OCR model and drains the
+The waiting pages are a [backlog](#backlogs), woken by the write that leaves
+a page waiting. A run waits for the `PageTranscription` permit, open while
+presence has settled in `Drowsy`, then, with a page waiting, borrows the server for the OCR model and drains the
 backlog inside the loan, in document and page order. A PDF stored meanwhile
 joins the same run. The extraction worker renders
 the page; a blank one is recorded as read with no text and never sent, since
@@ -1078,7 +1267,7 @@ the model is gone, the model refuses three requests in a row (as one without
 a vision projector refuses every page), the worker is unavailable, the store
 fails, or the loan is refused (no room on the GPU, a download or load that
 fails); the status keeps the reason, and the next run starts after five
-minutes, or sooner when a page is left waiting, once the permit holds.
+minutes, or sooner when a page is left waiting, once the permit is open.
 
 The daemon broadcasts a `DocumentActivity` whenever the root being walked or
 the number of document chunks left to embed changes. It counts those chunks
@@ -1378,8 +1567,9 @@ A walk through "what files changed this week?" typed into `assistd chat`:
    each request family to the service that owns its state (`TurnService`,
    `TaskService`, `VoiceService`, `BranchService`, `McpService`,
    `StatusService`, and `MemoryStack` for the memory requests); a `Query`
-   goes to `TurnService::handle_query`, which takes the per-turn agent
-   lock, so concurrent queries serialize. Every event a handler produces goes through an
+   goes to `TurnService::handle_query`, which waits in
+   [the queue](#the-queue) for the main lane, so concurrent queries
+   run one at a time. Every event a handler produces goes through an
    `EventSink`, which publishes it on the events bus before handing it
    to the client, so a slow client never delays subscribers.
 
@@ -1516,10 +1706,11 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
 5. **Embed permit** ([`crates/assistd-core/src/admission/activity.rs`](../crates/assistd-core/src/admission/activity.rs)).
    The embedding worker embeds pending message chunks and memories
    first, then document chunks a batch at a time, each batch waiting on
-   the permit admission publishes. The permit is withheld while the
+   the permit admission publishes. The permit is closed while the
    user's interaction is open, a task run holds a model lane, or the
    daemon sleeps for another process's VRAM, unless `[documents]` lets
-   embedding through that state. Each vector is quantised into
+   embedding through that state
+   ([activity and permits](#activity-and-permits)). Each vector is quantised into
    `document_chunk_embeddings`
    ([memory](#memory-assistd-memory--assistd-embed)).
 
