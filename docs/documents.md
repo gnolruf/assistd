@@ -300,7 +300,9 @@ assistd documents search lease renewal terms
   `roots`. The data directory is only readable by you (`0700`, the
   database `0600`), but a backup or a copy of that file contains your
   documents. `memory.db`, beside it, holds your sessions and memories
-  and none of the indexed text, and `index.db` is built again when it is
+  and none of the indexed text. `vectors.db` holds the vectors computed
+  from every chunk, of documents and sessions alike, which do not give
+  the text back but do reflect it. Both are produced again when they are
   missing, so a backup needs only `memory.db`. Passwords and keys are safer kept out of indexed folders
   than left to the `sensitive` rule.
 - **Nothing leaves the machine.** The worker that parses files has no

@@ -1,5 +1,5 @@
 //! The `chunks` table as every store writes it: a chunk with its words, and the
-//! vectors that go once the last chunk holding their text does.
+//! vectors of `vectors.db` that go once the last chunk holding their text does.
 
 use std::ops::Range;
 
@@ -118,4 +118,20 @@ pub(super) fn delete_vectors_of_removed_texts(tx: &Transaction<'_>) -> rusqlite:
     tx.prepare_cached("DELETE FROM removed_chunk_texts")?
         .execute([])?;
     Ok(())
+}
+
+/// Delete every vector of the texts of `source` that no chunk of that kind holds,
+/// returning how many. The chunks of that kind must all be cut: until they are, a
+/// vector waits for a chunk that will hold it.
+pub(super) fn delete_unheld_vectors(
+    conn: &Connection,
+    source: ChunkSource,
+) -> rusqlite::Result<usize> {
+    let vectors = vector_table(source);
+    conn.prepare_cached(&format!(
+        "DELETE FROM {vectors}
+         WHERE NOT EXISTS (SELECT 1 FROM chunks cc
+                           WHERE cc.hash = {vectors}.hash AND cc.kind = ?1)"
+    ))?
+    .execute([source])
 }

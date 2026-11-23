@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 
 use crate::chunking::{ChunkingConfig, chunk_ranges};
-use crate::sqlite::chunks::{ChunkOwner, insert_chunk};
+use crate::sqlite::chunks::{ChunkOwner, delete_unheld_vectors, insert_chunk};
 use crate::sqlite::timestamp::now_millis;
 use crate::{
     ChunkId, ChunkSource, DocumentId, EmptyPages, FileStamp, IndexPass, PageReading, SkippedRead,
@@ -338,8 +338,10 @@ pub(super) fn count_transcriptions(conn: &Connection) -> rusqlite::Result<Transc
 }
 
 /// Remove the documents of `pass`'s root that it did not see, returning how many,
-/// and the skipped files it did not see.
+/// and the skipped files it did not see, and record that it walked the whole root.
 pub(super) fn remove_unseen(conn: &Connection, pass: IndexPass) -> rusqlite::Result<u64> {
+    conn.prepare_cached("UPDATE index_roots SET finished_pass = ?2 WHERE id = ?1")?
+        .execute(rusqlite::params![pass.root, pass.pass])?;
     conn.prepare_cached("DELETE FROM skipped_files WHERE root_id = ?1 AND seen_pass < ?2")?
         .execute(rusqlite::params![pass.root, pass.pass])?;
     let removed = conn
@@ -404,6 +406,22 @@ pub(super) fn remove_root(tx: &Transaction<'_>, root: &Path) -> rusqlite::Result
         .execute(rusqlite::params![root])?;
     tx.prepare_cached("DELETE FROM index_roots WHERE path = ?1")?
         .execute(rusqlite::params![root])?;
+    Ok(u64::try_from(removed).unwrap_or(u64::MAX))
+}
+
+/// Remove the document vectors whose text no document chunk holds, returning how
+/// many; none unless a pass has walked the whole of each of `roots`.
+pub(super) fn remove_unheld_vectors(conn: &Connection, roots: &[PathBuf]) -> rusqlite::Result<u64> {
+    let mut walked_whole = conn.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM index_roots WHERE path = ?1 AND finished_pass > 0)",
+    )?;
+    for root in roots {
+        let root = root.as_os_str().as_bytes();
+        if !walked_whole.query_row(rusqlite::params![root], |r| r.get::<_, bool>(0))? {
+            return Ok(0);
+        }
+    }
+    let removed = delete_unheld_vectors(conn, ChunkSource::Document)?;
     Ok(u64::try_from(removed).unwrap_or(u64::MAX))
 }
 

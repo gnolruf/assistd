@@ -1,6 +1,6 @@
 //! SQLite-backed [`SemanticStore`](crate::SemanticStore) over the chunks cut from messages,
-//! memories and documents: one vector table for the texts of each kind, and one
-//! keyword index of them all.
+//! memories and documents: one keyword index of them all in `index.db`, and one
+//! vector table for the texts of each kind in `vectors.db`.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -181,7 +181,7 @@ impl EmbeddingQueue for SqliteSemanticStore {
                 if recorded.as_ref() == Some(&space) {
                     return Ok(None);
                 }
-                recreate_embedding_tables(tx)?;
+                empty_vector_tables(tx)?;
                 record_space(tx, &space)?;
                 Ok(recorded)
             })
@@ -411,6 +411,14 @@ impl DocumentStore for SqliteSemanticStore {
                     .iter()
                     .map(|path| documents::remove_unseen_under(tx, pass, path))
                     .sum()
+            })
+            .await
+    }
+
+    async fn remove_unheld_document_vectors(&self, roots: Vec<PathBuf>) -> Result<u64> {
+        self.handle
+            .write_index("remove_unheld_document_vectors", move |tx| {
+                documents::remove_unheld_vectors(tx, &roots)
             })
             .await
     }
@@ -842,20 +850,13 @@ fn record_space(tx: &Transaction<'_>, space: &EmbeddingSpace) -> rusqlite::Resul
     )
 }
 
-/// Empty every vector table by dropping it and creating it again from its own
-/// definition, which costs nothing per row.
-fn recreate_embedding_tables(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+/// Empty every vector table; SQLite frees the pages of a table emptied whole without
+/// visiting its rows.
+fn empty_vector_tables(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     CHUNK_SOURCES
         .map(vector_table)
         .iter()
-        .try_for_each(|table| {
-            let definition: String = tx.query_row(
-                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-                [table],
-                |row| row.get(0),
-            )?;
-            tx.execute_batch(&format!("DROP TABLE {table}; {definition};"))
-        })
+        .try_for_each(|table| tx.execute(&format!("DELETE FROM {table}"), []).map(drop))
 }
 
 /// Upsert the vector of `embedding` as that of its text for the chunks cut from its

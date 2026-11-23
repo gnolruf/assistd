@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 /// The `PRAGMA user_version` of an `index.db` holding [`SCHEMA_SQL`]. Any change to
 /// the schema takes the next number, and every older file is then built again.
-pub(crate) const VERSION: i64 = 1;
+pub(crate) const VERSION: i64 = 2;
 
 /// Every table of the index. A chunk's `source` names a row of `memory.db` when its
 /// kind is a message or a memory, so nothing here can hold it to that row.
@@ -18,11 +18,13 @@ CREATE TABLE chunked_source (
     chunked_through INTEGER NOT NULL CHECK (chunked_through >= 0)
 ) STRICT;
 
--- `pass` counts the walks over the root.
+-- `pass` counts the walks over the root. `finished_pass` is the last of them that
+-- walked the whole root to its end, 0 while none has since this file was created.
 CREATE TABLE index_roots (
-    id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    path BLOB NOT NULL UNIQUE CHECK (length(path) > 0),
-    pass INTEGER NOT NULL CHECK (pass >= 1)
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    path          BLOB NOT NULL UNIQUE CHECK (length(path) > 0),
+    pass          INTEGER NOT NULL CHECK (pass >= 1),
+    finished_pass INTEGER NOT NULL DEFAULT 0 CHECK (finished_pass BETWEEN 0 AND pass)
 ) STRICT;
 
 -- An indexed file: the file's stamp, the hash of its pages in order, the chunking
@@ -83,8 +85,9 @@ CREATE INDEX idx_page_transcriptions_waiting ON page_transcriptions(document_id,
 -- A byte range into the text a chunk is cut from: `kind` is 0 for a message's content,
 -- 1 for a memory's value, 2 for a document page's content, and `source` is the id of
 -- that message, memory or document. `page` is 0 unless the source is a document.
--- `hash` is the first 16 bytes of the SHA-256 of the bytes the range covers. The id
--- is also the chunk's rowid in `chunk_words`.
+-- `hash` is the first 16 bytes of the SHA-256 of the bytes the range covers, which is
+-- what `vectors.db` stores the text's vector under. The id is also the chunk's rowid
+-- in `chunk_words`.
 CREATE TABLE chunks (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     kind       INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 2),
@@ -124,33 +127,6 @@ BEGIN
     VALUES (old.kind, old.hash)
     ON CONFLICT DO NOTHING;
 END;
-
--- The vector of each distinct text the chunks of one kind hold, by `chunks.hash`.
--- A vector is a little-endian `f32` step, then one `i8` count of steps per
--- dimension. A NULL vector marks text the model could not embed, so it is not retried.
-CREATE TABLE message_vectors (
-    hash   BLOB NOT NULL UNIQUE CHECK (length(hash) = 16),
-    vector BLOB CHECK (length(vector) > 4)
-) STRICT;
-
-CREATE TABLE memory_vectors (
-    hash   BLOB NOT NULL UNIQUE CHECK (length(hash) = 16),
-    vector BLOB CHECK (length(vector) > 4)
-) STRICT;
-
-CREATE TABLE document_vectors (
-    hash   BLOB NOT NULL UNIQUE CHECK (length(hash) = 16),
-    vector BLOB CHECK (length(vector) > 4)
-) STRICT;
-
--- At most one row: the embedding space every stored vector is in.
-CREATE TABLE embedding_meta (
-    id              INTEGER PRIMARY KEY CHECK (id = 0),
-    model           TEXT NOT NULL,
-    dim             INTEGER NOT NULL CHECK (dim > 0),
-    server_args     TEXT NOT NULL,
-    document_prefix TEXT NOT NULL
-) STRICT;
 ";
 
 /// Create the schema in `conn`'s empty main database and stamp it with [`VERSION`];
@@ -166,6 +142,6 @@ pub(crate) fn create(conn: &mut Connection) -> rusqlite::Result<()> {
 }
 
 /// The schema version stamped on `conn`'s main database; zero for an empty one.
-pub(crate) fn stored_version(conn: &Connection) -> rusqlite::Result<i64> {
+fn stored_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.pragma_query_value(Some("main"), "user_version", |row| row.get(0))
 }

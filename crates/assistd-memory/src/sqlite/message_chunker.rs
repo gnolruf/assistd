@@ -20,12 +20,18 @@ const MESSAGES_PER_PAGE: usize = 64;
 #[derive(Debug, Clone)]
 pub struct MessageChunker {
     handle: SqliteHandle,
+    /// Whether, with every message chunked, the message vectors were held against
+    /// the chunks since this chunker was made.
+    unheld_vectors_removed: bool,
 }
 
 impl MessageChunker {
     /// Chunker over the shared database handle.
     pub fn new(handle: SqliteHandle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            unheld_vectors_removed: false,
+        }
     }
 
     /// Cut the messages waiting now and again after each save of one, retrying with
@@ -70,7 +76,13 @@ impl Backlog for MessageChunker {
 impl Pass for MessageChunker {
     type Error = MemoryError;
 
+    /// Once the first pass to leave no message unchunked has ended, the message
+    /// vectors no chunk holds the text of are removed.
     async fn run(&mut self, signals: &Signals) -> Result<DrainEnd> {
-        drain(self, signals).await
+        let end = drain(self, signals).await?;
+        if matches!(end, DrainEnd::Emptied { .. }) && !self.unheld_vectors_removed {
+            self.unheld_vectors_removed = self.handle.remove_unheld_message_vectors().await?;
+        }
+        Ok(end)
     }
 }
