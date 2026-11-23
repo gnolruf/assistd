@@ -423,19 +423,21 @@ resumed, saying which.
   `embedding.query_prefix` is not recorded: it shapes only the query
   vector, which is never stored.
 
-Search (`recall`, `reminisce`, `remember`, `docs search`) scans every vector of one source kind,
-messages, memories or documents, and keeps
-the top matches, document scans on a read-only connection of their own; there is no vector index. A document search scans
-`document_vectors` alone, keeps the 300 nearest texts and finds the
-chunks that hold each by its hash, so a text several documents hold
-counts for each of them. When those texts sit in fewer than 30
-documents and more vectors remain, it scans again through the chunks,
-keeping one chunk a document, so one long document never crowds out
-the rest. A message search reaches each vector through
-its chunk, which drops the messages outside the search's sessions
-before any is ranked; `reminisce` leaves out the current session's
-messages. `docs search` ranks by keyword as well, as
-[Document search](#document-search) describes.
+Every search (`recall`, `reminisce`, `remember`, `docs search`) is one
+store call that names the kinds it searches, and it scans every vector
+of each of those kinds and keeps the top matches; there is no vector
+index. A search that takes in documents runs on a read-only connection
+of its own. It scans `document_vectors` alone, keeps the nearest texts,
+ten for each document it is to find, and places each text at the first
+document holding it that has no nearer text. When those texts sit in
+too few documents and more vectors remain, it scans again through the
+chunks, keeping one chunk a document, so one long document never crowds
+out the rest. A message search reaches each vector through its chunk,
+which drops the messages outside the search's sessions before any is
+ranked; `reminisce` leaves out the current session's messages. What is
+kept of each kind is merged by similarity, which one embedding space and
+one stored form make comparable across kinds. `docs search` ranks by
+keyword as well, as [Search](#search) describes.
 
 One scan of quantised 768-dimension vectors, measured on a Ryzen 7
 9800X3D with the file in the page cache, when each vector belonged to
@@ -460,27 +462,57 @@ the file that crosses the ceiling is stored whole, and every file after
 it is skipped as `index full` until documents are removed. Message
 chunks have no ceiling.
 
-## Document search
+## Search
+
+The store has one search. A caller gives it the query's text and vector,
+the kinds to search (messages, memories, documents), which sessions'
+messages count, how many hits it wants, and whether to rank by keyword
+as well as by vector. A hit is a source, one message, memory or
+document, shown through its best-ranked chunk.
+
+| Caller                                         | Kinds     | Ranked by          |
+|------------------------------------------------|-----------|--------------------|
+| Recalled context                               | memories, then messages of other sessions | vector, above `embedding.min_similarity` |
+| `remember` search                              | memories  | vector             |
+| `reminisce`, `assistd memory reminisce`        | messages  | vector and keyword |
+| `docs search`, `assistd documents search`      | documents | vector and keyword |
 
 Embeddings match meaning and miss exact strings: an identifier, an error
-message, a name, an invoice number. So `docs search` ranks the documents
-twice and fuses the two rankings.
+message, a name, an invoice number. So a search that asks for it ranks
+the sources twice and fuses the two rankings.
 
-- **By vector**: each document by its chunk nearest the query vector.
-- **By keyword**: each document by its chunk with the best BM25 score in
-  `chunk_words`, among the document chunks that hold any word of the query.
-  Each whitespace-separated word of the query is matched as a phrase of
-  its own tokens, so `INV-2024-0113` finds only that number and no
-  character of a query is read as FTS5 syntax.
-- **Fused**: the 30 best documents of each ranking are scored by
-  reciprocal rank fusion, the sum of `1 / (10 + rank)` over the rankings
-  that hold the document, which needs no common scale between cosine and
-  BM25. A document is shown through its chunk from the ranking that
-  places it higher. At equal score or rank the keyword ranking wins.
+- **By vector**: each source by its chunk nearest the query vector.
+- **By keyword**: each source by its chunk with the best BM25 score in
+  `chunk_words`, among the chunks of the kinds searched that hold any
+  word of the query. Each whitespace-separated word of the query is
+  matched as a phrase of its own tokens, so `INV-2024-0113` finds only
+  that number and no character of a query is read as FTS5 syntax. A text
+  that is the best chunk of several sources counts for the first of them
+  alone.
+- **Fused**: the 30 best sources of each ranking, or as many as the hits
+  asked for when that is more, are scored by reciprocal rank fusion, the
+  sum of `1 / (10 + rank)` over the rankings that hold the source, which
+  needs no common scale between cosine and BM25. A source is shown
+  through its chunk from the ranking that places it higher. At equal
+  score or rank the keyword ranking wins.
 
-A chunk needs no vector to be found by its words, so a document can be
-searched for an exact string as soon as it is indexed; such a hit has no
-similarity to report.
+A search by vector alone is the same fusion over one ranking, so its
+order is the order of similarity.
+
+A text several messages or documents hold is one hit: the best-ranked
+of them, with the count of the others among the kinds and sessions
+searched. Four copies of a file are one line of `docs search`, not four.
+Memories are never folded: two keys saved with one value are two hits.
+
+A chunk needs no vector to be found by its words, so a document or a
+message can be searched for an exact string as soon as it is stored;
+such a hit has no similarity to report. Recalled context holds its hits to a similarity,
+which a match by words alone does not have, so it ranks by vector only.
+
+The figures below were measured on documents. Messages are fused with
+the same constants, which have not been measured on them, and a
+`remember` search ranks by vector alone: only a memory's value has its
+words indexed, not its key.
 
 Keywords are matched per chunk, not per page or per document: the chunk
 that matched is then the passage to show, and BM25 compares texts of one

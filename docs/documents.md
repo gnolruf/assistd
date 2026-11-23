@@ -258,6 +258,8 @@ docs read --page 3 --offset 512 "/home/me/Documents/notes/lease.pdf"
 of meaning, the page of the best passage, that passage's byte range
 within the page, the date the file was indexed, and the passage.
 `sim=n/a` marks a passage found by its words before it was embedded.
+A passage several files hold is one line, for the first of them, with
+`also in N other documents` ahead of the passage.
 
 `docs read` prints the stored text of one indexed file from a page and
 byte offset, as much as fits one tool result, and says how to continue.

@@ -209,8 +209,9 @@ pub enum EventBody {
     SpeakingState { speaking: bool },
     /// The session's display title, sent after each successful turn; may arrive after its `Done`.
     SessionTitle { session_id: String, title: String },
-    /// One search hit; `content` is the matched chunk of message `message_id`, `similarity` is in
-    /// `[0.0, 1.0]`.
+    /// One search hit; `content` is the matched chunk of message `message_id`, `similarity`, in
+    /// `[0.0, 1.0]`, is absent for a chunk that has no vector yet, and `held_elsewhere` counts
+    /// the other messages holding the same text.
     SemanticHit {
         message_id: i64,
         chunk_id: i64,
@@ -218,7 +219,10 @@ pub enum EventBody {
         timestamp: String,
         role: Role,
         content: String,
-        similarity: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        similarity: Option<f32>,
+        #[serde(default)]
+        held_elsewhere: u64,
     },
     /// Result of `MemoryLoad`; `value` is `None` when the key is absent.
     MemoryValue { key: String, value: Option<String> },
@@ -263,7 +267,8 @@ pub enum EventBody {
     DocumentPassEnded { root: String, pass: DocumentPass },
     /// One `DocumentsSearch` hit: a document and its best-matching passage. `page` counts
     /// from one, the byte range is within that page's text, and `similarity`, in
-    /// `[0.0, 1.0]`, is absent for a passage that has no vector yet.
+    /// `[0.0, 1.0]`, is absent for a passage that has no vector yet. `held_elsewhere` counts
+    /// the other documents holding the same passage.
     DocumentHit {
         path: String,
         page: u64,
@@ -274,6 +279,8 @@ pub enum EventBody {
         content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         similarity: Option<f32>,
+        #[serde(default)]
+        held_elsewhere: u64,
     },
     /// What the document index is doing; broadcast when it changes and sent first to every
     /// subscriber whose filter takes it.

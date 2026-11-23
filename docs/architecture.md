@@ -1034,14 +1034,16 @@ llama-server answers an input over the count with a server error, as it
 would a fault of its own, so the client tells that refusal by its
 message and the row is marked and skipped like any other the server
 rejects; a document chunk marked so is still found by its words. A `remember` search embeds its query and ranks saved memories by
-cosine similarity; the `reminisce` tool runs the same kind of search
-over transcript chunks from earlier sessions. Messages, memories and
+cosine similarity; the `reminisce` tool searches transcript chunks from
+earlier sessions that way and by the query's words as well. Messages, memories and
 indexed local documents own chunks in one table, but each kind's vectors
 are kept in a table of their own, so message recall never reads or ranks
 document chunks.
 Every vector is quantised to a byte per dimension. Every chunk also has its
-words in one full-text index; only a document search reads it, for its
-keyword half, held to document chunks.
+words in one full-text index. All of these are one search in the store,
+which is told the kinds to search and whether to rank by keyword as well
+([how](database.md#search)); a document search and `reminisce` ask for
+the keyword half.
 Like model requests,
 embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
@@ -1283,7 +1285,7 @@ The model reaches the index through the `docs` command, which `build_tools()`
 registers behind `run` only with `documents.enabled`; the system prompt then
 gains one line saying so. `docs search <query>` embeds the query, ranks the
 documents both by vector and by the query's words, and fuses the two rankings
-([how](database.md#document-search)), so an identifier, an error message, a
+([how](database.md#search)), so an identifier, an error message, a
 name or a number is found as written. It prints
 one line per document for the `embedding.top_k` best (or `-n`, at most 20):
 path, cosine similarity (`n/a` for a chunk found by its words before it was
@@ -1722,7 +1724,7 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
    In a later turn the model calls `run` with
    `docs search lease renewal terms`. `DocsCommand` embeds the query,
    and the store ranks the documents by vector and by keyword and fuses
-   the two ([how](database.md#document-search)). The hit names the
+   the two ([how](database.md#search)). The hit names the
    file, page and byte range; `docs read` prints the stored text from
    there. Both print under a header marking the text as untrusted, and
    both mark the turn as having read this machine.

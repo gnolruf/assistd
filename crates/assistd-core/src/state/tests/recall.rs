@@ -19,50 +19,25 @@ impl assistd_embed::Embedder for ConstantEmbedder {
     }
 }
 
-/// Returns its fixed hits, minus the excluded session's.
+/// Returns its fixed hits of the kinds searched, minus the excluded session's.
 #[derive(Debug)]
 struct FixedHits {
-    chunks: Vec<EmbeddingHit>,
-    memories: Vec<MemoryHit>,
+    hits: Vec<SearchHit>,
 }
 
 #[async_trait::async_trait]
 impl RecallStore for FixedHits {
-    async fn nearest_chunks(
-        &self,
-        _query_vector: Vec<f32>,
-        top_k: usize,
-        scope: SessionScope,
-    ) -> assistd_memory::Result<Vec<EmbeddingHit>> {
-        Ok(self
-            .chunks
-            .iter()
-            .filter(|hit| match hit.locator {
-                ChunkLocator::Message { session_id, .. } => {
-                    scope != SessionScope::AllExcept(session_id)
-                }
-                ChunkLocator::Document { .. } => false,
-            })
-            .take(top_k)
-            .cloned()
-            .collect())
-    }
-    async fn search_documents(
-        &self,
-        query: String,
-        query_vector: Vec<f32>,
-        top_k: usize,
-    ) -> assistd_memory::Result<Vec<DocumentHit>> {
-        NoSemanticStore
-            .search_documents(query, query_vector, top_k)
-            .await
-    }
-    async fn nearest_memories(
-        &self,
-        _query_vector: Vec<f32>,
-        top_k: usize,
-    ) -> assistd_memory::Result<Vec<MemoryHit>> {
-        Ok(self.memories.iter().take(top_k).cloned().collect())
+    async fn search(&self, search: ChunkSearch) -> assistd_memory::Result<Vec<SearchHit>> {
+        let searched = |hit: &&SearchHit| match hit.locator {
+            ChunkLocator::Message { session_id, .. } => {
+                search.kinds.contains(&ChunkSource::Message)
+                    && search.sessions != SessionScope::AllExcept(session_id)
+            }
+            ChunkLocator::Memory { .. } => search.kinds.contains(&ChunkSource::Memory),
+            ChunkLocator::Document { .. } => false,
+        };
+        let hits = self.hits.iter().filter(searched);
+        Ok(hits.take(search.top_k).cloned().collect())
     }
     async fn adjacent_chunks(
         &self,
@@ -80,8 +55,8 @@ impl RecallStore for FixedHits {
     }
 }
 
-fn recall_hit(session_id: SessionId, message: i64, similarity: f32, text: &str) -> EmbeddingHit {
-    EmbeddingHit {
+fn recall_hit(session_id: SessionId, message: i64, similarity: f32, text: &str) -> SearchHit {
+    SearchHit {
         chunk_id: ChunkId(message),
         locator: ChunkLocator::Message {
             session_id,
@@ -91,7 +66,8 @@ fn recall_hit(session_id: SessionId, message: i64, similarity: f32, text: &str) 
             session_label: "Daemon tuning".into(),
         },
         text: text.into(),
-        similarity,
+        similarity: Some(similarity),
+        held_elsewhere: 0,
     }
 }
 
@@ -105,13 +81,11 @@ async fn auto_recall_runs_once_per_new_session_with_memories_and_past_chat_point
         ConstantEmbedder,
     ))));
     memory.recall = Arc::new(FixedHits {
-        chunks: vec![
+        hits: vec![
             recall_hit(current, 1, 0.9, "said in this chat"),
             recall_hit(other, 2, 0.9, "strong past match"),
             recall_hit(other, 3, 0.8, "another past match"),
             recall_hit(SessionId::new(), 4, 0.1, "weak past match"),
-        ],
-        memories: vec![
             memory_hit(1, "editor", "helix", 0.9),
             memory_hit(2, "shell", "fish", 0.1),
         ],

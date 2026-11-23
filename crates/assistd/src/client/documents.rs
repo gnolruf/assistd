@@ -139,12 +139,18 @@ async fn search(query: String, limit: u32) -> Result<()> {
                 indexed_at,
                 content,
                 similarity,
+                held_elsewhere,
             } => {
                 any_hit = true;
+                let also_in = match held_elsewhere {
+                    0 => String::new(),
+                    1 => "also in 1 other document\t".to_string(),
+                    others => format!("also in {others} other documents\t"),
+                };
                 writeln!(
                     io::stdout(),
                     "{}\tsim={}\tpage {page} of {page_count}\tbytes {byte_start}..{byte_end}\t\
-                     indexed {}\t{}",
+                     indexed {}\t{also_in}{}",
                     escape_controls_single_line(path),
                     similarity_percent(*similarity),
                     indexed_at.format(INDEXED_DATE_FORMAT),

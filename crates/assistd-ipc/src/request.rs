@@ -151,7 +151,8 @@ pub enum RequestBody {
     MemoryDelete { key: String },
     /// Remove the row with id `memory_id`. Emits `MemoryForgetResult`, then `Done`.
     MemoryForget { memory_id: i64 },
-    /// Rank past messages by similarity to `query`; `limit = 0` uses the daemon default.
+    /// Rank past messages by meaning and by the words of `query`; `limit = 0` uses the
+    /// daemon default.
     /// Emits `SemanticHit`s best-first, then `Done`.
     MemorySemanticSearch {
         query: String,

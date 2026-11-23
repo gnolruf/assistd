@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use assistd_ipc::{Event, EventBody};
-use assistd_memory::{ChunkLocator, MemoryId, SessionScope, UnindexedRows};
+use assistd_memory::{
+    ChunkLocator, ChunkSearch, ChunkSource, MemoryId, SearchRanking, SessionScope, UnindexedRows,
+};
 use assistd_tools::DEFAULT_SEARCH_LIMIT;
 
 use super::memory_stack::MemoryStack;
@@ -27,10 +29,18 @@ impl MemoryStack {
         } else {
             limit as usize
         };
-        let embedding = embedder.embed_query(&query).await.context("embed failed")?;
+        let query_vector = embedder.embed_query(&query).await.context("embed failed")?;
+        let messages = ChunkSearch {
+            query,
+            query_vector,
+            kinds: vec![ChunkSource::Message],
+            sessions: SessionScope::All,
+            top_k: limit,
+            ranking: SearchRanking::VectorAndKeyword,
+        };
         let hits = self
             .recall
-            .nearest_chunks(embedding, limit, SessionScope::All)
+            .search(messages)
             .await
             .context("semantic search failed")?;
         for hit in hits {
@@ -55,6 +65,7 @@ impl MemoryStack {
                         role: wire_role(role),
                         content: hit.text,
                         similarity: hit.similarity,
+                        held_elsewhere: hit.held_elsewhere as u64,
                     },
                 ))
                 .await;
