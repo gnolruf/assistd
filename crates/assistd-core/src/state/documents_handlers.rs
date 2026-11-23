@@ -16,10 +16,7 @@ use assistd_ipc::{
     DocumentSkipReason, Event, EventBody, PageTranscriptionState, PageTranscriptionStatus,
     SkippedFiles,
 };
-use assistd_memory::{
-    ChunkLocator, ChunkSearch, ChunkSource, DocumentStore, EmbeddingQueue, IndexRootCounts,
-    MemoryError, RecallStore, SearchHit, SearchRanking, SessionScope,
-};
+use assistd_memory::{DocumentStore, EmbeddingQueue, IndexRootCounts, MemoryError};
 use assistd_tools::policy::on_blocking_pool;
 use assistd_utils::readiness::NotReady;
 
@@ -46,7 +43,6 @@ pub struct DocumentsService {
     extractor: Arc<Extractor>,
     index: Arc<DocumentIndex>,
     embedder: Arc<EmbedderHandle>,
-    recall: Arc<dyn RecallStore>,
     embedding_queue: Arc<dyn EmbeddingQueue>,
     store: Arc<dyn DocumentStore>,
     activity: watch::Sender<DocumentActivity>,
@@ -65,7 +61,6 @@ impl DocumentsService {
             extractor: Arc::clone(&subsystems.documents),
             index: Arc::clone(&subsystems.document_index),
             embedder: Arc::clone(&memory.embedder),
-            recall: Arc::clone(&memory.recall),
             embedding_queue: Arc::clone(&memory.embedding_queue),
             store: Arc::clone(&memory.document_store),
             activity: watch::Sender::default(),
@@ -275,38 +270,6 @@ impl DocumentsService {
         }
         Ok(())
     }
-
-    pub(super) async fn handle_documents_search(
-        &self,
-        id: String,
-        query: String,
-        limit: u32,
-        tx: EventSink,
-    ) -> Result<(), DispatchError> {
-        let embedder = self.embedder.get().context("document search failed")?;
-        let limit = match limit {
-            0 => self.config.embedding.top_k.get(),
-            limit => limit,
-        };
-        let query_vector = embedder.embed_query(&query).await.context("embed failed")?;
-        let documents = ChunkSearch {
-            query,
-            query_vector,
-            kinds: vec![ChunkSource::Document],
-            sessions: SessionScope::All,
-            top_k: limit as usize,
-            ranking: SearchRanking::VectorAndKeyword,
-        };
-        let hits = self
-            .recall
-            .search(documents)
-            .await
-            .context("document search failed")?;
-        for hit in hits.into_iter().filter_map(wire_hit) {
-            let _ = tx.send(Event::new(id.clone(), hit)).await;
-        }
-        Ok(())
-    }
 }
 
 /// Where `root` stands: what `stored` holds of it and what the last of `last_passes`
@@ -383,30 +346,4 @@ fn wire_skip_reason(cause: SkipCause) -> DocumentSkipReason {
         SkipCause::TimedOut => DocumentSkipReason::TimedOut,
         SkipCause::IndexFull => DocumentSkipReason::IndexFull,
     }
-}
-
-/// A hit on a document as its wire event.
-fn wire_hit(hit: SearchHit) -> Option<EventBody> {
-    let ChunkLocator::Document {
-        path,
-        page,
-        page_count,
-        bytes,
-        indexed_at,
-        ..
-    } = hit.locator
-    else {
-        return None;
-    };
-    Some(EventBody::DocumentHit {
-        path: wire_path(&path),
-        page: page as u64 + 1,
-        page_count: page_count as u64,
-        byte_start: bytes.start as u64,
-        byte_end: bytes.end as u64,
-        indexed_at,
-        content: hit.text,
-        similarity: hit.similarity,
-        held_elsewhere: hit.held_elsewhere as u64,
-    })
 }

@@ -14,6 +14,7 @@ mod presence;
 mod readiness;
 mod relay;
 mod request;
+mod search;
 pub mod socket;
 mod status;
 pub mod task;
@@ -38,6 +39,7 @@ pub use relay::{
     RelayTraceEntry,
 };
 pub use request::{Request, RequestBody, SubscribeFilter};
+pub use search::{SearchKind, SearchPlace};
 pub use socket::socket_path;
 pub use status::{Component, StatusKind, StatusSeverity};
 pub use task::{

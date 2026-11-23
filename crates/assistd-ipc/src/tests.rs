@@ -33,6 +33,7 @@ fn request_cases() -> Vec<(Request, &'static str)> {
         task_refine_request_cases(),
         mcp_request_cases(),
         document_request_cases(),
+        search_request_cases(),
     ]
     .concat()
 }
@@ -154,13 +155,6 @@ fn memory_request_cases() -> Vec<(Request, &'static str)> {
             request(RequestBody::MemoryForget { memory_id: 42 }),
             r#"{"id":"r","type":"memory_forget","memory_id":42}"#,
         ),
-        (
-            request(RequestBody::MemorySemanticSearch {
-                query: "the rust thing".into(),
-                limit: 5,
-            }),
-            r#"{"id":"r","type":"memory_semantic_search","query":"the rust thing","limit":5}"#,
-        ),
     ]
 }
 
@@ -259,7 +253,8 @@ fn event_cases() -> Vec<(Event, &'static str)> {
         task_queue_event_cases(),
         mcp_event_cases(),
         document_status_event_cases(),
-        document_pass_and_search_event_cases(),
+        document_pass_event_cases(),
+        search_event_cases(),
     ]
     .concat()
 }
@@ -470,19 +465,6 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str)> {
 
 fn memory_event_cases() -> Vec<(Event, &'static str)> {
     vec![
-        (
-            event(EventBody::SemanticHit {
-                message_id: 42,
-                chunk_id: 7,
-                session_id: "s".into(),
-                timestamp: "2026-04-28T00:00:00Z".into(),
-                role: Role::User,
-                content: "the rust embeddings daemon".into(),
-                similarity: Some(0.5),
-                held_elsewhere: 0,
-            }),
-            r#"{"id":"r","type":"semantic_hit","message_id":42,"chunk_id":7,"session_id":"s","timestamp":"2026-04-28T00:00:00Z","role":"user","content":"the rust embeddings daemon","similarity":0.5,"held_elsewhere":0}"#,
-        ),
         (
             event(EventBody::MemoryValue {
                 key: "absent".into(),
@@ -1072,12 +1054,73 @@ fn document_request_cases() -> Vec<(Request, &'static str)> {
             request(RequestBody::DocumentsReindex),
             r#"{"id":"r","type":"documents_reindex"}"#,
         ),
+    ]
+}
+
+fn search_request_cases() -> Vec<(Request, &'static str)> {
+    vec![
         (
-            request(RequestBody::DocumentsSearch {
+            request(RequestBody::Search {
                 query: "lease renewal".into(),
                 limit: 3,
+                kinds: vec![SearchKind::Memories, SearchKind::Documents],
             }),
-            r#"{"id":"r","type":"documents_search","query":"lease renewal","limit":3}"#,
+            r#"{"id":"r","type":"search","query":"lease renewal","limit":3,"kinds":["memories","documents"]}"#,
+        ),
+        (
+            request(RequestBody::Search {
+                query: "lease renewal".into(),
+                limit: 0,
+                kinds: Vec::new(),
+            }),
+            r#"{"id":"r","type":"search","query":"lease renewal","limit":0}"#,
+        ),
+    ]
+}
+
+fn search_event_cases() -> Vec<(Event, &'static str)> {
+    let at = DateTime::from_timestamp(1_793_887_200, 0).unwrap();
+    vec![
+        (
+            event(EventBody::SearchHit {
+                place: SearchPlace::Session {
+                    session_id: "0f3c9a1e-5b7d-4c2a-9e1f-6a8b7c5d4e3f".into(),
+                    title: "Daemon tuning".into(),
+                    timestamp: at,
+                    role: Role::User,
+                },
+                content: "the rust embeddings daemon".into(),
+                similarity: None,
+                held_elsewhere: 0,
+            }),
+            r#"{"id":"r","type":"search_hit","place":{"kind":"session","session_id":"0f3c9a1e-5b7d-4c2a-9e1f-6a8b7c5d4e3f","title":"Daemon tuning","timestamp":"2026-11-05T14:00:00Z","role":"user"},"content":"the rust embeddings daemon","held_elsewhere":0}"#,
+        ),
+        (
+            event(EventBody::SearchHit {
+                place: SearchPlace::Memory {
+                    key: "home.harbour".into(),
+                },
+                content: "harbour of Bergen".into(),
+                similarity: Some(0.25),
+                held_elsewhere: 0,
+            }),
+            r#"{"id":"r","type":"search_hit","place":{"kind":"memory","key":"home.harbour"},"content":"harbour of Bergen","similarity":0.25,"held_elsewhere":0}"#,
+        ),
+        (
+            event(EventBody::SearchHit {
+                place: SearchPlace::Document {
+                    path: "/home/u/notes/lease.pdf".into(),
+                    page: 2,
+                    page_count: 9,
+                    byte_start: 0,
+                    byte_end: 640,
+                    indexed_at: at,
+                },
+                content: "renewal terms".into(),
+                similarity: Some(0.5),
+                held_elsewhere: 3,
+            }),
+            r#"{"id":"r","type":"search_hit","place":{"kind":"document","path":"/home/u/notes/lease.pdf","page":2,"page_count":9,"byte_start":0,"byte_end":640,"indexed_at":"2026-11-05T14:00:00Z"},"content":"renewal terms","similarity":0.5,"held_elsewhere":3}"#,
         ),
     ]
 }
@@ -1157,7 +1200,7 @@ fn document_status_event_cases() -> Vec<(Event, &'static str)> {
     ]
 }
 
-fn document_pass_and_search_event_cases() -> Vec<(Event, &'static str)> {
+fn document_pass_event_cases() -> Vec<(Event, &'static str)> {
     let finished = sample_document_pass(
         DocumentPassEnd::Finished,
         DocumentPassCounts {
@@ -1183,20 +1226,6 @@ fn document_pass_and_search_event_cases() -> Vec<(Event, &'static str)> {
                 pass: finished,
             }),
             r#"{"id":"r","type":"document_pass_ended","root":"/home/u/notes","pass":{"ended_at":"2026-11-05T14:00:00Z","end":{"outcome":"finished"},"counts":{"indexed":0,"unchanged":2,"removed":1}}}"#,
-        ),
-        (
-            event(EventBody::DocumentHit {
-                path: "/home/u/notes/lease.pdf".into(),
-                page: 2,
-                page_count: 9,
-                byte_start: 0,
-                byte_end: 640,
-                indexed_at: DateTime::from_timestamp(1_793_887_200, 0).unwrap(),
-                content: "renewal terms".into(),
-                similarity: Some(0.5),
-                held_elsewhere: 3,
-            }),
-            r#"{"id":"r","type":"document_hit","path":"/home/u/notes/lease.pdf","page":2,"page_count":9,"byte_start":0,"byte_end":640,"indexed_at":"2026-11-05T14:00:00Z","content":"renewal terms","similarity":0.5,"held_elsewhere":3}"#,
         ),
     ]
 }

@@ -10,9 +10,9 @@ use crate::{
     Component, ComponentReadiness, ConfirmSource, DocumentActivity, DocumentPass,
     DocumentPassCounts, DocumentRootStatus, ListenPhase, McpServerState, McpTransportKind,
     ModeRecommendation, PageTranscriptionStatus, PermissionMode, Plan, PresenceState, RelayEvent,
-    RelayStepRecord, StartupComponent, StatusKind, StatusSeverity, TaskId, TaskName, TaskPrompt,
-    TaskQueueSnapshot, TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary, TaskSpec,
-    TokenRevocation, ToolReport, VoiceCaptureState,
+    RelayStepRecord, SearchPlace, StartupComponent, StatusKind, StatusSeverity, TaskId, TaskName,
+    TaskPrompt, TaskQueueSnapshot, TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary,
+    TaskSpec, TokenRevocation, ToolReport, VoiceCaptureState,
 };
 
 /// Kinds of [`Event`] carried on the daemon-wide broadcast bus, selectable by a
@@ -129,7 +129,6 @@ impl Event {
             | EventBody::WakeWordStatus { .. }
             | EventBody::WakeWordTest { .. }
             | EventBody::WakeWordSpeech { .. }
-            | EventBody::SemanticHit { .. }
             | EventBody::MemoryValue { .. }
             | EventBody::MemoryRow { .. }
             | EventBody::MemoryForgetResult { .. }
@@ -138,7 +137,7 @@ impl Event {
             | EventBody::DocumentRoot { .. }
             | EventBody::DocumentPassProgress { .. }
             | EventBody::DocumentPassEnded { .. }
-            | EventBody::DocumentHit { .. }
+            | EventBody::SearchHit { .. }
             | EventBody::ConfirmRequest { .. }
             | EventBody::PlanReview { .. }
             | EventBody::PlanModeEntered
@@ -209,21 +208,6 @@ pub enum EventBody {
     SpeakingState { speaking: bool },
     /// The session's display title, sent after each successful turn; may arrive after its `Done`.
     SessionTitle { session_id: String, title: String },
-    /// One search hit; `content` is the matched chunk of message `message_id`, `similarity`, in
-    /// `[0.0, 1.0]`, is absent for a chunk that has no vector yet, and `held_elsewhere` counts
-    /// the other messages holding the same text.
-    SemanticHit {
-        message_id: i64,
-        chunk_id: i64,
-        session_id: String,
-        timestamp: String,
-        role: Role,
-        content: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        similarity: Option<f32>,
-        #[serde(default)]
-        held_elsewhere: u64,
-    },
     /// Result of `MemoryLoad`; `value` is `None` when the key is absent.
     MemoryValue { key: String, value: Option<String> },
     /// One `MemoryListAll` row, in key order; `memory_id` is what `MemoryForget` takes.
@@ -265,17 +249,11 @@ pub enum EventBody {
     },
     /// The pass a `DocumentsReindex` follows over `root` ended.
     DocumentPassEnded { root: String, pass: DocumentPass },
-    /// One `DocumentsSearch` hit: a document and its best-matching passage. `page` counts
-    /// from one, the byte range is within that page's text, and `similarity`, in
-    /// `[0.0, 1.0]`, is absent for a passage that has no vector yet. `held_elsewhere` counts
-    /// the other documents holding the same passage.
-    DocumentHit {
-        path: String,
-        page: u64,
-        page_count: u64,
-        byte_start: u64,
-        byte_end: u64,
-        indexed_at: DateTime<Utc>,
+    /// One `Search` hit: a message, memory or document and its best-matching passage.
+    /// `similarity`, in `[0.0, 1.0]`, is absent for a passage that has no vector yet, and
+    /// `held_elsewhere` counts the other places holding the same passage.
+    SearchHit {
+        place: SearchPlace,
         content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         similarity: Option<f32>,

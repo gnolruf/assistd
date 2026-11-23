@@ -14,7 +14,8 @@ use tracing::warn;
 use assistd_config::{Config, DefaultPermissionMode, ToolsConfig};
 use assistd_embed::EmbedError;
 use assistd_ipc::{
-    Event, EventBody, PermissionMode, Request, RequestBody, Role, TaskRequest, WakeWordOp,
+    Event, EventBody, PermissionMode, Request, RequestBody, Role, SearchKind, TaskRequest,
+    WakeWordOp,
 };
 use assistd_llm::{LlmError, LlmHealthProbe};
 use assistd_memory::{MemoryError, PersistedRole};
@@ -47,6 +48,7 @@ pub(crate) mod memory_handlers;
 pub(crate) mod memory_stack;
 pub(crate) mod presence_handlers;
 pub(crate) mod readiness;
+mod search_handlers;
 mod session_lapse;
 pub(crate) mod status_service;
 pub(crate) mod subscribe;
@@ -106,6 +108,15 @@ pub enum DispatchError {
 
     #[error("document indexing is {0}")]
     DocumentsUnavailable(NotReady),
+
+    #[error("{kind} are not searched while {setting} is false")]
+    SearchKindOff {
+        kind: SearchKind,
+        setting: &'static str,
+    },
+
+    #[error("nothing is searched while memory.enabled and documents.enabled are false")]
+    NothingSearched,
 
     #[error(transparent)]
     Mic(#[from] MicError),
@@ -472,19 +483,14 @@ impl AppState {
             RequestBody::MemoryForget { memory_id } => {
                 self.memory.handle_memory_forget(id, memory_id, tx).await
             }
-            RequestBody::MemorySemanticSearch { query, limit } => {
-                self.memory
-                    .handle_semantic_search(id, query, limit, tx)
-                    .await
-            }
             RequestBody::MemoryReindex => self.memory.handle_memory_reindex(id, tx).await,
             RequestBody::DocumentsStatus => self.documents.handle_documents_status(id, tx).await,
             RequestBody::DocumentsReindex => self.documents.handle_documents_reindex(id, tx).await,
-            RequestBody::DocumentsSearch { query, limit } => {
-                self.documents
-                    .handle_documents_search(id, query, limit, tx)
-                    .await
-            }
+            RequestBody::Search {
+                query,
+                limit,
+                kinds,
+            } => self.handle_search(id, query, limit, kinds, tx).await,
             RequestBody::GetPresence => self.status.handle_get_presence(id, tx).await,
             RequestBody::GetListenState => self.voice.handle_get_listen_state(id, tx).await,
             RequestBody::VoiceToggle => self.voice.handle_voice_toggle(id, tx).await,

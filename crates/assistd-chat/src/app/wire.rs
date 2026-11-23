@@ -183,7 +183,6 @@ impl App {
             EventBody::SpeakingState { .. }
             | EventBody::Readiness { .. }
             | EventBody::ChatFocus { .. }
-            | EventBody::SemanticHit { .. }
             | EventBody::MemoryValue { .. }
             | EventBody::MemoryRow { .. }
             | EventBody::MemoryForgetResult { .. }
@@ -192,7 +191,7 @@ impl App {
             | EventBody::DocumentRoot { .. }
             | EventBody::DocumentPassProgress { .. }
             | EventBody::DocumentPassEnded { .. }
-            | EventBody::DocumentHit { .. }
+            | EventBody::SearchHit { .. }
             | EventBody::DocumentActivity { .. }
             | EventBody::WakeWordStatus { .. }
             | EventBody::WakeWordTest { .. }

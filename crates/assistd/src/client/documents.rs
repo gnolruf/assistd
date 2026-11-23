@@ -6,19 +6,17 @@ use std::io::{self, Write};
 use anyhow::Result;
 use assistd_ipc::{
     ComponentReadiness, DocumentPass, DocumentPassCounts, DocumentPassEnd, DocumentRootStatus,
-    EventBody, PageTranscriptionStatus, Request, RequestBody, SkippedFiles,
+    EventBody, PageTranscriptionStatus, Request, RequestBody, SearchKind, SkippedFiles,
 };
 use assistd_utils::terminal_text::escape_controls_single_line;
-use assistd_utils::text::{collapse_whitespace, similarity_percent};
 use chrono::{DateTime, Local, Utc};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
 
 use super::run_one_shot;
+use super::search::{self, hit_count, print_hits};
 
 const PASS_TIME_FORMAT: &str = "%Y-%m-%d %H:%M %Z";
-
-const INDEXED_DATE_FORMAT: &str = "%Y-%m-%d";
 
 #[derive(Args)]
 pub(crate) struct DocumentsArgs {
@@ -40,12 +38,11 @@ pub(crate) enum DocumentsAction {
         #[arg(long)]
         quiet: bool,
     },
-    /// Rank the indexed documents by meaning and by the query's exact words, as the
-    /// model's `search --in documents` does. One tab-separated row per document, best first: path,
-    /// similarity, page, byte range within the page, index date, best-matching passage.
+    /// Rank the indexed documents by meaning and by the query's exact words:
+    /// `assistd search --in documents`.
     Search {
         /// Cap on the documents listed; the daemon's `embedding.top_k` when omitted.
-        #[arg(short = 'n', long, value_parser = clap::value_parser!(u32).range(1..=20))]
+        #[arg(short = 'n', long, value_parser = hit_count())]
         limit: Option<u32>,
         /// The words of the query; they are joined, so quoting is not needed.
         #[arg(required = true)]
@@ -58,7 +55,13 @@ pub(crate) async fn run(args: DocumentsArgs) -> Result<()> {
         DocumentsAction::Status => status().await,
         DocumentsAction::Reindex { quiet } => reindex(quiet).await,
         DocumentsAction::Search { limit, query } => {
-            search(query.join(" "), limit.unwrap_or_default()).await
+            let limit = limit.unwrap_or_default();
+            print_hits(search::request(
+                query.join(" "),
+                limit,
+                vec![SearchKind::Documents],
+            ))
+            .await
         }
     }
 }
@@ -115,53 +118,6 @@ async fn reindex(quiet: bool) -> Result<()> {
                     writeln!(out, "  skipped: {skipped}")?;
                 }
             }
-            _ => {}
-        }
-        Ok(())
-    })
-    .await
-}
-
-async fn search(query: String, limit: u32) -> Result<()> {
-    let request = Request::new(
-        Uuid::new_v4().to_string(),
-        RequestBody::DocumentsSearch { query, limit },
-    );
-    let mut any_hit = false;
-    run_one_shot(request, |event| {
-        match &event.body {
-            EventBody::DocumentHit {
-                path,
-                page,
-                page_count,
-                byte_start,
-                byte_end,
-                indexed_at,
-                content,
-                similarity,
-                held_elsewhere,
-            } => {
-                any_hit = true;
-                let also_in = match held_elsewhere {
-                    0 => String::new(),
-                    1 => "also in 1 other document\t".to_string(),
-                    others => format!("also in {others} other documents\t"),
-                };
-                writeln!(
-                    io::stdout(),
-                    "{}\tsim={}\tpage {page} of {page_count}\tbytes {byte_start}..{byte_end}\t\
-                     indexed {}\t{also_in}{}",
-                    escape_controls_single_line(path),
-                    similarity_percent(*similarity),
-                    indexed_at.format(INDEXED_DATE_FORMAT),
-                    escape_controls_single_line(&collapse_whitespace(content)),
-                )?;
-            }
-            EventBody::Done if !any_hit => writeln!(
-                io::stderr(),
-                "no document matched; `assistd documents status` shows what is indexed and \
-                 still waiting for a vector"
-            )?,
             _ => {}
         }
         Ok(())

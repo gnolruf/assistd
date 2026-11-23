@@ -3,76 +3,16 @@
 use std::time::Duration;
 
 use assistd_ipc::{Event, EventBody};
-use assistd_memory::{
-    ChunkLocator, ChunkSearch, ChunkSource, MemoryId, SearchRanking, SessionScope, UnindexedRows,
-};
-use assistd_tools::DEFAULT_SEARCH_LIMIT;
+use assistd_memory::{MemoryId, UnindexedRows};
 
 use super::memory_stack::MemoryStack;
-use super::{DispatchError, FailedStep, wire_role, wire_timestamp};
+use super::{DispatchError, FailedStep};
 use crate::bus::EventSink;
 
 /// How often a reindex request counts the rows still waiting.
 const REINDEX_COUNT_INTERVAL: Duration = Duration::from_secs(1);
 
 impl MemoryStack {
-    pub(super) async fn handle_semantic_search(
-        &self,
-        id: String,
-        query: String,
-        limit: u32,
-        tx: EventSink,
-    ) -> Result<(), DispatchError> {
-        let embedder = self.embedder.get().context("semantic search failed")?;
-        let limit = if limit == 0 {
-            DEFAULT_SEARCH_LIMIT
-        } else {
-            limit as usize
-        };
-        let query_vector = embedder.embed_query(&query).await.context("embed failed")?;
-        let messages = ChunkSearch {
-            query,
-            query_vector,
-            kinds: vec![ChunkSource::Message],
-            sessions: SessionScope::All,
-            top_k: limit,
-            ranking: SearchRanking::VectorAndKeyword,
-        };
-        let hits = self
-            .recall
-            .search(messages)
-            .await
-            .context("semantic search failed")?;
-        for hit in hits {
-            let ChunkLocator::Message {
-                session_id,
-                message_id,
-                role,
-                timestamp,
-                ..
-            } = hit.locator
-            else {
-                continue;
-            };
-            let _ = tx
-                .send(Event::new(
-                    id.clone(),
-                    EventBody::SemanticHit {
-                        message_id: message_id.0,
-                        chunk_id: hit.chunk_id.0,
-                        session_id: session_id.to_string(),
-                        timestamp: wire_timestamp(timestamp),
-                        role: wire_role(role),
-                        content: hit.text,
-                        similarity: hit.similarity,
-                        held_elsewhere: hit.held_elsewhere as u64,
-                    },
-                ))
-                .await;
-        }
-        Ok(())
-    }
-
     pub(super) async fn handle_memory_save(
         &self,
         key: String,

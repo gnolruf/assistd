@@ -31,7 +31,7 @@ pub use catalog::ToolCatalog;
 pub use command::{
     Command, CommandError, CommandInput, CommandOutput, CommandRegistry, Usage, run_rendered,
 };
-pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
+pub use memory::MemoryOps;
 pub use memory_tools::RememberTool;
 pub use policy::{
     APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ActionCheck,

@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 
 use assistd_embed::EmbedderHandle;
+use assistd_ipc::{Role, SearchKind, SearchPlace};
 use assistd_memory::{
-    ChunkLocator, ChunkSearch, ChunkSource, MemoryError, RecallStore, SearchHit, SearchRanking,
-    SessionId, SessionScope, TranscriptStore,
+    ChunkLocator, ChunkSearch, ChunkSource, MemoryError, PersistedRole, RecallStore,
+    SHORT_SESSION_ID_CHARS, SearchHit, SearchRanking, SessionId, SessionScope, TranscriptStore,
 };
 use assistd_utils::text::{collapse_whitespace, similarity_percent};
 
@@ -35,7 +36,8 @@ const OUTPUT_BYTES: usize = 8 * 1024;
 /// Bytes of one result kept free for the footer `run` closes it with.
 const FOOTER_BYTES: usize = 64;
 
-const MAX_HITS: usize = 20;
+/// Most hits one search lists.
+pub const MAX_HITS: u32 = 20;
 
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
 
@@ -50,46 +52,6 @@ const SESSION_FLAG: &str = "--session";
 const FLAGS: [&str; 3] = [COUNT_FLAG, KINDS_FLAG, SESSION_FLAG];
 
 const USAGE: &str = "search [-n N] [--in <kinds>] <query...>";
-
-/// One kind of stored text a search ranks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Sessions,
-    Memories,
-    Documents,
-}
-
-impl Kind {
-    const ALL: [Self; 3] = [Self::Sessions, Self::Memories, Self::Documents];
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Sessions => "sessions",
-            Self::Memories => "memories",
-            Self::Documents => "documents",
-        }
-    }
-
-    fn named(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.name() == name)
-    }
-
-    fn source(self) -> ChunkSource {
-        match self {
-            Self::Sessions => ChunkSource::Message,
-            Self::Memories => ChunkSource::Memory,
-            Self::Documents => ChunkSource::Document,
-        }
-    }
-
-    /// The config key that has this kind searched.
-    fn setting(self) -> &'static str {
-        match self {
-            Self::Sessions | Self::Memories => "memory.enabled",
-            Self::Documents => "documents.enabled",
-        }
-    }
-}
 
 /// The saved sessions a search ranks, and the one in progress, whose messages still
 /// in the model's context it leaves out.
@@ -126,11 +88,11 @@ impl Searched {
         }
     }
 
-    fn kinds(&self) -> &'static [Kind] {
+    fn kinds(&self) -> &'static [SearchKind] {
         match self {
-            Self::Memory(_) => &[Kind::Sessions, Kind::Memories],
-            Self::Documents => &[Kind::Documents],
-            Self::MemoryAndDocuments(_) => &Kind::ALL,
+            Self::Memory(_) => &[SearchKind::Sessions, SearchKind::Memories],
+            Self::Documents => &[SearchKind::Documents],
+            Self::MemoryAndDocuments(_) => &SearchKind::ALL,
         }
     }
 
@@ -174,7 +136,7 @@ impl SearchCommand {
 
     /// The kinds a search held to `named` ranks, every searched kind when `None`.
     /// Errors on a kind that is turned off.
-    fn kinds(&self, named: Option<Vec<Kind>>) -> Result<Vec<Kind>, CommandError> {
+    fn kinds(&self, named: Option<Vec<SearchKind>>) -> Result<Vec<SearchKind>, CommandError> {
         let searched = self.searched.kinds();
         let Some(named) = named else {
             return Ok(searched.to_vec());
@@ -217,7 +179,7 @@ impl SearchCommand {
 
     async fn ranked(
         &self,
-        kinds: &[Kind],
+        kinds: &[SearchKind],
         query: String,
         limit: usize,
     ) -> Result<CommandOutput, CommandError> {
@@ -226,7 +188,7 @@ impl SearchCommand {
             .sessions()
             .map(|sessions| *sessions.current.borrow());
         let scope = current.map_or(SessionScope::All, SessionScope::AllExceptInContext);
-        let sources = kinds.iter().map(|kind| kind.source()).collect();
+        let sources = kinds.iter().copied().map(chunk_source).collect();
         let hits = self.hits(query, sources, scope, limit).await?;
         if hits.is_empty() {
             return Err(nothing_found(kinds));
@@ -247,7 +209,7 @@ impl SearchCommand {
         let saved = self
             .searched
             .sessions()
-            .ok_or_else(|| kind_off(Kind::Sessions))?;
+            .ok_or_else(|| kind_off(SearchKind::Sessions))?;
         let session = past_session(saved, prefix).await?;
         let messages = vec![ChunkSource::Message];
         let scope = SessionScope::Only(session);
@@ -384,7 +346,7 @@ impl Command for SearchCommand {
 #[derive(Debug, PartialEq, Eq)]
 enum Within {
     /// The kinds named, or every kind searched when none was.
-    Kinds(Option<Vec<Kind>>),
+    Kinds(Option<Vec<SearchKind>>),
     /// The past session whose id starts with this.
     Session(String),
 }
@@ -436,17 +398,18 @@ impl SearchArgs {
 }
 
 fn parse_limit(raw: &str) -> Result<usize, String> {
-    raw.parse()
+    raw.parse::<u32>()
         .ok()
         .filter(|limit| (1..=MAX_HITS).contains(limit))
+        .map(|limit| limit as usize)
         .ok_or_else(|| format!("{COUNT_FLAG} takes a count from 1 to {MAX_HITS}, got '{raw}'"))
 }
 
 /// The kinds `raw` names between commas, each once.
-fn parse_kinds(raw: &str) -> Result<Vec<Kind>, String> {
+fn parse_kinds(raw: &str) -> Result<Vec<SearchKind>, String> {
     let mut kinds = Vec::new();
     for name in raw.split(',') {
-        let kind = Kind::named(name).ok_or_else(|| {
+        let kind = SearchKind::named(name).ok_or_else(|| {
             format!(
                 "{KINDS_FLAG} takes sessions, memories or documents, separated by commas, \
                  got '{name}'"
@@ -490,7 +453,7 @@ fn listed(hits: &[SearchHit], current: Option<SessionId>, budget: usize) -> Stri
     let room = budget.saturating_sub(omitted_note(hits.len()).len());
     let mut out = String::from(UNTRUSTED_HEADER);
     let mut shown = 0;
-    for line in hits.iter().map(|hit| hit_line(hit, current)) {
+    for line in hits.iter().map(|hit| listed_hit(hit, current)) {
         if out.len() + line.len() > room {
             break;
         }
@@ -503,21 +466,19 @@ fn listed(hits: &[SearchHit], current: Option<SessionId>, budget: usize) -> Stri
     out
 }
 
-/// A hit as one line of tab-separated fields: kind, place, similarity, how many
-/// other places hold its text when any does, and the passage.
-fn hit_line(hit: &SearchHit, current: Option<SessionId>) -> String {
-    format!(
-        "{}\tsim={}\t{}{}\n",
-        hit_place(&hit.locator, current),
-        similarity_percent(hit.similarity),
-        other_holders(hit.held_elsewhere),
-        collapse_whitespace(&hit.text),
-    )
+/// A hit as `search` lists it, one line of tab-separated fields: kind, place,
+/// similarity, how many other places hold its text when any does, and the passage.
+pub fn hit_line(
+    place: &SearchPlace,
+    similarity: Option<f32>,
+    held_elsewhere: u64,
+    passage: &str,
+) -> String {
+    listed_line(&place_fields(place), similarity, held_elsewhere, passage)
 }
 
-/// A hit's kind and, after a tab, where its passage is, as the command that reads
-/// on from it takes it.
-fn hit_place(locator: &ChunkLocator, current: Option<SessionId>) -> String {
+/// Where the passage of a hit at `locator` is, as the wire carries it.
+pub fn wire_place(locator: &ChunkLocator) -> SearchPlace {
     match locator {
         ChunkLocator::Message {
             session_id,
@@ -525,23 +486,13 @@ fn hit_place(locator: &ChunkLocator, current: Option<SessionId>) -> String {
             role,
             session_label,
             ..
-        } => {
-            let session = if Some(*session_id) == current {
-                "this one, before its summary".to_string()
-            } else {
-                format!(
-                    "{} \"{}\"",
-                    session_id.short(),
-                    collapse_whitespace(session_label)
-                )
-            };
-            format!(
-                "session\t{session} {} {}",
-                timestamp.format(TIMESTAMP_FORMAT),
-                role.as_wire()
-            )
-        }
-        ChunkLocator::Memory { key, .. } => format!("memory\t{key}"),
+        } => SearchPlace::Session {
+            session_id: session_id.to_string(),
+            title: session_label.clone(),
+            timestamp: *timestamp,
+            role: wire_role(*role),
+        },
+        ChunkLocator::Memory { key, .. } => SearchPlace::Memory { key: key.clone() },
         ChunkLocator::Document {
             path,
             page,
@@ -549,19 +500,104 @@ fn hit_place(locator: &ChunkLocator, current: Option<SessionId>) -> String {
             bytes,
             indexed_at,
             ..
+        } => SearchPlace::Document {
+            path: path.display().to_string(),
+            page: *page as u64 + 1,
+            page_count: *page_count as u64,
+            byte_start: bytes.start as u64,
+            byte_end: bytes.end as u64,
+            indexed_at: *indexed_at,
+        },
+    }
+}
+
+/// The chunks a search of `kind` ranks.
+pub fn chunk_source(kind: SearchKind) -> ChunkSource {
+    match kind {
+        SearchKind::Sessions => ChunkSource::Message,
+        SearchKind::Memories => ChunkSource::Memory,
+        SearchKind::Documents => ChunkSource::Document,
+    }
+}
+
+/// The config key that has `kind` searched.
+pub fn enabling_setting(kind: SearchKind) -> &'static str {
+    match kind {
+        SearchKind::Sessions | SearchKind::Memories => "memory.enabled",
+        SearchKind::Documents => "documents.enabled",
+    }
+}
+
+fn wire_role(role: PersistedRole) -> Role {
+    match role {
+        PersistedRole::User => Role::User,
+        PersistedRole::Assistant => Role::Assistant,
+        PersistedRole::Tool => Role::Tool,
+    }
+}
+
+/// The line of `hit`, whose session is named unless it is `current`.
+fn listed_hit(hit: &SearchHit, current: Option<SessionId>) -> String {
+    let place = match &hit.locator {
+        ChunkLocator::Message {
+            session_id,
+            timestamp,
+            role,
+            ..
+        } if Some(*session_id) == current => format!(
+            "session\tthis one, before its summary {} {}",
+            timestamp.format(TIMESTAMP_FORMAT),
+            role.as_wire()
+        ),
+        locator => place_fields(&wire_place(locator)),
+    };
+    listed_line(&place, hit.similarity, hit.held_elsewhere as u64, &hit.text)
+}
+
+fn listed_line(place: &str, similarity: Option<f32>, held_elsewhere: u64, passage: &str) -> String {
+    format!(
+        "{place}\tsim={}\t{}{}\n",
+        similarity_percent(similarity),
+        other_holders(held_elsewhere),
+        collapse_whitespace(passage),
+    )
+}
+
+/// A hit's kind and, after a tab, where its passage is, as the command that reads
+/// on from it takes it.
+fn place_fields(place: &SearchPlace) -> String {
+    match place {
+        SearchPlace::Session {
+            session_id,
+            title,
+            timestamp,
+            role,
+        } => {
+            let short_id: String = session_id.chars().take(SHORT_SESSION_ID_CHARS).collect();
+            format!(
+                "session\t{short_id} \"{}\" {} {role}",
+                collapse_whitespace(title),
+                timestamp.format(TIMESTAMP_FORMAT),
+            )
+        }
+        SearchPlace::Memory { key } => format!("memory\t{key}"),
+        SearchPlace::Document {
+            path,
+            page,
+            page_count,
+            byte_start,
+            byte_end,
+            indexed_at,
         } => format!(
-            "document\t\"{}\" page {} of {page_count} bytes {}..{} indexed {}",
-            path.display(),
-            page + 1,
-            bytes.start,
-            bytes.end,
+            "document\t\"{path}\" page {page} of {page_count} bytes {byte_start}..{byte_end} \
+             indexed {}",
             indexed_at.format(INDEXED_DATE_FORMAT),
         ),
     }
 }
 
 /// The field saying `others` more places hold a hit's passage; nothing when none does.
-fn other_holders(others: usize) -> String {
+fn other_holders(others: u64) -> String {
     match others {
         0 => String::new(),
         1 => "also in 1 other place\t".to_string(),
@@ -614,22 +650,22 @@ fn omitted_note(omitted: usize) -> String {
     format!("({omitted} lower-ranked matches omitted)\n")
 }
 
-fn kind_off(kind: Kind) -> CommandError {
+fn kind_off(kind: SearchKind) -> CommandError {
     CommandError::failed(
         format_args!(
             "{} are not searched while {} is false",
             kind.name(),
-            kind.setting()
+            enabling_setting(kind)
         ),
         Hint::Note,
         format_args!(
             "only the user can turn it on, with {} = true in the config file",
-            kind.setting()
+            enabling_setting(kind)
         ),
     )
 }
 
-fn nothing_found(kinds: &[Kind]) -> CommandError {
+fn nothing_found(kinds: &[SearchKind]) -> CommandError {
     let names: Vec<&str> = kinds.iter().map(|kind| kind.name()).collect();
     CommandError::failed(
         format_args!("nothing in {} matches", names.join(", ")),

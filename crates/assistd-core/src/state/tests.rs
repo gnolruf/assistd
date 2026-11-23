@@ -15,8 +15,8 @@ use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
     Component, ComponentReadiness, EventBody, ImageAttachment, ImageMime, ListenPhase,
     McpServerState, McpTransportKind, PausedPrompt, PermissionMode, PlanMode, PlanVerdict,
-    PresenceState, PresenceTarget, QueueItem, RequestBody, StartupComponent, StatusKind,
-    StatusSeverity, SubscribeFilter, TaskId, TaskQueueSnapshot, TaskRequest, TaskRunId,
+    PresenceState, PresenceTarget, QueueItem, RequestBody, SearchKind, StartupComponent,
+    StatusKind, StatusSeverity, SubscribeFilter, TaskId, TaskQueueSnapshot, TaskRequest, TaskRunId,
     TaskRunState, TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{
@@ -406,9 +406,10 @@ async fn semantic_requests_before_embedding_is_up_say_it_is_starting() {
         &state,
         Request::new(
             "s",
-            RequestBody::MemorySemanticSearch {
+            RequestBody::Search {
                 query: "the rust daemon".into(),
                 limit: 3,
+                kinds: vec![SearchKind::Sessions],
             },
         ),
     )
@@ -419,9 +420,20 @@ async fn semantic_requests_before_embedding_is_up_say_it_is_starting() {
     );
     assert_eq!(
         events,
+        [error("s", "search failed: embedding is still starting")]
+    );
+
+    let documents = RequestBody::Search {
+        query: "the rust daemon".into(),
+        limit: 0,
+        kinds: vec![SearchKind::Documents],
+    };
+    let (_, events) = dispatch(&state, Request::new("d", documents)).await;
+    assert_eq!(
+        events,
         [error(
-            "s",
-            "semantic search failed: embedding is still starting"
+            "d",
+            "documents are not searched while documents.enabled is false"
         )]
     );
 

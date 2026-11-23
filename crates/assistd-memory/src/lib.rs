@@ -13,7 +13,10 @@ mod tasks;
 mod transcripts;
 
 pub use error::{BackendError, MemoryError, Result};
-pub use ids::{BranchId, ChunkId, DocumentId, MemoryId, MessageId, Seq, SessionId, TurnId};
+pub use ids::{
+    BranchId, ChunkId, DocumentId, MemoryId, MessageId, SHORT_SESSION_ID_CHARS, Seq, SessionId,
+    TurnId,
+};
 pub use memories::{MemoryRecord, SavedMemory};
 pub use relay_traces::{
     PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, PersistedRelayStep,
