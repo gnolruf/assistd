@@ -161,9 +161,10 @@ model = "ggml-org/GLM-OCR-GGUF:Q8_0"
 `llama-server` downloads the model the first time it is used. It must
 be a vision model; one without a vision projector refuses every page.
 
-Pages are only transcribed while the daemon is **drowsy**: the main
-model is unloaded then, so the OCR model takes its place on the GPU and
-never competes with a conversation. The daemon drowses after
+Page transcription waits for a permit that is open only while the
+daemon is **drowsy**: the main model is unloaded then, so the OCR model
+takes its place on the GPU and never competes with a conversation. The
+daemon drowses after
 `sleep.idle_to_drowsy_mins` idle minutes (30 by default), or at once
 with `assistd drowse`. Transcription stops when the daemon wakes, and
 when it goes on to sleep (`sleep.idle_to_sleep_mins`, 120 by default).
@@ -195,18 +196,27 @@ time nothing else wants. An edited `.gitignore` takes effect at the
 next whole pass, so run `reindex` after changing one.
 
 **Embedding** (computing the vectors a search by meaning uses) follows
-in the background and takes longer. By default it pauses while it could
-slow something down:
+in the background and takes longer. Each batch of document text waits
+for a permit, which by default is closed while embedding could slow
+something down:
 
-| It waits while…                                              | To embed anyway, set         |
+| The permit is closed while…                                  | To embed anyway, set         |
 |--------------------------------------------------------------|------------------------------|
 | you are talking to the model, and for `tasks.resume_after_idle_secs` (120 by default) after its last reply | `embed_during_interaction`   |
 | a task is running                                            | `embed_during_tasks`         |
 | the daemon is asleep because another program needs the GPU   | `embed_during_gpu_sleep`     |
 
-Embedding goes on while the daemon is drowsy or asleep from idleness. A
-file can be found by its exact words as soon as it is indexed, before
-it has been embedded.
+The permit stays open while the daemon is drowsy or asleep from
+idleness. It is read between batches of 32 chunks, so embedding stops
+within one batch of your message. A file can be found by its exact
+words as soon as it is indexed, before it has been embedded.
+
+**Page transcription** waits for its own permit, open only while the
+daemon is drowsy ([scanned PDFs](#scanned-pdfs)).
+
+Both are backlogs: the work is whatever stored text still lacks its
+result, so a restart loses nothing.
+[architecture.md](architecture.md#who-runs-when) has the rules.
 
 ### Checking progress
 
@@ -331,6 +341,17 @@ remove a folder or add `exclude` patterns, then restart the daemon.
 **A search finds nothing, or misses a file you know is there.** Check
 that the file is not among the skipped ones, and that `waiting for a
 vector` has reached zero: until then only exact words find a file.
+
+**A file is found by its exact words but never by meaning, with
+nothing waiting for a vector.** Some of its chunks are refused rows. A
+row is refused when the embedding server rejects its text, usually as
+longer than the model's input limit, or when it fails three times on
+its own while the server embeds other text. The daemon log names each
+with `row cannot be embedded`. A refused row is not counted as waiting
+and is not tried again until you run `assistd memory reindex`, which
+retries every refused row and prints what is left to embed until
+nothing is. It helps after a server fault; text the model rejects is
+refused again.
 
 **`page transcription: never runs …`.** `sleep.idle_to_drowsy_mins` is
 `0`. Set it, or run `assistd drowse` when you want pages read.
