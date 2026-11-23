@@ -1,6 +1,7 @@
 //! SQLite implementations of the stores, sharing one [`SqliteHandle`] with a
 //! read-only connection and a single writable one.
 
+mod chunks;
 mod connection;
 mod memories;
 mod rows;

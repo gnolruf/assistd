@@ -1,6 +1,6 @@
-//! SQLite-backed [`SemanticStore`](crate::SemanticStore) over one vector table each for the texts
-//! of message chunks, the texts of document chunks, and memories, and a keyword index
-//! of document chunks.
+//! SQLite-backed [`SemanticStore`](crate::SemanticStore) over the chunks cut from messages,
+//! memories and documents: one vector table for the texts of each kind, and one
+//! keyword index of them all.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -20,13 +20,14 @@ use tokio::sync::Notify;
 use crate::{
     AdjacentChunks, ChunkId, ChunkLocator, ChunkSource, ContextChunk, DocumentHit, DocumentId,
     DocumentStore, DocumentText, Embedding, EmbeddingHit, EmbeddingQueue, EmbeddingSpace,
-    EmbeddingTarget, EmptyPages, FileStamp, IndexPass, IndexRootCounts, MemoryHit, MemoryId,
-    MessageId, PageReading, RecallStore, Result, SessionId, SessionScope, SkippedRead,
-    TranscriptionCounts, UnindexedFile, UnindexedRows, WaitingPage,
+    EmptyPages, FileStamp, IndexPass, IndexRootCounts, MemoryHit, MemoryId, MessageId, PageReading,
+    RecallStore, Result, SessionId, SessionScope, SkippedRead, TranscriptionCounts, UnindexedFile,
+    UnindexedRows, WaitingPage,
 };
 
 use crate::chunking::text_hash;
 
+use super::chunks::{CHUNK_SOURCES, kind_code, vector_table};
 use super::connection::SqliteHandle;
 use super::timestamp::timestamp_at;
 
@@ -35,26 +36,26 @@ mod documents;
 
 /// Every message chunk with the vector of its text, grouped by its message.
 const MESSAGE_CHUNK_VECTORS: &str = "
-    SELECT cc.message_id, cc.id, v.vector
+    SELECT cc.source, cc.id, v.vector
     FROM chunks cc JOIN message_vectors v ON v.hash = cc.hash
-    WHERE cc.message_id IS NOT NULL AND v.vector IS NOT NULL";
+    WHERE cc.kind = 0 AND v.vector IS NOT NULL";
 
 /// Restricts [`MESSAGE_CHUNK_VECTORS`] to the messages of session `?1`.
 const IN_SESSION: &str = "
-    AND cc.message_id IN (
+    AND cc.source IN (
         SELECT m.id FROM sessions s JOIN messages m ON m.session_id = s.id
         WHERE s.uuid = ?1)";
 
 /// Restricts [`MESSAGE_CHUNK_VECTORS`] to the messages outside session `?1`.
 const OUTSIDE_SESSION: &str = "
-    AND cc.message_id NOT IN (
+    AND cc.source NOT IN (
         SELECT m.id FROM sessions s JOIN messages m ON m.session_id = s.id
         WHERE s.uuid = ?1)";
 
 /// Restricts [`MESSAGE_CHUNK_VECTORS`] to the messages outside session `?1`'s live
 /// context: other sessions' messages, and those its current branch's summary folded.
 const OUTSIDE_SESSION_CONTEXT: &str = "
-    AND cc.message_id NOT IN (
+    AND cc.source NOT IN (
         SELECT m.id FROM sessions s JOIN messages m ON m.session_id = s.id
         WHERE s.uuid = ?1
           AND m.id NOT IN (
@@ -67,12 +68,11 @@ const OUTSIDE_SESSION_CONTEXT: &str = "
 const DOCUMENT_TEXT_VECTORS: &str =
     "SELECT hash, hash, vector FROM document_vectors WHERE vector IS NOT NULL";
 
-/// Every memory vector, each its own group.
-const ALL_MEMORY_VECTORS: &str =
-    "SELECT memory_id, memory_id, vector FROM memory_embeddings WHERE vector IS NOT NULL";
-
-/// Every table holding vectors.
-const EMBEDDING_TABLES: [&str; 3] = ["message_vectors", "document_vectors", "memory_embeddings"];
+/// Every memory's chunk with the vector of its text, each memory its own group.
+const MEMORY_VECTORS: &str = "
+    SELECT cc.source, cc.source, v.vector
+    FROM chunks cc JOIN memory_vectors v ON v.hash = cc.hash
+    WHERE cc.kind = 1 AND v.vector IS NOT NULL";
 
 /// Every index root `r` with how many documents it holds, the chunks they are cut into,
 /// and those chunks whose text is neither embedded nor marked unembeddable.
@@ -80,7 +80,7 @@ const INDEX_ROOT_COUNTS: &str = "
     SELECT r.path, count(DISTINCT d.id), count(cc.id), count(cc.id) - count(v.hash)
     FROM index_roots r
     LEFT JOIN documents d ON d.root_id = r.id
-    LEFT JOIN chunks cc ON cc.document_id = d.id
+    LEFT JOIN chunks cc ON cc.kind = 2 AND cc.source = d.id
     LEFT JOIN document_vectors v ON v.hash = cc.hash
     GROUP BY r.id ORDER BY r.id";
 
@@ -105,8 +105,8 @@ const DOCUMENT_CHUNK_COLUMNS: &str = "
 
 /// Joins a document chunk `cc` to its document `d` and its page `p`.
 const DOCUMENT_CHUNK_OWNERS: &str = "
-    JOIN documents d ON d.id = cc.document_id
-    JOIN document_pages p ON p.document_id = cc.document_id AND p.page = cc.page";
+    JOIN documents d ON d.id = cc.source
+    JOIN document_pages p ON p.document_id = cc.source AND p.page = cc.page";
 
 /// Characters of an untitled session's opening user message kept in its label.
 const SESSION_LABEL_CHARS: usize = 60;
@@ -117,12 +117,9 @@ const SCORE_LANES: usize = 8;
 /// The largest count of steps a quantised vector component holds, either side of zero.
 const QUANTISED_STEPS: f32 = 127.0;
 
-/// Scores the stored vector BLOB against the query; `None` for a BLOB to skip.
-type ScoreBlob = fn(&[f32], &[u8]) -> Option<f32>;
-
 /// SQLite-backed [`SemanticStore`](crate::SemanticStore): a linear scan of one source kind's vectors into a
-/// bounded top-K, then one batched lookup of the winners. Chunk vectors are stored
-/// quantised, so their similarities are approximate; documents rank by keyword as well.
+/// bounded top-K, then one batched lookup of the winners. Vectors are stored
+/// quantised, so similarities are approximate; documents rank by keyword as well.
 #[derive(Debug, Clone)]
 pub struct SqliteSemanticStore {
     handle: SqliteHandle,
@@ -200,10 +197,9 @@ impl RecallStore for SqliteSemanticStore {
             .search("nearest_memories", move |c| {
                 let ranked = scan_top_k::<MemoryId, MemoryId>(
                     c,
-                    ALL_MEMORY_VECTORS,
+                    MEMORY_VECTORS,
                     [],
                     &query_vector,
-                    score_against,
                     top_k,
                 )?;
                 hydrate_in_rank_order(
@@ -293,43 +289,11 @@ impl EmbeddingQueue for SqliteSemanticStore {
                     let missing = ChunkKind::of(source).missing_embedding();
                     c.query_row(&format!("SELECT count(*) {missing}"), [], |r| r.get(0))
                 };
-                let memories = c.query_row(
-                    "SELECT count(*)
-                     FROM memories mem
-                     WHERE NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = mem.id)",
-                    [],
-                    |r| r.get(0),
-                )?;
                 Ok(UnindexedRows {
                     message_chunks: count_chunks(ChunkSource::Message)?,
                     document_chunks: count_chunks(ChunkSource::Document)?,
-                    memories,
+                    memories: count_chunks(ChunkSource::Memory)?,
                 })
-            })
-            .await
-    }
-
-    async fn memories_missing_embedding(
-        &self,
-        after: Option<MemoryId>,
-        limit: usize,
-    ) -> Result<Vec<(MemoryId, String)>> {
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        self.handle
-            .read("memories_missing_embedding", move |c| {
-                c.prepare_cached(
-                    "SELECT mem.id, mem.value
-                     FROM memories mem
-                     WHERE mem.id > ifnull(?1, 0) AND NOT EXISTS (
-                         SELECT 1 FROM memory_embeddings e WHERE e.memory_id = mem.id
-                     )
-                     ORDER BY mem.id
-                     LIMIT ?2",
-                )?
-                .query_map(rusqlite::params![after, limit], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })?
-                .collect()
             })
             .await
     }
@@ -342,17 +306,17 @@ impl EmbeddingQueue for SqliteSemanticStore {
     ) -> Result<Vec<(ChunkId, String)>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let kind = ChunkKind::of(source);
-        let (missing, owner) = (kind.missing_embedding(), kind.owner_column);
+        let (missing, text) = (kind.missing_embedding(), kind.text_column);
         self.handle
             .read("chunks_missing_embedding", move |c| {
                 c.prepare_cached(&format!(
                     "SELECT cc.id,
-                            CAST(substr(CAST(src.content AS BLOB),
+                            CAST(substr(CAST(src.{text} AS BLOB),
                                         cc.byte_start + 1, cc.byte_end - cc.byte_start) AS TEXT)
                      {missing} AND cc.id > ifnull(?1, 0)
                        AND NOT EXISTS (SELECT 1 FROM chunks earlier
                                        WHERE earlier.hash = cc.hash AND earlier.id < cc.id
-                                         AND earlier.{owner} IS NOT NULL)
+                                         AND earlier.kind = cc.kind)
                      ORDER BY cc.id
                      LIMIT ?2"
                 ))?
@@ -372,7 +336,7 @@ impl EmbeddingQueue for SqliteSemanticStore {
             .write("store_embeddings", move |tx| {
                 embeddings
                     .iter()
-                    .try_for_each(|embedding| upsert_embedding(tx, embedding).map(drop))
+                    .try_for_each(|embedding| upsert_text_vector(tx, embedding).map(drop))
             })
             .await
     }
@@ -381,7 +345,8 @@ impl EmbeddingQueue for SqliteSemanticStore {
         let cleared = self
             .handle
             .write("clear_unembeddable", |tx| {
-                let cleared = EMBEDDING_TABLES
+                let cleared = CHUNK_SOURCES
+                    .map(vector_table)
                     .iter()
                     .map(|table| {
                         tx.execute(&format!("DELETE FROM {table} WHERE vector IS NULL"), [])
@@ -584,11 +549,9 @@ impl DocumentStore for SqliteSemanticStore {
     async fn count_document_chunks(&self) -> Result<u64> {
         self.handle
             .read("count_document_chunks", |c| {
-                c.query_row(
-                    "SELECT count(*) FROM chunks WHERE document_id IS NOT NULL",
-                    [],
-                    |r| r.get(0),
-                )
+                c.query_row("SELECT count(*) FROM chunks WHERE kind = 2", [], |r| {
+                    r.get(0)
+                })
             })
             .await
     }
@@ -612,31 +575,33 @@ impl Side {
     }
 }
 
-/// The names that differ between the chunks cut from messages and those cut from
-/// documents.
+/// What differs between the chunks of each kind in the statements that read them.
 struct ChunkKind {
-    /// The `chunks` column set on a chunk of this kind.
-    owner_column: &'static str,
-    /// Joins a chunk `cc` to `src`, the row whose `content` it is a range of.
+    /// The `chunks.kind` code.
+    code: i64,
+    /// Joins a chunk `cc` to `src`, the row holding the text it is a range of.
     owner_join: &'static str,
+    /// The column of `src` holding that text.
+    text_column: &'static str,
     /// The table holding the vector of each text chunks of this kind hold.
     vectors: &'static str,
 }
 
 impl ChunkKind {
     const fn of(source: ChunkSource) -> Self {
-        match source {
-            ChunkSource::Message => Self {
-                owner_column: "message_id",
-                owner_join: "JOIN messages src ON src.id = cc.message_id",
-                vectors: "message_vectors",
-            },
-            ChunkSource::Document => Self {
-                owner_column: "document_id",
-                owner_join: "JOIN document_pages src
-                             ON src.document_id = cc.document_id AND src.page = cc.page",
-                vectors: "document_vectors",
-            },
+        let (owner_join, text_column) = match source {
+            ChunkSource::Message => ("JOIN messages src ON src.id = cc.source", "content"),
+            ChunkSource::Memory => ("JOIN memories src ON src.id = cc.source", "value"),
+            ChunkSource::Document => (
+                "JOIN document_pages src ON src.document_id = cc.source AND src.page = cc.page",
+                "content",
+            ),
+        };
+        Self {
+            code: kind_code(source),
+            owner_join,
+            text_column,
+            vectors: vector_table(source),
         }
     }
 
@@ -644,13 +609,15 @@ impl ChunkKind {
     /// text is neither embedded nor marked unembeddable, each with its owner `src`.
     fn missing_embedding(&self) -> String {
         let Self {
+            code,
             owner_join,
             vectors,
             ..
         } = self;
         format!(
             "FROM chunks cc {owner_join}
-             WHERE NOT EXISTS (SELECT 1 FROM {vectors} v WHERE v.hash = cc.hash)"
+             WHERE cc.kind = {code}
+               AND NOT EXISTS (SELECT 1 FROM {vectors} v WHERE v.hash = cc.hash)"
         )
     }
 }
@@ -732,13 +699,12 @@ impl<Group: PartialEq, Id> TopK<Group, Id> {
 }
 
 /// The `top_k` best `(group, id, vector)` rows of `sql` bound to `params`, their
-/// vectors scored against `query` by `score`, one per group, best first.
+/// quantised vectors scored against `query`, one per group, best first.
 fn scan_top_k<Group: FromSql + Eq + Hash, Id: FromSql>(
     conn: &rusqlite::Connection,
     sql: &str,
     params: impl Params,
     query: &[f32],
-    score: ScoreBlob,
     top_k: usize,
 ) -> rusqlite::Result<Vec<(Id, f32)>> {
     let mut stmt = conn.prepare_cached(sql)?;
@@ -746,7 +712,7 @@ fn scan_top_k<Group: FromSql + Eq + Hash, Id: FromSql>(
     let mut rows = stmt.query(params)?;
     while let Some(row) = rows.next()? {
         let bytes = row.get_ref(2)?.as_blob()?;
-        if let Some(similarity) = score(query, bytes) {
+        if let Some(similarity) = score_against_quantised(query, bytes) {
             best.offer(row.get::<_, Group>(0)?, row.get(1)?, similarity);
         }
     }
@@ -761,27 +727,19 @@ fn nearest_message_chunks(
     sessions: SessionScope,
 ) -> rusqlite::Result<Vec<EmbeddingHit>> {
     let ranked = match scope_clause(sessions) {
-        None => scan_top_k::<MessageId, ChunkId>(
-            conn,
-            MESSAGE_CHUNK_VECTORS,
-            [],
-            query,
-            score_against_quantised,
-            top_k,
-        )?,
+        None => scan_top_k::<MessageId, ChunkId>(conn, MESSAGE_CHUNK_VECTORS, [], query, top_k)?,
         Some((clause, session)) => scan_top_k::<MessageId, ChunkId>(
             conn,
             &format!("{MESSAGE_CHUNK_VECTORS}{clause}"),
             [session],
             query,
-            score_against_quantised,
             top_k,
         )?,
     };
     let select = format!(
         "SELECT {MESSAGE_CHUNK_COLUMNS}
          FROM chunks cc
-         JOIN messages m ON m.id = cc.message_id
+         JOIN messages m ON m.id = cc.source AND cc.kind = 0
          JOIN sessions s ON s.id = m.session_id
          WHERE cc.id IN (SELECT value FROM json_each(?1))"
     );
@@ -871,7 +829,7 @@ fn adjacent_message_chunk(
          FROM here
          JOIN branch_messages bm ON bm.branch_id = here.branch_id
          JOIN messages m ON m.id = bm.message_id
-         JOIN chunks cc ON cc.message_id = m.id
+         JOIN chunks cc ON cc.kind = 0 AND cc.source = m.id
          JOIN sessions s ON s.id = m.session_id
          WHERE bm.seq {seq_test} here.seq AND m.role IN (0, 1)
          ORDER BY bm.seq {order}, cc.byte_start {order}
@@ -894,7 +852,8 @@ fn adjacent_document_chunk(
     let sql = format!(
         "SELECT {DOCUMENT_CHUNK_COLUMNS}
          FROM chunks cc {DOCUMENT_CHUNK_OWNERS}
-         WHERE cc.document_id = ?1 AND (cc.page, cc.byte_start) {start_test} (?2, ?3)
+         WHERE cc.kind = 2 AND cc.source = ?1
+           AND (cc.page, cc.byte_start) {start_test} (?2, ?3)
          ORDER BY cc.page {order}, cc.byte_start {order}
          LIMIT 1"
     );
@@ -994,17 +953,6 @@ fn json_id_array<Id: fmt::Display>(ids: impl IntoIterator<Item = Id>) -> String 
     format!("[{}]", ids.join(","))
 }
 
-/// Dot product of `query` against the LE-packed f32 BLOB `bytes`, or `None` when
-/// the BLOB is malformed, its dimension differs, or the product is not finite.
-fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
-    let (words, trailing) = bytes.as_chunks::<4>();
-    if !trailing.is_empty() || words.len() != query.len() {
-        return None;
-    }
-    let similarity = dot(query, words, |word| f32::from_le_bytes(*word));
-    similarity.is_finite().then_some(similarity)
-}
-
 /// Approximate dot product of `query` against the quantised BLOB `bytes`, or `None`
 /// when the BLOB is malformed, its dimension differs, or the product is not finite.
 fn score_against_quantised(query: &[f32], bytes: &[u8]) -> Option<f32> {
@@ -1068,77 +1016,39 @@ fn record_space(tx: &Transaction<'_>, space: &EmbeddingSpace) -> rusqlite::Resul
     )
 }
 
-/// Empty every table in [`EMBEDDING_TABLES`] by dropping it and creating it again
-/// from its own definition, which costs nothing per row.
+/// Empty every vector table by dropping it and creating it again from its own
+/// definition, which costs nothing per row.
 fn recreate_embedding_tables(tx: &Transaction<'_>) -> rusqlite::Result<()> {
-    EMBEDDING_TABLES.iter().try_for_each(|table| {
-        let definition: String = tx.query_row(
-            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-            [table],
-            |row| row.get(0),
-        )?;
-        tx.execute_batch(&format!("DROP TABLE {table}; {definition};"))
-    })
+    CHUNK_SOURCES
+        .map(vector_table)
+        .iter()
+        .try_for_each(|table| {
+            let definition: String = tx.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )?;
+            tx.execute_batch(&format!("DROP TABLE {table}; {definition};"))
+        })
 }
 
-/// Upsert `embedding` into its target's table, with a `NULL` vector when it has
-/// none. The `SELECT` makes a since-deleted memory, or one whose value has changed
-/// since, a no-op rather than an error or a vector for the wrong text.
-fn upsert_embedding(tx: &Transaction<'_>, embedding: &Embedding) -> rusqlite::Result<usize> {
-    let vector = embedding.vector.as_deref();
-    match embedding.target {
-        EmbeddingTarget::ChunkText(source) => {
-            upsert_text_vector(tx, source, &embedding.text, vector)
-        }
-        EmbeddingTarget::Memory(id) => tx
-            .prepare_cached(
-                "INSERT INTO memory_embeddings (memory_id, vector)
-                 SELECT id, ?2 FROM memories WHERE id = ?1 AND value = ?3
-                 ON CONFLICT(memory_id) DO UPDATE SET vector = excluded.vector",
-            )?
-            .execute(rusqlite::params![
-                id,
-                vector.map(vector_to_blob),
-                embedding.text
-            ]),
-    }
-}
-
-/// Upsert `vector` as that of `text` for the chunks cut from `source`; a no-op when
-/// none of them holds `text` any more.
-fn upsert_text_vector(
-    tx: &Transaction<'_>,
-    source: ChunkSource,
-    text: &str,
-    vector: Option<&[f32]>,
-) -> rusqlite::Result<usize> {
-    let ChunkKind {
-        owner_column,
-        vectors,
-        ..
-    } = ChunkKind::of(source);
+/// Upsert the vector of `embedding` as that of its text for the chunks cut from its
+/// source, `NULL` when it has none; a no-op when none of them holds the text any more.
+fn upsert_text_vector(tx: &Transaction<'_>, embedding: &Embedding) -> rusqlite::Result<usize> {
+    let ChunkKind { code, vectors, .. } = ChunkKind::of(embedding.source);
     tx.prepare_cached(&format!(
         "INSERT INTO {vectors} (hash, vector)
          SELECT ?1, ?2
-         WHERE EXISTS (SELECT 1 FROM chunks WHERE hash = ?1 AND {owner_column} IS NOT NULL)
+         WHERE EXISTS (SELECT 1 FROM chunks WHERE hash = ?1 AND kind = {code})
          ON CONFLICT(hash) DO UPDATE SET vector = excluded.vector"
     ))?
     .execute(rusqlite::params![
-        text_hash(text.as_bytes()),
-        vector.map(quantised_blob)
+        text_hash(embedding.text.as_bytes()),
+        embedding.vector.as_deref().map(quantised_blob)
     ])
 }
 
-/// Encode `vector` as the little-endian `f32` BLOB `memory_embeddings` stores.
-fn vector_to_blob(vector: &[f32]) -> Vec<u8> {
-    let mut blob = Vec::with_capacity(vector.len() * 4);
-    for value in vector {
-        blob.extend_from_slice(&value.to_le_bytes());
-    }
-    blob
-}
-
-/// Encode `vector` as the BLOB the chunk vector tables store: a little-endian
+/// Encode `vector` as the BLOB the vector tables store: a little-endian
 /// `f32` step sized so the largest component is [`QUANTISED_STEPS`] steps, then each
 /// component as an `i8` count of steps.
 fn quantised_blob(vector: &[f32]) -> Vec<u8> {

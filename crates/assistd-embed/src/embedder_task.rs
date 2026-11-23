@@ -1,14 +1,12 @@
-//! Background worker that embeds the rows the semantic store lists as missing an
-//! embedding, a batch at a time, each time it is woken: message chunks and memories
+//! Background worker that embeds the chunks the semantic store lists as missing an
+//! embedding, a batch at a time, each time it is woken: message and memory chunks
 //! at once, document chunks only while a gate is open. A chunk's vector is stored for
 //! its text, so the store lists one chunk for each text.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use assistd_memory::{
-    ChunkId, ChunkSource, Embedding, EmbeddingQueue, EmbeddingTarget, MemoryError, MemoryId,
-};
+use assistd_memory::{ChunkId, ChunkSource, Embedding, EmbeddingQueue, MemoryError};
 use assistd_utils::backlog::{Backlog, DrainEnd, Pass, Signals, drain, keep_drained};
 use assistd_utils::backoff::backoff_delay;
 use thiserror::Error;
@@ -33,49 +31,31 @@ enum PassError {
     Store(#[from] MemoryError),
 }
 
-/// The rows one [`EmbeddingBacklog`] lists.
-#[derive(Debug, Clone, Copy)]
-enum RowKind {
-    MessageChunks,
-    Memories,
-    DocumentChunks,
-}
-
-impl RowKind {
-    /// What the embedding of the text of row `id` is stored for.
-    fn target(self, id: i64) -> EmbeddingTarget {
-        match self {
-            Self::MessageChunks => EmbeddingTarget::ChunkText(ChunkSource::Message),
-            Self::DocumentChunks => EmbeddingTarget::ChunkText(ChunkSource::Document),
-            Self::Memories => EmbeddingTarget::Memory(MemoryId(id)),
-        }
-    }
-}
-
-/// The rows of one kind missing an embedding, keyed by row id.
+/// The chunks cut from one kind of source that are missing an embedding, keyed by
+/// chunk id.
 #[derive(Debug)]
 struct EmbeddingBacklog<'a> {
-    kind: RowKind,
+    source: ChunkSource,
     embedder: &'a dyn Embedder,
     store: &'a dyn EmbeddingQueue,
     permit: Option<watch::Receiver<bool>>,
-    /// Times each row still missing has failed alone while the server worked.
-    failures: HashMap<i64, u32>,
+    /// Times each chunk still missing has failed alone while the server worked.
+    failures: HashMap<ChunkId, u32>,
 }
 
 impl EmbeddingBacklog<'_> {
-    /// What to store for row `id` after `outcome`, or `None` to leave it missing.
+    /// What to store for chunk `id` after `outcome`, or `None` to leave it missing.
     fn embedding_to_store(
         &mut self,
-        id: i64,
+        id: ChunkId,
         text: String,
         outcome: InputOutcome,
     ) -> Option<Embedding> {
-        let kind = self.kind;
+        let source = self.source;
         let vector = match outcome {
             InputOutcome::Embedded(vector) => Some(vector),
             InputOutcome::Refused(err) => {
-                log_refused_row(kind, id, &err);
+                log_refused_chunk(source, id, &err);
                 None
             }
             InputOutcome::FailedAlone(err) => {
@@ -84,22 +64,22 @@ impl EmbeddingBacklog<'_> {
                 if *failures < FAILURES_BEFORE_REFUSAL {
                     tracing::debug!(
                         target: "assistd::embed",
-                        ?kind,
-                        row = id,
+                        ?source,
+                        chunk = id.0,
                         error = %err,
                         failures = *failures,
-                        "row failed alone while the server answered; leaving it for a retry"
+                        "chunk failed alone while the server answered; leaving it for a retry"
                     );
                     return None;
                 }
-                log_refused_row(kind, id, &err);
+                log_refused_chunk(source, id, &err);
                 None
             }
             InputOutcome::Unsettled => return None,
         };
         self.failures.remove(&id);
         Some(Embedding {
-            target: kind.target(id),
+            source,
             text,
             vector,
         })
@@ -107,7 +87,7 @@ impl EmbeddingBacklog<'_> {
 }
 
 impl Backlog for EmbeddingBacklog<'_> {
-    type RowId = i64;
+    type RowId = ChunkId;
     type Row = String;
     type Error = PassError;
 
@@ -115,28 +95,18 @@ impl Backlog for EmbeddingBacklog<'_> {
         self.permit.as_mut()
     }
 
-    async fn page_after(&self, after: Option<i64>) -> Result<Vec<(i64, String)>, PassError> {
-        let chunks = async |source| {
-            let page = self
-                .store
-                .chunks_missing_embedding(source, after.map(ChunkId), BATCH_SIZE)
-                .await?;
-            Ok(page.into_iter().map(|(id, text)| (id.0, text)).collect())
-        };
-        match self.kind {
-            RowKind::MessageChunks => chunks(ChunkSource::Message).await,
-            RowKind::DocumentChunks => chunks(ChunkSource::Document).await,
-            RowKind::Memories => {
-                let page = self
-                    .store
-                    .memories_missing_embedding(after.map(MemoryId), BATCH_SIZE)
-                    .await?;
-                Ok(page.into_iter().map(|(id, text)| (id.0, text)).collect())
-            }
-        }
+    async fn page_after(
+        &self,
+        after: Option<ChunkId>,
+    ) -> Result<Vec<(ChunkId, String)>, PassError> {
+        let page = self
+            .store
+            .chunks_missing_embedding(self.source, after, BATCH_SIZE)
+            .await?;
+        Ok(page)
     }
 
-    async fn do_page(&mut self, page: Vec<(i64, String)>) -> Result<usize, PassError> {
+    async fn do_page(&mut self, page: Vec<(ChunkId, String)>) -> Result<usize, PassError> {
         let texts: Vec<&str> = page.iter().map(|(_, text)| text.as_str()).collect();
         let (outcomes, server_away) = embed_page(self.embedder, &texts).await;
         let rows = page.len();
@@ -151,7 +121,7 @@ impl Backlog for EmbeddingBacklog<'_> {
     }
 }
 
-/// Message chunks, memories, then document chunks, each drained in turn.
+/// Message chunks, memory chunks, then document chunks, each drained in turn.
 struct EmbeddingPass<'a> {
     backlogs: [EmbeddingBacklog<'a>; 3],
 }
@@ -232,7 +202,7 @@ impl SingleInputs<'_> {
     }
 }
 
-/// Spawn the worker. It embeds the rows missing an embedding at once and again each time
+/// Spawn the worker. It embeds the chunks missing an embedding at once and again each time
 /// `store` signals that a write left more, document chunks last and only while
 /// `documents_gate` reads `true`, retrying with backoff a pass that stopped early or left
 /// rows. It exits on `shutdown` between batches; `store`'s database must outlive it.
@@ -248,12 +218,12 @@ pub fn spawn_embedder_task(
             shutdown,
         };
         let backlogs = [
-            (RowKind::MessageChunks, None),
-            (RowKind::Memories, None),
-            (RowKind::DocumentChunks, Some(documents_gate)),
+            (ChunkSource::Message, None),
+            (ChunkSource::Memory, None),
+            (ChunkSource::Document, Some(documents_gate)),
         ]
-        .map(|(kind, permit)| EmbeddingBacklog {
-            kind,
+        .map(|(source, permit)| EmbeddingBacklog {
+            source,
             embedder: &*embedder,
             store: &*store,
             permit,
@@ -331,13 +301,13 @@ async fn embed_document(embedder: &dyn Embedder, text: &str) -> Result<Vec<f32>,
         })
 }
 
-fn log_refused_row(kind: RowKind, id: i64, err: &EmbedError) {
+fn log_refused_chunk(source: ChunkSource, id: ChunkId, err: &EmbedError) {
     tracing::warn!(
         target: "assistd::embed",
-        ?kind,
-        row = id,
+        ?source,
+        chunk = id.0,
         error = %err,
-        "row cannot be embedded; marking it so it is not retried"
+        "chunk cannot be embedded; marking its text so it is not retried"
     );
 }
 
@@ -408,13 +378,12 @@ mod tests {
         }
     }
 
-    /// Lists the chunks and memories still in `missing`, and takes out each chunk
-    /// holding a stored text and each memory stored.
+    /// Lists the chunks still missing, and takes out each chunk holding a stored text.
     #[derive(Debug, Default)]
     struct PendingStore {
         missing_chunks: Mutex<BTreeMap<ChunkId, String>>,
         missing_document_chunks: Mutex<BTreeMap<ChunkId, String>>,
-        missing_memories: Mutex<BTreeMap<MemoryId, String>>,
+        missing_memory_chunks: Mutex<BTreeMap<ChunkId, String>>,
         stored: Mutex<Vec<Embedding>>,
         rows_to_embed: Arc<Notify>,
     }
@@ -425,11 +394,11 @@ mod tests {
         (text.to_owned(), component.map(|value| vec![value]))
     }
 
-    fn page_after<Id: Copy + Ord>(
-        missing: &Mutex<BTreeMap<Id, String>>,
-        after: Option<Id>,
+    fn page_after(
+        missing: &Mutex<BTreeMap<ChunkId, String>>,
+        after: Option<ChunkId>,
         limit: usize,
-    ) -> Vec<(Id, String)> {
+    ) -> Vec<(ChunkId, String)> {
         missing
             .lock()
             .unwrap()
@@ -438,6 +407,16 @@ mod tests {
             .take(limit)
             .map(|(&id, text)| (id, text.clone()))
             .collect()
+    }
+
+    impl PendingStore {
+        fn missing(&self, source: ChunkSource) -> &Mutex<BTreeMap<ChunkId, String>> {
+            match source {
+                ChunkSource::Message => &self.missing_chunks,
+                ChunkSource::Memory => &self.missing_memory_chunks,
+                ChunkSource::Document => &self.missing_document_chunks,
+            }
+        }
     }
 
     #[async_trait]
@@ -454,41 +433,18 @@ mod tests {
         async fn count_missing(&self) -> MemoryResult<UnindexedRows> {
             Ok(UnindexedRows::default())
         }
-        async fn memories_missing_embedding(
-            &self,
-            after: Option<MemoryId>,
-            limit: usize,
-        ) -> MemoryResult<Vec<(MemoryId, String)>> {
-            Ok(page_after(&self.missing_memories, after, limit))
-        }
         async fn chunks_missing_embedding(
             &self,
             source: ChunkSource,
             after: Option<ChunkId>,
             limit: usize,
         ) -> MemoryResult<Vec<(ChunkId, String)>> {
-            let missing = match source {
-                ChunkSource::Message => &self.missing_chunks,
-                ChunkSource::Document => &self.missing_document_chunks,
-            };
-            Ok(page_after(missing, after, limit))
+            Ok(page_after(self.missing(source), after, limit))
         }
         async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> MemoryResult<()> {
             for embedding in embeddings {
-                let holds_other_text = |_: &ChunkId, text: &mut String| *text != embedding.text;
-                match embedding.target {
-                    EmbeddingTarget::ChunkText(ChunkSource::Message) => {
-                        let mut missing = self.missing_chunks.lock().unwrap();
-                        missing.retain(holds_other_text);
-                    }
-                    EmbeddingTarget::ChunkText(ChunkSource::Document) => {
-                        let mut missing = self.missing_document_chunks.lock().unwrap();
-                        missing.retain(holds_other_text);
-                    }
-                    EmbeddingTarget::Memory(id) => {
-                        self.missing_memories.lock().unwrap().remove(&id);
-                    }
-                }
+                let mut missing = self.missing(embedding.source).lock().unwrap();
+                missing.retain(|_, text| *text != embedding.text);
                 self.stored.lock().unwrap().push(embedding);
             }
             Ok(())
@@ -592,14 +548,21 @@ mod tests {
         let harness = Harness::spawn(&backlog, false);
         harness
             .store
-            .missing_memories
+            .missing_memory_chunks
             .lock()
             .unwrap()
-            .insert(MemoryId(7), "fact".to_owned());
+            .insert(ChunkId(7), "fact".to_owned());
 
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(harness.missing_chunks(), 0);
-        assert!(harness.store.missing_memories.lock().unwrap().is_empty());
+        assert!(
+            harness
+                .store
+                .missing_memory_chunks
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             harness
                 .store

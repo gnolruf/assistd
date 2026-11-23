@@ -250,7 +250,7 @@ stored work. Its contract has four parts.
 | Backlog          | A row is                                             | Page | Permit              | Cannot be done                    | Wake                   | Retry               |
 |------------------|------------------------------------------------------|------|---------------------|-----------------------------------|------------------------|---------------------|
 | Message chunks   | a message chunk whose text has no vector             | 32   | none                | marked refused (a `NULL` vector)  | `rows_to_embed`        | 1 s, doubling to 60 |
-| Memories         | a saved memory with no vector                        | 32   | none                | marked refused                    | `rows_to_embed`        | the same            |
+| Memory chunks    | a memory's chunk whose text has no vector            | 32   | none                | marked refused                    | `rows_to_embed`        | the same            |
 | Document chunks  | a document chunk whose text has no vector            | 32   | `DocumentEmbedding` | marked refused                    | `rows_to_embed`        | the same            |
 | Waiting pages    | a PDF page without text, recorded as waiting         | 1    | `PageTranscription` | recorded as failed                | `pages_to_transcribe`  | 5 minutes           |
 
@@ -997,12 +997,12 @@ Saved memories recalled into a new session's first turn sit in its context
 block under a header that labels them untrusted data, not instructions. A
 save is not gated: its tool result repeats the key and value, so the chat
 shows what was kept, and `assistd memory` lists and removes memories.
-Saving through the `remember` tool inserts the K/V row, and each user
+Saving through the `remember` tool inserts the K/V row with one chunk
+over its whole value, and each user
 or assistant message is chunked in the transaction that saves it. With
-`embedding.enabled = false` no chunks are cut; the next start with
+`embedding.enabled = false` no message chunks are cut; the next start with
 embedding on cuts them for the messages stored meanwhile. Embedding
-is a [backlog](#backlogs): a memory with no row in its embeddings
-table is pending, and so is a chunk whose text has no row in the
+is a [backlog](#backlogs): a chunk is pending while its text has no row in the
 vector table of its kind, which holds one vector for each distinct
 text under the hash of that text. The store signals after each committed
 write that leaves a row pending, and the signal wakes
@@ -1035,18 +1035,20 @@ would a fault of its own, so the client tells that refusal by its
 message and the row is marked and skipped like any other the server
 rejects; a document chunk marked so is still found by its words. A `remember` search embeds its query and ranks saved memories by
 cosine similarity; the `reminisce` tool runs the same kind of search
-over transcript chunks from earlier sessions. Indexed local documents
-own chunks in the same table, but their vectors are kept in a table
-of their own, so message recall never reads or ranks document chunks.
-Every chunk vector is quantised to a byte per dimension. Document chunks alone also have their
-words in a full-text index, for the keyword half of a document search.
+over transcript chunks from earlier sessions. Messages, memories and
+indexed local documents own chunks in one table, but each kind's vectors
+are kept in a table of their own, so message recall never reads or ranks
+document chunks.
+Every vector is quantised to a byte per dimension. Every chunk also has its
+words in one full-text index; only a document search reads it, for its
+keyword half, held to document chunks.
 Like model requests,
 embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
 meantime stays pending and is embedded by a later pass.
 
 The worker is three backlogs drained in one pass: message chunks,
-memories, then document chunks. The first two are few and feed recall, so
+memory chunks, then document chunks. The first two are few and feed recall, so
 every pass embeds them first and at once. Document chunks can number in the
 hundreds of thousands and the embedding server takes every CPU thread it is
 given, so each batch of them waits for the `DocumentEmbedding` permit
@@ -1706,7 +1708,7 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
    whose text has no vector, and page transcription for a waiting page.
 
 5. **Embed permit** ([`crates/assistd-core/src/admission/activity.rs`](../crates/assistd-core/src/admission/activity.rs)).
-   The embedding worker embeds pending message chunks and memories
+   The embedding worker embeds pending message and memory chunks
    first, then document chunks a batch at a time, each batch waiting on
    the permit admission publishes. The permit is closed while the
    user's interaction is open, a task run holds a model lane, or the

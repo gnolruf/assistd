@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 
-use crate::chunking::{ChunkingConfig, chunk_ranges, text_hash};
+use crate::chunking::{ChunkingConfig, chunk_ranges};
+use crate::sqlite::chunks::{ChunkOwner, insert_chunk};
 use crate::sqlite::timestamp::now_millis;
 use crate::{
-    ChunkId, DocumentId, EmptyPages, FileStamp, IndexPass, PageReading, SkippedRead,
+    ChunkId, ChunkSource, DocumentId, EmptyPages, FileStamp, IndexPass, PageReading, SkippedRead,
     TranscriptionCounts, WaitingPage,
 };
 
@@ -102,13 +103,6 @@ struct PageCut {
     /// The page's position in the document, from zero.
     page: usize,
     bytes: Range<usize>,
-}
-
-impl PageCut {
-    /// The text this cut covers in `pages`, the pages it was cut from.
-    fn text_in<'t>(&self, pages: &'t [String]) -> &'t str {
-        &pages[self.page][self.bytes.clone()]
-    }
 }
 
 /// Register `root` if it is new and start its next pass.
@@ -457,10 +451,13 @@ fn cut_uncut_pages(tx: &Transaction<'_>, document: DocumentId) -> rusqlite::Resu
         .prepare_cached(
             "SELECT p.content,
                     NOT EXISTS (SELECT 1 FROM chunks cc
-                                WHERE cc.document_id = p.document_id AND cc.page = p.page)
+                                WHERE cc.kind = ?2 AND cc.source = p.document_id
+                                  AND cc.page = p.page)
              FROM document_pages p WHERE p.document_id = ?1 ORDER BY p.page",
         )?
-        .query_map(rusqlite::params![document], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(rusqlite::params![document, ChunkSource::Document], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<(String, bool)>>>()?
         .into_iter()
         .unzip();
@@ -521,24 +518,12 @@ fn add_chunks(
     pages: &[String],
     cuts: &[PageCut],
 ) -> rusqlite::Result<Vec<ChunkId>> {
-    let mut insert = tx.prepare_cached(
-        "INSERT INTO chunks (document_id, page, byte_start, byte_end, hash)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         RETURNING id",
-    )?;
-    let mut index_words =
-        tx.prepare_cached("INSERT INTO document_chunk_fts (rowid, text) VALUES (?1, ?2)")?;
     let mut has_vector =
         tx.prepare_cached("SELECT EXISTS (SELECT 1 FROM document_vectors WHERE hash = ?1)")?;
     let mut unembedded = Vec::new();
     for cut in cuts {
-        let text = cut.text_in(pages);
-        let hash = text_hash(text.as_bytes());
-        let chunk: ChunkId = insert.query_row(
-            rusqlite::params![document, cut.page, cut.bytes.start, cut.bytes.end, hash],
-            |r| r.get(0),
-        )?;
-        index_words.execute(rusqlite::params![chunk, text])?;
+        let owner = ChunkOwner::Page(document, cut.page);
+        let (chunk, hash) = insert_chunk(tx, owner, &pages[cut.page], &cut.bytes)?;
         if !has_vector.query_row(rusqlite::params![hash], |r| r.get::<_, bool>(0))? {
             unembedded.push(chunk);
         }
