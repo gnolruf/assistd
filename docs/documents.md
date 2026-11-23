@@ -1,11 +1,11 @@
 # Document search
 
 With `[documents]` enabled, the daemon keeps an index of the files in
-folders you choose, and the model gets a `docs` command that searches
-the index and reads what it finds:
+folders you choose, and the model gets two commands: `search`, which
+finds a file, and `docs`, which reads what it found:
 
 ```text
-docs search [-n N] <query...>                # TSV hits: path, similarity, page, bytes, date, passage
+search [-n N] [--in <kinds>] <query...>      # TSV hits: kind, place, similarity, passage
 docs read [--page P] [--offset N] <path>     # the text stored for one indexed file
 ```
 
@@ -244,22 +244,29 @@ passes since the daemon started.
 ## How the model uses it
 
 While `documents.enabled` is on, the system prompt tells the model that
-indexed documents can be searched, and `docs` is one of the commands
-behind its `run` tool. It usually searches, then reads from the best
-hit:
+indexed documents can be searched, and `search` and `docs` are among
+the commands behind its `run` tool. It usually searches, then reads
+from the best hit:
 
 ```text
-docs search lease renewal terms
+search lease renewal terms
 docs read --page 3 --offset 512 "/home/me/Documents/notes/lease.pdf"
 ```
 
-`docs search` prints one line per file, best first, for
-`embedding.top_k` files (or `-n`, at most 20): the path, the similarity
-of meaning, the page of the best passage, that passage's byte range
-within the page, the date the file was indexed, and the passage.
+`search` is one search over everything stored: indexed documents and,
+with `[memory]` enabled, saved memories and past sessions, ranked
+together. `search --in documents <words>` holds it to documents. It
+prints one line per hit, best first, for `embedding.top_k` hits (or
+`-n`, at most 20). A document's line gives `document`, then the quoted
+path with the page of the best passage, that passage's byte range
+within the page and the date the file was indexed, then the similarity
+of meaning, and the passage.
 `sim=n/a` marks a passage found by its words before it was embedded.
 A passage several files hold is one line, for the first of them, with
-`also in N other documents` ahead of the passage.
+`also in N other places` ahead of the passage. A memory's line gives
+its key, and a session's the short id that `search --session <id>
+<words>` takes to show the hits of that one session, each between the
+messages around it.
 
 `docs read` prints the stored text of one indexed file from a page and
 byte offset, as much as fits one tool result, and says how to continue.
@@ -269,7 +276,8 @@ usual.
 
 The model reads the text as it was when the file was indexed, and each
 hit carries that date. Document text reaches the model under a header
-marking it as untrusted data, not instructions. Neither command asks
+marking it as untrusted data, not instructions, as is everything
+`search` prints. Neither command asks
 you first: listing a folder in `roots` is the permission. Both count as
 reading files on this machine, so a later `web fetch` in the same
 conversation asks before it is sent ([web search](web-search.md)).

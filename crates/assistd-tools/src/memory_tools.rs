@@ -1,36 +1,16 @@
-//! LLM-callable memory tools. `remember` saves and searches key/value
-//! facts; `reminisce` searches past dialogue.
+//! The LLM-callable memory tool: `remember` saves key/value facts.
 
 use std::borrow::Cow;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use assistd_embed::{Embedder, EmbedderHandle};
-use assistd_memory::{
-    ChunkLocator, ChunkSearch, ChunkSource, RecallStore, SearchHit, SearchRanking, SessionId,
-    SessionScope, TranscriptStore,
-};
-use assistd_utils::text::similarity_percent;
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
-use tokio::sync::watch;
 
 use crate::TurnContext;
 use crate::memory::MemoryOps;
 use crate::{Tool, ToolError, ToolOutput};
-
-mod exchanges;
-
-use exchanges::Exchanges;
-
-const SEARCH_LIMIT: usize = 50;
-
-/// Byte budget for all of `reminisce`'s hit lines together; lower-ranked hits that
-/// would overflow it are dropped.
-const REMINISCE_OUTPUT_BYTES: usize = 8 * 1024;
-
-const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
 
 /// Keys reject whitespace and uppercase so one concept keeps one spelling;
 /// hyphens allow ISO dates (`standup.2026-09-11`).
@@ -38,102 +18,17 @@ const KEY_PATTERN: &str = r"^[a-z0-9._-]+$";
 static KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
 
-/// Saves `(key, value)` facts about the user and searches them by semantic similarity
-/// to a query. A save's result repeats the key and value, so every client that shows
-/// results shows what was kept.
+/// Saves `(key, value)` facts about the user. A save's result repeats the key and
+/// value, so every client that shows results shows what was kept.
 #[derive(Debug)]
 pub struct RememberTool {
     ops: Arc<MemoryOps>,
-    embedder: Arc<EmbedderHandle>,
-    semantic: Arc<dyn RecallStore>,
-}
-
-/// One validated `remember` call.
-#[derive(Debug)]
-enum RememberRequest {
-    Save { key: String, value: String },
-    Search { query: String },
-}
-
-impl RememberRequest {
-    fn parse(args: &Value) -> Result<Self, ToolError> {
-        let text = required_str(args, "text")?.to_string();
-        match required_str(args, "action")? {
-            "save" => Ok(Self::Save {
-                key: valid_key(args)?,
-                value: text,
-            }),
-            "search" => Ok(Self::Search { query: text }),
-            other => Err(ToolError::InvalidArgs(format!(
-                "`action` must be \"save\" or \"search\" (got {other:?})"
-            ))),
-        }
-    }
 }
 
 impl RememberTool {
-    /// A tool saving through `ops` and searching memories in `semantic` by vectors
-    /// from `embedder`.
-    pub fn new(
-        ops: Arc<MemoryOps>,
-        embedder: Arc<EmbedderHandle>,
-        semantic: Arc<dyn RecallStore>,
-    ) -> Self {
-        Self {
-            ops,
-            embedder,
-            semantic,
-        }
-    }
-
-    async fn save(&self, key: &str, value: String) -> Result<String, ToolError> {
-        let report = format!("remembered {key}: {value}");
-        self.ops.save(key, value).await?;
-        tracing::info!(target: "assistd::memory", key = %key, "remember saved");
-        Ok(report)
-    }
-
-    async fn search(&self, query: String) -> Result<String, ToolError> {
-        let embedder = match self.embedder.get() {
-            Ok(embedder) => embedder,
-            Err(e) => return Ok(format!("(saved memories cannot be searched: {e})")),
-        };
-        let hits = self.nearest_memories(embedder.as_ref(), query).await?;
-        tracing::info!(
-            target: "assistd::memory",
-            returned = hits.len(),
-            "remember search returned"
-        );
-        Ok(format_memories(&hits))
-    }
-
-    /// Memories nearest `query`; empty when the embed fails.
-    async fn nearest_memories(
-        &self,
-        embedder: &dyn Embedder,
-        query: String,
-    ) -> Result<Vec<SearchHit>, ToolError> {
-        match embedder.embed_query(&query).await {
-            Ok(query_vector) => {
-                let memories = ChunkSearch {
-                    query,
-                    query_vector,
-                    kinds: vec![ChunkSource::Memory],
-                    sessions: SessionScope::All,
-                    top_k: SEARCH_LIMIT,
-                    ranking: SearchRanking::Vector,
-                };
-                Ok(self.semantic.search(memories).await?)
-            }
-            Err(e) => {
-                tracing::debug!(
-                    target: "assistd::embed",
-                    error = %e,
-                    "remember search embed failed; returning empty"
-                );
-                Ok(Vec::new())
-            }
-        }
+    /// A tool saving through `ops`.
+    pub fn new(ops: Arc<MemoryOps>) -> Self {
+        Self { ops }
     }
 }
 
@@ -144,20 +39,14 @@ impl Tool for RememberTool {
     }
 
     fn description(&self) -> Cow<'_, str> {
-        "Save or look up durable memories about the user. \
-         action=\"save\": call whenever the user states a stable preference, \
-         something about themselves, or anything they want remembered; `key` \
-         names the memory and `text` is its value. Saving an existing key \
-         overwrites it. Examples: \"I prefer vim over emacs\" -> \
-         remember(action=\"save\", key=\"editor_preference\", text=\"vim\"); \
-         \"my name is Ben\" -> remember(action=\"save\", key=\"user.name\", \
-         text=\"Ben\"). Do NOT save ephemeral context from the current \
-         conversation. action=\"search\": call when prior context might help \
-         (personalizing an answer, or the user refers to something they told \
-         you before); `text` is a natural-language question and `key` is \
-         null. Matching is by meaning, so \"what editor do I prefer?\" finds \
-         `editor_preference`. Search returns up to 50 `<key>: <value>` \
-         lines, or `(no memories)`."
+        "Save a durable memory about the user. Call whenever the user states a \
+         stable preference, something about themselves, or anything they want \
+         remembered; `key` names the memory and `text` is its value. Saving an \
+         existing key overwrites it. Examples: \"I prefer vim over emacs\" -> \
+         remember(key=\"editor_preference\", text=\"vim\"); \"my name is Ben\" \
+         -> remember(key=\"user.name\", text=\"Ben\"). Do NOT save ephemeral \
+         context from the current conversation. To look saved memories up, use \
+         the `run` command `search --in memories <words>`."
             .into()
     }
 
@@ -166,394 +55,41 @@ impl Tool for RememberTool {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["save", "search"],
-                    "description": "\"save\" stores `text` under `key`; \
-                                    \"search\" finds saved memories similar \
-                                    in meaning to `text`."
-                },
                 "key": {
-                    "type": ["string", "null"],
-                    "description": "For save: snake_case identifier with \
-                                    optional dot namespacing (e.g. user.name, \
+                    "type": "string",
+                    "description": "snake_case identifier with optional dot \
+                                    namespacing (e.g. user.name, \
                                     editor_preference, standup.2026-09-11), \
-                                    matching ^[a-z0-9._-]+$. For search: null."
+                                    matching ^[a-z0-9._-]+$."
                 },
                 "text": {
                     "type": "string",
-                    "description": "For save: the memory or preference to store. \
-                                    For search: a natural-language question."
+                    "description": "The memory or preference to store."
                 }
             },
-            "required": ["action", "key", "text"]
+            "required": ["key", "text"]
         })
     }
 
-    /// A save's result repeats what the model sent; a search returns saved memories.
-    fn reads_host(&self, args: &Value) -> bool {
-        !matches!(
-            RememberRequest::parse(args),
-            Ok(RememberRequest::Save { .. })
-        )
+    /// The result repeats what the model sent.
+    fn reads_host(&self, _args: &Value) -> bool {
+        false
     }
 
     #[tracing::instrument(skip(self, args))]
     async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
-        let output = match RememberRequest::parse(&args)? {
-            RememberRequest::Save { key, value } => self.save(&key, value).await?,
-            RememberRequest::Search { query } => self.search(query).await?,
-        };
-        Ok(ToolOutput::text(output, start.elapsed()))
+        let key = valid_key(&args)?;
+        let value = required_str(&args, "text")?.to_string();
+        let report = format!("remembered {key}: {value}");
+        self.ops.save(&key, value).await?;
+        tracing::info!(target: "assistd::memory", key = %key, "remember saved");
+        Ok(ToolOutput::text(report, start.elapsed()))
     }
-}
-
-/// Semantic search over session transcripts, excluding the messages of the
-/// session in progress that are still in the model's context.
-#[derive(Debug)]
-pub struct ReminisceTool {
-    embedder: Arc<EmbedderHandle>,
-    semantic: Arc<dyn RecallStore>,
-    transcripts: Arc<dyn TranscriptStore>,
-    current_session: watch::Receiver<SessionId>,
-}
-
-/// One validated `reminisce` call.
-#[derive(Debug)]
-struct ReminisceRequest {
-    query: String,
-    limit: usize,
-    session_prefix: Option<String>,
-}
-
-impl ReminisceRequest {
-    fn parse(args: &Value) -> Result<Self, ToolError> {
-        let session_prefix = match args.get("session") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(prefix)) if !prefix.is_empty() => Some(prefix.clone()),
-            Some(other) => {
-                return Err(ToolError::InvalidArgs(format!(
-                    "`session` must be a session id from a hit, or null (got {other})"
-                )));
-            }
-        };
-        Ok(Self {
-            query: required_str(args, "query")?.to_string(),
-            limit: reminisce_limit(args)?,
-            session_prefix,
-        })
-    }
-}
-
-impl ReminisceTool {
-    /// A tool ranking past messages in `semantic` by vectors from `embedder`,
-    /// resolving session ids through `transcripts`, and skipping the
-    /// in-context messages of the session `current_session` names at call time.
-    pub fn new(
-        embedder: Arc<EmbedderHandle>,
-        semantic: Arc<dyn RecallStore>,
-        transcripts: Arc<dyn TranscriptStore>,
-        current_session: watch::Receiver<SessionId>,
-    ) -> Self {
-        Self {
-            embedder,
-            semantic,
-            transcripts,
-            current_session,
-        }
-    }
-
-    /// The sessions to search: every one but the current one's in-context messages,
-    /// or the past one `session_prefix` names.
-    /// Errors when the prefix names no session or the session in progress.
-    async fn scope(&self, session_prefix: Option<&str>) -> Result<SessionScope, ToolError> {
-        let current = *self.current_session.borrow();
-        let Some(prefix) = session_prefix else {
-            return Ok(SessionScope::AllExceptInContext(current));
-        };
-        match self.transcripts.resolve_session(prefix).await? {
-            None => Err(ToolError::InvalidArgs(format!(
-                "no past session has id {prefix:?}"
-            ))),
-            Some(session) if session == current => Err(ToolError::InvalidArgs(format!(
-                "session {prefix:?} is the conversation in progress; search its summarized \
-                 part with `session` null"
-            ))),
-            Some(session) => Ok(SessionScope::Only(session)),
-        }
-    }
-
-    async fn search(&self, request: ReminisceRequest) -> Result<String, ToolError> {
-        let scope = self.scope(request.session_prefix.as_deref()).await?;
-        let embedder = match self.embedder.get() {
-            Ok(embedder) => embedder,
-            Err(e) => return Ok(format!("(past conversations cannot be searched: {e})")),
-        };
-        let query_vector = match embedder.embed_query(&request.query).await {
-            Ok(query_vector) => query_vector,
-            Err(e) => {
-                tracing::debug!(
-                    target: "assistd::embed",
-                    error = %e,
-                    "reminisce embed failed; returning empty"
-                );
-                return Ok("(embedding unavailable)".to_string());
-            }
-        };
-        let messages = ChunkSearch {
-            query: request.query,
-            query_vector,
-            kinds: vec![ChunkSource::Message],
-            sessions: scope,
-            top_k: request.limit,
-            ranking: SearchRanking::VectorAndKeyword,
-        };
-        let hits = self.semantic.search(messages).await?;
-        tracing::info!(
-            target: "assistd::embed",
-            returned = hits.len(),
-            "reminisce returned chunks"
-        );
-        match scope {
-            SessionScope::Only(_) => self.format_exchanges(&hits).await,
-            SessionScope::All => Ok(format_chunks(&hits, None)),
-            SessionScope::AllExcept(current) | SessionScope::AllExceptInContext(current) => {
-                Ok(format_chunks(&hits, Some(current)))
-            }
-        }
-    }
-
-    /// `hits` from one session, each between its neighbouring chunks and merged
-    /// with hits it overlaps, under a header naming the session; hits whose
-    /// addition would overflow the output budget are dropped with the rest.
-    async fn format_exchanges(&self, hits: &[SearchHit]) -> Result<String, ToolError> {
-        let Some(first) = hits.first() else {
-            return Ok("(no matches in that session)".to_string());
-        };
-        let header = source_header(&first.locator);
-        let mut exchanges = Exchanges::default();
-        let mut kept = 0;
-        for hit in hits {
-            let adjacent = self.semantic.adjacent_chunks(&hit.locator).await?;
-            let mut grown = exchanges.clone();
-            grown.add(hit, adjacent);
-            let grown_len: usize = grown.lines().iter().map(|line| line.len() + 1).sum();
-            if header.len() + grown_len > REMINISCE_OUTPUT_BYTES {
-                break;
-            }
-            exchanges = grown;
-            kept += 1;
-        }
-        let mut lines = vec![header];
-        lines.extend(exchanges.lines());
-        push_omitted_note(&mut lines, hits.len() - kept);
-        Ok(lines.join("\n"))
-    }
-}
-
-#[async_trait]
-impl Tool for ReminisceTool {
-    fn name(&self) -> &'static str {
-        "reminisce"
-    }
-
-    fn description(&self) -> Cow<'_, str> {
-        "Search *earlier* conversations, and the part of this one replaced \
-         by its summary, for passages similar in meaning to a query or \
-         holding its words. Complement to `remember`: its search looks \
-         up *saved memories* (key/value), `reminisce` searches *past \
-         dialogue text*; use it when the user references something they \
-         'discussed before' or 'worked on last month'. Robust to \
-         paraphrase: a query like \"that rust project we discussed\" will \
-         match a past passage about \"the assistd embedding daemon in Rust\", \
-         and an exact string such as an error message, a path or a name is \
-         found as written; `sim=n/a` marks a passage found by its words alone. \
-         Use it in two steps. First search broadly with `session` null: \
-         each of up to `limit` ranked snippets names its session's short id \
-         and title, then its timestamp, role and the matching excerpt; hits \
-         marked `earlier in this chat` come from this conversation's \
-         summarized part, and a passage said more than once is listed once, \
-         with how many other messages hold it. Then, \
-         to read a chat you found, search again with `session` set to that \
-         id: hits come only from that chat, each shown with the message \
-         before and after it so you see the exchange."
-            .into()
-    }
-
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Natural-language query, or an exact \
-                                    string to find. Past passages are ranked \
-                                    by similarity of meaning and by the \
-                                    query's words, and the top `limit` returned."
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "description": "Maximum number of hits to return (1-20). \
-                                    Smaller is sharper; larger casts a wider net."
-                },
-                "session": {
-                    "type": ["string", "null"],
-                    "description": "null searches every past chat. A session \
-                                    id copied from an earlier hit (e.g. \
-                                    3f9a1c2e) searches only that chat and shows \
-                                    the messages around each hit."
-                }
-            },
-            "required": ["query", "limit", "session"]
-        })
-    }
-
-    #[tracing::instrument(skip(self, args), fields(limit = tracing::field::Empty))]
-    async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
-        let start = Instant::now();
-        let request = ReminisceRequest::parse(&args)?;
-        tracing::Span::current().record("limit", request.limit);
-        let output = self.search(request).await?;
-        Ok(ToolOutput::text(output, start.elapsed()))
-    }
-}
-
-fn format_memories(hits: &[SearchHit]) -> String {
-    let lines: Vec<String> = hits.iter().filter_map(memory_line).collect();
-    if lines.is_empty() {
-        return "(no memories)".to_string();
-    }
-    lines.join("\n")
-}
-
-/// A hit on a memory as `key: value`.
-fn memory_line(hit: &SearchHit) -> Option<String> {
-    let ChunkLocator::Memory { key, .. } = &hit.locator else {
-        return None;
-    };
-    Some(format!("{key}: {}", hit.text))
-}
-
-fn reminisce_limit(args: &Value) -> Result<usize, ToolError> {
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| ToolError::InvalidArgs("`limit` (integer) is required".into()))?;
-    usize::try_from(limit)
-        .ok()
-        .filter(|limit| (1..=20).contains(limit))
-        .ok_or_else(|| ToolError::InvalidArgs(format!("`limit` must be in 1..=20 (got {limit})")))
-}
-
-/// Ranked one-line hits within the output budget; those from `current` are
-/// marked as coming from earlier in this chat.
-fn format_chunks(hits: &[SearchHit], current: Option<SessionId>) -> String {
-    if hits.is_empty() {
-        return "(no matches)".to_string();
-    }
-    let mut lines = Vec::new();
-    let mut used = 0;
-    for line in hits.iter().map(|hit| format_chunk(hit, current)) {
-        if used + line.len() > REMINISCE_OUTPUT_BYTES {
-            break;
-        }
-        used += line.len() + 1;
-        lines.push(line);
-    }
-    let omitted = hits.len() - lines.len();
-    push_omitted_note(&mut lines, omitted);
-    lines.join("\n")
-}
-
-fn push_omitted_note(lines: &mut Vec<String>, omitted: usize) {
-    if omitted > 0 {
-        lines.push(format!("({omitted} lower-ranked matches omitted)"));
-    }
-}
-
-fn format_chunk(hit: &SearchHit, current: Option<SessionId>) -> String {
-    format!(
-        "[{} {}] {}",
-        hit_source(&hit.locator, current),
-        hit_score(hit),
-        one_line(&hit.text)
-    )
-}
-
-/// A hit's similarity, and how many other messages hold its text when any does.
-fn hit_score(hit: &SearchHit) -> String {
-    let similarity = similarity_percent(hit.similarity);
-    match hit.held_elsewhere {
-        0 => format!("sim={similarity}"),
-        1 => format!("sim={similarity}, also in 1 other message"),
-        others => format!("sim={similarity}, also in {others} other messages"),
-    }
-}
-
-/// Where a hit came from, with its time and role for a message.
-fn hit_source(locator: &ChunkLocator, current: Option<SessionId>) -> String {
-    match locator {
-        ChunkLocator::Message {
-            session_id,
-            timestamp,
-            role,
-            session_label,
-            ..
-        } => {
-            let session = if Some(*session_id) == current {
-                "earlier in this chat".to_string()
-            } else {
-                format!("session {} \"{session_label}\"", session_id.short())
-            };
-            format!(
-                "{session} {} {}",
-                timestamp.format(TIMESTAMP_FORMAT),
-                role.as_wire()
-            )
-        }
-        ChunkLocator::Memory { key, .. } => format!("memory \"{key}\""),
-        ChunkLocator::Document { path, .. } => format!("document \"{}\"", path.display()),
-    }
-}
-
-fn source_header(locator: &ChunkLocator) -> String {
-    match locator {
-        ChunkLocator::Message {
-            session_id,
-            session_label,
-            ..
-        } => format!("session {} \"{session_label}\":", session_id.short()),
-        ChunkLocator::Memory { key, .. } => format!("memory \"{key}\":"),
-        ChunkLocator::Document { path, .. } => format!("document \"{}\":", path.display()),
-    }
-}
-
-/// The unclosed tag that opens a line in a source-scoped result: `[timestamp role`
-/// for a message, `[memory` for a memory, `[page P bytes start..end` for a document.
-fn locator_tag(locator: &ChunkLocator) -> String {
-    match locator {
-        ChunkLocator::Message {
-            timestamp, role, ..
-        } => format!("[{} {}", timestamp.format(TIMESTAMP_FORMAT), role.as_wire()),
-        ChunkLocator::Memory { .. } => "[memory".to_string(),
-        ChunkLocator::Document { page, bytes, .. } => {
-            format!("[page {} bytes {}..{}", page + 1, bytes.start, bytes.end)
-        }
-    }
-}
-
-fn one_line(text: &str) -> String {
-    text.replace('\n', " ")
 }
 
 fn valid_key(args: &Value) -> Result<String, ToolError> {
-    let key = args.get("key").and_then(Value::as_str).ok_or_else(|| {
-        ToolError::InvalidArgs("`key` (string) is required when `action` is \"save\"".into())
-    })?;
+    let key = required_str(args, "key")?;
     if !KEY_RE.is_match(key) {
         return Err(ToolError::InvalidArgs(format!(
             "`key` must match {KEY_PATTERN} (snake_case + dot \
@@ -571,288 +107,10 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolError> {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
-    use std::path::Path;
-
-    use assistd_embed::EmbedError;
-    use assistd_memory::{
-        AdjacentChunks, BranchId, BranchSummary, DocumentText, Embedding, EmbeddingQueue,
-        MemoryError, MemoryStore, NoSemanticStore, PersistedMessage, Seq, SqliteHandle,
-        SqliteSemanticStore, SqliteTranscriptStore,
-    };
-    use assistd_utils::readiness::Readiness;
+    use assistd_memory::{MemoryStore, SqliteHandle, SqliteTranscriptStore, TranscriptStore};
     use tempfile::TempDir;
 
     use super::*;
-
-    fn ready(embedder: Arc<dyn Embedder>) -> Arc<EmbedderHandle> {
-        Arc::new(EmbedderHandle::new(Readiness::Ready(embedder)))
-    }
-
-    fn no_embedder() -> Arc<EmbedderHandle> {
-        Arc::new(EmbedderHandle::new(Readiness::Unavailable(
-            "disabled in config".into(),
-        )))
-    }
-
-    fn no_semantic() -> Arc<dyn RecallStore> {
-        Arc::new(NoSemanticStore)
-    }
-
-    #[derive(Debug)]
-    struct FixedEmbedder;
-
-    #[async_trait]
-    impl Embedder for FixedEmbedder {
-        async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, EmbedError> {
-            Ok(vec![1.0])
-        }
-        async fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
-            Ok(vec![vec![1.0]; texts.len()])
-        }
-        fn model(&self) -> &'static str {
-            "m"
-        }
-        fn dim(&self) -> usize {
-            1
-        }
-    }
-
-    /// Records the scope `reminisce` searched.
-    #[derive(Debug, Default)]
-    struct ScopeSpy {
-        scope: parking_lot::Mutex<Option<SessionScope>>,
-    }
-
-    #[async_trait]
-    impl RecallStore for ScopeSpy {
-        async fn search(&self, search: ChunkSearch) -> Result<Vec<SearchHit>, MemoryError> {
-            *self.scope.lock() = Some(search.sessions);
-            Ok(Vec::new())
-        }
-        async fn adjacent_chunks(
-            &self,
-            _locator: &ChunkLocator,
-        ) -> Result<AdjacentChunks, MemoryError> {
-            Ok(AdjacentChunks::default())
-        }
-        async fn document_text(
-            &self,
-            _path: &Path,
-            _page: usize,
-            _bytes: Range<usize>,
-        ) -> Result<Option<DocumentText>, MemoryError> {
-            Ok(None)
-        }
-    }
-
-    #[tokio::test]
-    async fn reminisce_excludes_the_in_context_part_of_the_session_in_progress() {
-        let spy = Arc::new(ScopeSpy::default());
-        let (ops, _dir) = fresh_ops().await;
-        let first = SessionId::new();
-        let (session_tx, session_rx) = watch::channel(first);
-        let tool = ReminisceTool::new(
-            ready(Arc::new(FixedEmbedder)),
-            spy.clone(),
-            ops.transcripts.clone(),
-            session_rx,
-        );
-        let query = json!({"query": "the rust daemon", "limit": 3, "session": null});
-
-        tool.invoke(&TurnContext::default(), query.clone())
-            .await
-            .unwrap();
-        assert_eq!(
-            *spy.scope.lock(),
-            Some(SessionScope::AllExceptInContext(first))
-        );
-
-        let second = SessionId::new();
-        session_tx.send_replace(second);
-        tool.invoke(&TurnContext::default(), query).await.unwrap();
-        assert_eq!(
-            *spy.scope.lock(),
-            Some(SessionScope::AllExceptInContext(second)),
-            "the tool must follow a session switch, not pin its first session"
-        );
-    }
-
-    /// A saved session's main branch, for appending dialogue.
-    struct PastSession {
-        transcripts: Arc<SqliteTranscriptStore>,
-        semantic: Arc<SqliteSemanticStore>,
-        session: SessionId,
-        branch: BranchId,
-    }
-
-    impl PastSession {
-        async fn begin(handle: &SqliteHandle) -> Self {
-            let transcripts = Arc::new(SqliteTranscriptStore::new(handle.clone()));
-            let session = SessionId::new();
-            let branch = transcripts
-                .begin_session_with_main_branch(session)
-                .await
-                .unwrap();
-            Self {
-                transcripts,
-                semantic: Arc::new(SqliteSemanticStore::new(handle.clone())),
-                session,
-                branch,
-            }
-        }
-
-        /// Store one user/assistant exchange, each side short enough to be one chunk,
-        /// embedding whichever side `embed_reply` picks.
-        async fn exchange(&self, prompt: &str, reply: &str, embed_reply: bool) {
-            let opened = self
-                .transcripts
-                .begin_turn(self.branch, PersistedMessage::user(prompt))
-                .await
-                .unwrap();
-            self.transcripts
-                .append_message_to_branch(
-                    self.branch,
-                    opened.turn,
-                    PersistedMessage::assistant_text(reply, None),
-                )
-                .await
-                .unwrap();
-            let embedding = Embedding {
-                source: ChunkSource::Message,
-                text: if embed_reply { reply } else { prompt }.to_owned(),
-                vector: Some(vec![1.0]),
-            };
-            self.semantic
-                .store_embeddings(vec![embedding])
-                .await
-                .unwrap();
-        }
-
-        fn short_id(&self) -> String {
-            self.session.short()
-        }
-    }
-
-    #[tokio::test]
-    async fn reminisce_scoped_to_a_session_reads_only_that_chat_and_never_the_live_one() {
-        let temp = tempfile::tempdir().unwrap();
-        let handle = SqliteHandle::open(&temp.path().join("memory.db"))
-            .await
-            .unwrap();
-        let past = PastSession::begin(&handle).await;
-        past.transcripts
-            .set_session_title(past.session, "Daemon tuning")
-            .await
-            .unwrap();
-        past.exchange("how do I tune the daemon?", "raise the batch size", true)
-            .await;
-        past.exchange("and the voice crate?", "leave it alone", false)
-            .await;
-        let other = PastSession::begin(&handle).await;
-        other
-            .exchange("a cooking question", "use more salt", true)
-            .await;
-        let live = PastSession::begin(&handle).await;
-        live.exchange("the live question", "the live answer", true)
-            .await;
-        let tool = ReminisceTool::new(
-            ready(Arc::new(FixedEmbedder)),
-            past.semantic.clone(),
-            past.transcripts.clone(),
-            watch::channel(live.session).1,
-        );
-
-        let scoped = tool
-            .invoke(
-                &TurnContext::default(),
-                json!({"query": "tuning", "limit": 5, "session": past.short_id()}),
-            )
-            .await
-            .unwrap()
-            .output;
-        let header = format!("session {} \"Daemon tuning\":", past.short_id());
-        assert!(scoped.starts_with(&header), "{scoped}");
-        let exchange = [
-            "how do I tune",
-            "raise the batch size",
-            "and the voice crate?",
-            "leave it alone",
-        ];
-        for text in exchange {
-            assert_eq!(scoped.matches(text).count(), 1, "{text:?} in {scoped}");
-        }
-        assert_eq!(
-            scoped.matches("\n\n").count(),
-            1,
-            "overlapping hits must merge into one run: {scoped}"
-        );
-        let order: Vec<usize> = exchange
-            .iter()
-            .map(|text| {
-                scoped
-                    .find(text)
-                    .unwrap_or_else(|| panic!("{text:?} in {scoped}"))
-            })
-            .collect();
-        assert!(
-            order.is_sorted(),
-            "the exchange must read in order: {scoped}"
-        );
-        for absent in ["salt", "live"] {
-            assert!(!scoped.contains(absent), "{absent:?} leaked into {scoped}");
-        }
-
-        let err = tool
-            .invoke(
-                &TurnContext::default(),
-                json!({"query": "live", "limit": 5, "session": live.short_id()}),
-            )
-            .await
-            .unwrap_err();
-        assert!(invalid_args(err).contains("in progress"));
-    }
-
-    #[tokio::test]
-    async fn reminisce_finds_the_compacted_part_of_the_live_chat_but_not_the_kept_turns() {
-        let temp = tempfile::tempdir().unwrap();
-        let handle = SqliteHandle::open(&temp.path().join("memory.db"))
-            .await
-            .unwrap();
-        let live = PastSession::begin(&handle).await;
-        live.exchange("which port?", "the folded port is 8431", true)
-            .await;
-        live.exchange("and now?", "the kept answer", true).await;
-        let summary = BranchSummary {
-            kept_from_seq: Seq(2),
-            steps_folded_through: None,
-            compacted_after_seq: Seq(3),
-            content: "summary".into(),
-            duration_ms: 0,
-        };
-        live.transcripts
-            .record_branch_summary(live.branch, summary)
-            .await
-            .unwrap();
-        let tool = ReminisceTool::new(
-            ready(Arc::new(FixedEmbedder)),
-            live.semantic.clone(),
-            live.transcripts.clone(),
-            watch::channel(live.session).1,
-        );
-
-        let found = tool
-            .invoke(
-                &TurnContext::default(),
-                json!({"query": "port", "limit": 5, "session": null}),
-            )
-            .await
-            .unwrap()
-            .output;
-        assert!(found.starts_with("[earlier in this chat "), "{found}");
-        assert!(found.contains("the folded port is 8431"), "{found}");
-        assert!(!found.contains("the kept answer"), "{found}");
-    }
 
     /// A SQLite-backed `MemoryOps`; hold the tempdir for the test.
     async fn fresh_ops() -> (Arc<MemoryOps>, TempDir) {
@@ -865,10 +123,6 @@ mod tests {
         (Arc::new(MemoryOps::new(mem, conv)), temp)
     }
 
-    fn remember_tool(ops: Arc<MemoryOps>) -> RememberTool {
-        RememberTool::new(ops, no_embedder(), no_semantic())
-    }
-
     fn invalid_args(err: ToolError) -> String {
         match err {
             ToolError::InvalidArgs(msg) => msg,
@@ -879,17 +133,17 @@ mod tests {
     #[tokio::test]
     async fn remember_dedups_by_key() {
         let (ops, _dir) = fresh_ops().await;
-        let tool = remember_tool(ops.clone());
+        let tool = RememberTool::new(ops.clone());
         tool.invoke(
             &TurnContext::default(),
-            json!({"action": "save", "key": "editor_preference", "text": "vim"}),
+            json!({"key": "editor_preference", "text": "vim"}),
         )
         .await
         .unwrap();
         let saved = tool
             .invoke(
                 &TurnContext::default(),
-                json!({"action": "save", "key": "editor_preference", "text": "neovim"}),
+                json!({"key": "editor_preference", "text": "neovim"}),
             )
             .await
             .unwrap();
@@ -906,13 +160,10 @@ mod tests {
     #[tokio::test]
     async fn remember_rejects_invalid_key() {
         let (ops, _dir) = fresh_ops().await;
-        let tool = remember_tool(ops);
+        let tool = RememberTool::new(ops);
         for bad in ["has spaces", "Editor_Pref", "trailing!", "slash/ed", ""] {
             let err = tool
-                .invoke(
-                    &TurnContext::default(),
-                    json!({"action": "save", "key": bad, "text": "x"}),
-                )
+                .invoke(&TurnContext::default(), json!({"key": bad, "text": "x"}))
                 .await
                 .unwrap_err();
             let msg = invalid_args(err);
@@ -923,67 +174,20 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn remember_save_needs_a_key_but_search_does_not() {
-        let (ops, _dir) = fresh_ops().await;
-        let tool = remember_tool(ops);
-        let err = tool
-            .invoke(
-                &TurnContext::default(),
-                json!({"action": "save", "key": null, "text": "vim"}),
-            )
-            .await
-            .unwrap_err();
-        assert!(invalid_args(err).starts_with("`key` (string) is required"));
-        let found = tool
-            .invoke(
-                &TurnContext::default(),
-                json!({"action": "search", "key": null, "text": "my editor?"}),
-            )
-            .await
-            .unwrap();
-        assert!(
-            found
-                .output
-                .starts_with("(saved memories cannot be searched"),
-            "{found:?}"
-        );
-    }
-
     /// Strict mode requires every declared property to be listed as
     /// required and no others to be accepted.
     #[tokio::test]
-    async fn schemas_satisfy_strict_mode() {
+    async fn schema_satisfies_strict_mode() {
         let (ops, _dir) = fresh_ops().await;
-        let transcripts = ops.transcripts.clone();
-        let tools: [Box<dyn Tool>; 2] = [
-            Box::new(remember_tool(ops)),
-            Box::new(ReminisceTool::new(
-                no_embedder(),
-                no_semantic(),
-                transcripts,
-                watch::channel(SessionId::new()).1,
-            )),
-        ];
-        for tool in tools {
-            let schema = tool.parameters_schema();
-            let name = tool.name();
-            assert_eq!(schema["additionalProperties"], false, "{name}");
-            let mut properties: Vec<&str> = schema["properties"]
-                .as_object()
-                .unwrap_or_else(|| panic!("{name}: properties object"))
-                .keys()
-                .map(String::as_str)
-                .collect();
-            let mut required: Vec<&str> = schema["required"]
-                .as_array()
-                .unwrap_or_else(|| panic!("{name}: required array"))
-                .iter()
-                .filter_map(Value::as_str)
-                .collect();
-            properties.sort_unstable();
-            required.sort_unstable();
-            assert_eq!(required, properties, "{name}");
-        }
+        let schema = RememberTool::new(ops).parameters_schema();
+        assert_eq!(schema["additionalProperties"], false);
+        let properties: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(required, properties);
     }
 }

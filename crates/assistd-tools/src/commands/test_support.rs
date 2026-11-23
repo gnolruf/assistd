@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use assistd_embed::{EmbedError, Embedder};
 use assistd_ipc::{Event, PermissionMode};
 use assistd_wm::{NoWindowManager, WindowManager};
 use async_trait::async_trait;
@@ -27,6 +28,26 @@ use crate::policy::{
 };
 use crate::test_support::{AlwaysAllowGate, bash_policy, inert_sandbox};
 use crate::vision::VisionGate;
+
+/// An embedder that gives every text the same one-component vector.
+#[derive(Debug)]
+pub(crate) struct FixedEmbedder;
+
+#[async_trait]
+impl Embedder for FixedEmbedder {
+    async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, EmbedError> {
+        Ok(vec![1.0])
+    }
+    async fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        Ok(vec![vec![1.0]; texts.len()])
+    }
+    fn model(&self) -> &'static str {
+        "m"
+    }
+    fn dim(&self) -> usize {
+        1
+    }
+}
 
 /// Every command, never asking, over a sandbox that starts nothing.
 pub(crate) fn test_registry() -> CommandRegistry {

@@ -168,7 +168,7 @@ pub enum RequestBody {
     /// Start a pass over every index root and follow it. Emits `DocumentPassProgress`es and
     /// one `DocumentPassEnded` per root, then `Done`; errors when no extraction worker runs.
     DocumentsReindex,
-    /// Rank the indexed documents by meaning and by the words of `query`, as the `docs search`
+    /// Rank the indexed documents by meaning and by the words of `query`, as the `search`
     /// command does; `limit = 0` uses `embedding.top_k`. Emits `DocumentHit`s best-first, then
     /// `Done`.
     DocumentsSearch {

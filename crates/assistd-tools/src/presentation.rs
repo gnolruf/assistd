@@ -589,7 +589,7 @@ mod tests {
         let cap = OutputCap::new(spec);
         let body: String = (1..=10).map(|i| format!("line {i}\n")).collect();
 
-        for expected_file in ["mcp__web-1.txt", "reminisce-2.txt"] {
+        for expected_file in ["mcp__web-1.txt", "remember-2.txt"] {
             let stem = expected_file.split_once('-').unwrap().0;
             let cut = cap.cap(stem, body.clone());
             let spilled = dir.path().join(expected_file);
