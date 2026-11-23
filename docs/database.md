@@ -27,8 +27,8 @@ erDiagram
     document_pages ||--o| page_transcriptions : "read from its image as"
     messages ||--o{ relay_steps : "relayed by"
     relay_steps ||--o{ relay_entries : "did"
-    chunks ||--o| message_chunk_embeddings : "embedded as"
-    chunks ||--o| document_chunk_embeddings : "embedded as"
+    chunks }o--o| message_vectors : "text embedded as"
+    chunks }o--o| document_vectors : "text embedded as"
     chunks ||--o| document_chunk_fts : "words indexed in"
     memories ||--o| memory_embeddings : "embedded as"
     tasks ||--o{ task_runs : "ran as"
@@ -164,14 +164,19 @@ erDiagram
         int page FK "the document's page it is cut from"
         int byte_start
         int byte_end
+        blob hash "first 16 bytes of the SHA-256 of its text"
     }
-    message_chunk_embeddings {
-        int chunk_id PK, FK
-        blob vector "NULL when the model cannot embed the row"
+    message_vectors {
+        blob hash UK "the hash of the message chunks that hold the text"
+        blob vector "quantised; NULL when the model cannot embed the text"
     }
-    document_chunk_embeddings {
-        int chunk_id PK, FK
-        blob vector "quantised; NULL when the model cannot embed the row"
+    document_vectors {
+        blob hash UK "the hash of the document chunks that hold the text"
+        blob vector "quantised; NULL when the model cannot embed the text"
+    }
+    removed_chunk_texts {
+        int of_document PK "1 for a document chunk's text"
+        blob hash PK "a text the open write removed a chunk of"
     }
     document_chunk_fts {
         int rowid PK, FK "the chunk's id"
@@ -306,7 +311,9 @@ resumed, saying which.
   divides: at blank lines and Markdown headings, with whole paragraphs
   packed into a chunk of up to 512 characters and a heading always
   starting a new one. Only a paragraph longer than that is cut into the
-  same overlapping windows.
+  same overlapping windows. `hash` is the first 16 bytes of the SHA-256
+  of the bytes the chunk covers, written with the row: it is what the
+  chunk's vector is stored under.
 - **`index_roots`**: the folders indexed for document search. Each
   walk over a root, whole or held to the paths that changed under it,
   is a pass and bumps `pass`; deleting a root deletes its documents.
@@ -316,10 +323,11 @@ resumed, saying which.
   which covers its pages in order, only has its stamp refreshed, unless
   it has rows in `page_transcriptions`: the same text layer says nothing
   about whether the scans changed.
-  Otherwise each chunk whose text is unchanged keeps its vector and
-  takes the page and byte range that text now has, so an insertion
-  re-embeds only the paragraphs it touched and a page added at the
-  front only that page, and the rest are replaced. `chunker` names
+  Otherwise its pages and chunks are replaced. A vector belongs to a
+  text and not to a chunk, so only text no document chunk held is
+  embedded: an insertion embeds the paragraphs it touched, a page added
+  at the front only that page, and a renamed, moved or copied file
+  nothing. `chunker` names
   the strategy that cut the row, so a new strategy cuts every stored
   document again on the next pass. Each row records the pass
   that last saw it, and finishing a pass deletes the documents it did
@@ -350,35 +358,48 @@ resumed, saying which.
   nothing, as the page's `document_pages.content` and marks the row
   read; a page that cannot be rendered or whose reply is not its text
   is marked failed and keeps empty content. Once none of a document's
-  rows is waiting its pages are cut into chunks again and
+  rows is waiting its pages that have no chunk are cut and
   `content_hash` is taken over the pages as they now are. The rows stay
   until the file's stamp changes: indexing it again writes the pages as
   extracted, which drops the transcribed text with its chunks, and
   starts every empty page waiting again. A daemon start sets the failed
   rows back to waiting.
-- **`message_chunk_embeddings`** / **`document_chunk_embeddings`** /
-  **`memory_embeddings`**: at most one vector per chunk or memory,
-  L2-normalised by the embedder so a dot product is cosine similarity. A chunk's
-  vector goes in the table for its owner's kind, so a message search never
-  reads document vectors. Message chunk and memory vectors are BLOBs of
-  little-endian `f32`s. A document chunk vector is quantised to a
-  quarter of that: a little-endian `f32` step, sized so the vector's
-  largest component is 127 steps, then one `i8` count of steps per
-  dimension.
-  A chunk or memory with no row here is pending, and the background
-  embedding worker fills it in; a memory's vector is only stored if its
-  value hasn't changed since it was read for embedding. A row with a
-  `NULL` vector marks text the model rejected, or that failed alone three
-  times while the server embedded other text, so the worker does not
-  retry it; `assistd memory reindex` clears those marks and wakes the
-  worker.
+- **`message_vectors`** / **`document_vectors`**: one vector for each
+  distinct text the chunks of that kind hold, under the text's
+  `chunks.hash`. No chunk id appears in them, so a text that sits in
+  many places is embedded and stored once, and a vector follows its
+  text to any page of any file. Two tables keep a message search from
+  reading document vectors. A chunk whose hash has no row is pending,
+  and the background embedding worker is given the first chunk holding
+  each pending text. A vector is stored only while a chunk of its kind
+  holds its text.
+  Vectors are L2-normalised by the embedder, so a dot product is cosine
+  similarity, and quantised to a quarter of their `f32`s: a
+  little-endian `f32` step, sized so the vector's largest component is
+  127 steps, then one `i8` count of steps per dimension.
+  A row with a `NULL` vector marks text the model rejected, or that
+  failed alone three times while the server embedded other text, so the
+  worker does not retry it; `assistd memory reindex` clears those marks
+  and wakes the worker.
+- **`removed_chunk_texts`**: empty between writes. A trigger on `chunks`
+  records the hash of every chunk a write deletes, however the chunk
+  goes: with its message on undo, with its session, with its page or
+  its document. Before the write commits it deletes the vector of each
+  recorded text that no chunk of that kind holds any more, and empties
+  the table. The check runs after the write's inserts, so a document
+  stored again, whose chunks are removed and added, keeps the vectors
+  of the text it still has, and a vector is erased in the same
+  transaction as the last text it was made from.
+- **`memory_embeddings`**: at most one vector per memory, a BLOB of
+  little-endian `f32`s. A memory with no row is pending; its vector is
+  only stored if its value hasn't changed since it was read for
+  embedding, and a `NULL` vector marks it as the chunk tables do.
 - **`document_chunk_fts`**: an FTS5 index of the words of every document
   chunk, for the keyword half of a document search. It is contentless:
   a row carries its chunk's id and the index entries for the chunk's
   text, and the text itself stays in `document_pages` alone. The write
-  that cuts a chunk adds its row, a trigger on `chunks` removes the row
-  with the chunk however the chunk goes, and a chunk that only moves
-  keeps it. FTS5 marks a removed row deleted and drops its entries as
+  that cuts a chunk adds its row, and a trigger on `chunks` removes the
+  row with the chunk however the chunk goes. FTS5 marks a removed row deleted and drops its entries as
   it merges the index. Words are split at every character that is not a
   letter or a digit and compared without case or accents, so
   `read_regular_file` is indexed as `read`, `regular`, `file` in a row.
@@ -396,21 +417,32 @@ resumed, saying which.
 
 Search (`recall`, `reminisce`, `docs search`) scans every vector of one source kind,
 messages or documents, on that kind's own read-only connection and keeps
-the top matches; there is no vector index. `reminisce` leaves out the
-current session's messages. `docs search` ranks by keyword as well, as
+the top matches; there is no vector index. A document search scans
+`document_vectors` alone, keeps the 300 nearest texts and finds the
+chunks that hold each by its hash, so a text several documents hold
+counts for each of them. When those texts sit in fewer than 30
+documents and more vectors remain, it scans again through the chunks,
+keeping one chunk a document, so one long document never crowds out
+the rest. A message search reaches each vector through
+its chunk, which drops the messages outside the search's sessions
+before any is ranked; `reminisce` leaves out the current session's
+messages. `docs search` ranks by keyword as well, as
 [Document search](#document-search) describes.
 
-One scan of 768-dimension vectors, measured on a Ryzen 7 9800X3D
-with the file in the page cache:
+One scan of quantised 768-dimension vectors, measured on a Ryzen 7
+9800X3D with the file in the page cache, when each vector belonged to
+one chunk:
 
-| Chunks of the kind | `f32` (messages) | quantised (documents) |
-|--------------------|------------------|-----------------------|
-| 10,000             | 33 MB, 2 ms      | 8 MB, 1 ms            |
-| 100,000            | 328 MB, 35 ms    | 82 MB, 14 ms          |
-| 1,000,000          | 3.3 GB, 330 ms   | 820 MB, 200 ms       |
+| Vectors   | Size   | Scan   |
+|-----------|--------|--------|
+| 10,000    | 8 MB   | 1 ms   |
+| 100,000   | 82 MB  | 14 ms  |
+| 1,000,000 | 820 MB | 200 ms |
 
 Quantising moved no top-8 result in these runs and changed a
-similarity by at most 0.0005.
+similarity by at most 0.0005. A document index holds fewer vectors than
+chunks: of 209,375 chunks cut from 9,229 files (this repository, the
+Rust books and `/usr/share/doc`), 154,468 held distinct text.
 
 Since every search scans every document vector, the stored documents
 are held to 500,000 chunks (`MAX_DOCUMENT_CHUNKS`), where one scan reads

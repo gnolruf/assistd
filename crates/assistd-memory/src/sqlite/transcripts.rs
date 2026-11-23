@@ -12,7 +12,7 @@ use tracing::warn;
 
 use assistd_ipc::{TaskId, TaskName, TaskRunId, TaskRunSummary};
 
-use crate::chunking::{ChunkingConfig, chunk_ranges};
+use crate::chunking::{ChunkingConfig, chunk_ranges, text_hash};
 use crate::{
     AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, ChunkId, HistoryRow,
     HistoryScope, MemoryError, MessageId, MessageKind, OpenedTurn, PersistedMessage,
@@ -657,7 +657,7 @@ fn store_message(
         "INSERT INTO branch_messages (branch_id, seq, message_id) VALUES (?1, ?2, ?3)",
     )?
     .execute(rusqlite::params![branch, slot.seq, id])?;
-    let chunks = insert_chunks(tx, id, &row.chunk_bytes)?;
+    let chunks = insert_chunks(tx, id, &row.content, &row.chunk_bytes)?;
     Ok(AppendedMessage {
         id,
         seq: slot.seq,
@@ -701,23 +701,27 @@ fn insert_message(
     )
 }
 
-/// Store chunks over `chunk_bytes` of `message`'s content, returning their ids in order.
+/// Store chunks over `chunk_bytes` of `content`, the content of `message`, returning
+/// their ids in order.
 fn insert_chunks(
     tx: &Transaction<'_>,
     message: MessageId,
+    content: &str,
     chunk_bytes: &[Range<usize>],
 ) -> rusqlite::Result<Vec<ChunkId>> {
     let mut insert = tx.prepare_cached(
-        "INSERT INTO chunks (message_id, byte_start, byte_end)
-         VALUES (?1, ?2, ?3)
+        "INSERT INTO chunks (message_id, byte_start, byte_end, hash)
+         VALUES (?1, ?2, ?3, ?4)
          RETURNING id",
     )?;
     chunk_bytes
         .iter()
         .map(|bytes| {
-            insert.query_row(rusqlite::params![message, bytes.start, bytes.end], |r| {
-                r.get(0)
-            })
+            let hash = text_hash(&content.as_bytes()[bytes.clone()]);
+            insert.query_row(
+                rusqlite::params![message, bytes.start, bytes.end, hash],
+                |r| r.get(0),
+            )
         })
         .collect()
 }
@@ -739,7 +743,7 @@ fn cut_missing_chunks(tx: &Transaction<'_>) -> rusqlite::Result<u64> {
     let mut added = 0;
     for (message, content) in unchunked {
         let chunk_bytes = chunk_ranges(&content, ChunkingConfig::MESSAGES);
-        added += insert_chunks(tx, message, &chunk_bytes)?.len() as u64;
+        added += insert_chunks(tx, message, &content, &chunk_bytes)?.len() as u64;
     }
     Ok(added)
 }

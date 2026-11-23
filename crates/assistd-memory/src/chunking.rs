@@ -3,8 +3,16 @@
 
 use std::ops::Range;
 
+use sha2::{Digest, Sha256};
+
 /// The line prefixes that open or close a Markdown fenced code block.
 const CODE_FENCES: [&str; 2] = ["```", "~~~"];
+
+/// Bytes of a text's SHA-256 kept as its [`TextHash`].
+const TEXT_HASH_BYTES: usize = 16;
+
+/// What a chunk's vector is stored under: the first bytes of the SHA-256 of its text.
+pub(crate) type TextHash = [u8; TEXT_HASH_BYTES];
 
 /// How a text is cut into chunks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +82,13 @@ enum LineKind {
     Blank,
     Heading,
     Text,
+}
+
+pub(crate) fn text_hash(text: &[u8]) -> TextHash {
+    let digest: [u8; 32] = Sha256::digest(text).into();
+    let mut hash = TextHash::default();
+    hash.copy_from_slice(&digest[..TEXT_HASH_BYTES]);
+    hash
 }
 
 /// Byte ranges of `content`'s chunks under `cfg`, ordered by start and never cutting

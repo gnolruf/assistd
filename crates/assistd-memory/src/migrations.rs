@@ -212,6 +212,7 @@ CREATE INDEX idx_page_transcriptions_waiting ON page_transcriptions(document_id,
     WHERE state = 0;
 
 -- A byte range into the content of the one message or document page that owns it.
+-- `hash` is the first 16 bytes of the SHA-256 of the bytes the range covers.
 CREATE TABLE chunks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id  INTEGER REFERENCES messages(id) ON DELETE CASCADE,
@@ -219,6 +220,7 @@ CREATE TABLE chunks (
     page        INTEGER,
     byte_start  INTEGER NOT NULL,
     byte_end    INTEGER NOT NULL,
+    hash        BLOB NOT NULL CHECK (length(hash) = 16),
     CHECK (byte_start >= 0 AND byte_end > byte_start),
     CHECK ((message_id IS NULL) <> (document_id IS NULL)),
     CHECK ((document_id IS NULL) = (page IS NULL)),
@@ -227,6 +229,7 @@ CREATE TABLE chunks (
     FOREIGN KEY (document_id, page)
         REFERENCES document_pages(document_id, page) ON DELETE CASCADE
 ) STRICT;
+CREATE INDEX idx_chunks_hash ON chunks(hash);
 
 -- The words of each document chunk, for keyword search, without its text. A row has
 -- its chunk's id; the write that cuts a chunk adds it, and the trigger removes it.
@@ -238,20 +241,36 @@ BEGIN
     DELETE FROM document_chunk_fts WHERE rowid = old.id;
 END;
 
--- In the three embedding tables a NULL vector marks a row the model could not embed,
--- so it is not retried. Message chunk and memory vectors are little-endian `f32`s.
-CREATE TABLE message_chunk_embeddings (
-    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
-    vector   BLOB CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
+-- The chunk texts a write removed a chunk of, by `chunks.hash`; `of_document` is 1 for
+-- a document chunk's. The write that fills it empties it before it commits.
+CREATE TABLE removed_chunk_texts (
+    of_document INTEGER NOT NULL CHECK (of_document IN (0, 1)),
+    hash        BLOB NOT NULL CHECK (length(hash) = 16),
+    PRIMARY KEY (of_document, hash)
+) STRICT, WITHOUT ROWID;
+
+CREATE TRIGGER chunk_text_removed AFTER DELETE ON chunks
+BEGIN
+    INSERT INTO removed_chunk_texts (of_document, hash)
+    VALUES (old.document_id IS NOT NULL, old.hash)
+    ON CONFLICT DO NOTHING;
+END;
+
+-- The vector of each distinct text the message chunks hold, by `chunks.hash`, and
+-- the same for document chunks. A vector is a little-endian `f32` step, then one
+-- `i8` count of steps per dimension. In all three embedding tables a NULL vector
+-- marks text the model could not embed, so it is not retried.
+CREATE TABLE message_vectors (
+    hash   BLOB NOT NULL UNIQUE CHECK (length(hash) = 16),
+    vector BLOB CHECK (length(vector) > 4)
 ) STRICT;
 
--- A document vector is a little-endian `f32` step, then one `i8` count of steps
--- per dimension.
-CREATE TABLE document_chunk_embeddings (
-    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
-    vector   BLOB CHECK (length(vector) > 4)
+CREATE TABLE document_vectors (
+    hash   BLOB NOT NULL UNIQUE CHECK (length(hash) = 16),
+    vector BLOB CHECK (length(vector) > 4)
 ) STRICT;
 
+-- A memory vector is little-endian `f32`s.
 CREATE TABLE memory_embeddings (
     memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
     vector    BLOB CHECK (length(vector) > 0 AND length(vector) % 4 = 0)

@@ -50,7 +50,7 @@ impl Transcript {
         (appended.id, appended.chunks)
     }
 
-    /// Append user message `text`, short enough to be one chunk, and embed that chunk.
+    /// Append user message `text`, short enough to be one chunk, and embed its text.
     async fn embedded_chunk(
         &self,
         store: &SqliteSemanticStore,
@@ -61,7 +61,7 @@ impl Transcript {
         let [chunk] = chunks[..] else {
             panic!("{text:?} should be one chunk, got {chunks:?}");
         };
-        embed_chunk(store, chunk, vector).await;
+        embed_text(store, ChunkSource::Message, text, vector).await;
         chunk
     }
 }
@@ -97,15 +97,36 @@ fn unit_vec(angle: f32) -> Vec<f32> {
     vec![angle.cos(), angle.sin()]
 }
 
-async fn embed_chunk(store: &SqliteSemanticStore, chunk_id: ChunkId, vector: &[f32]) {
+/// Store `vector` for `text` as the chunks cut from `source` hold it.
+async fn embed_text(store: &SqliteSemanticStore, source: ChunkSource, text: &str, vector: &[f32]) {
     store
         .store_embeddings(vec![Embedding {
-            target: EmbeddingTarget::Chunk(chunk_id),
-            text: String::new(),
+            target: EmbeddingTarget::ChunkText(source),
+            text: text.to_string(),
             vector: Some(vector.to_vec()),
         }])
         .await
         .unwrap();
+}
+
+/// Store `vector` for `text` as the document chunks hold it.
+async fn embed_document_text(store: &SqliteSemanticStore, text: &str, vector: &[f32]) {
+    embed_text(store, ChunkSource::Document, text, vector).await;
+}
+
+/// The texts listed for embedding among the chunks cut from `source`.
+async fn texts_to_embed(store: &SqliteSemanticStore, source: ChunkSource) -> Vec<String> {
+    let listed = store.chunks_missing_embedding(source, None, 100);
+    let listed = listed.await.unwrap();
+    listed.into_iter().map(|(_, text)| text).collect()
+}
+
+/// How many vectors and unembeddable marks `table` holds.
+async fn stored_vectors(handle: &SqliteHandle, table: &'static str) -> u64 {
+    let count = move |c: &rusqlite::Connection| {
+        c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+    };
+    handle.read("count vectors", count).await.unwrap()
 }
 
 /// Whether `wake` was signalled since it was last asked; asking takes the signal.
@@ -144,11 +165,12 @@ async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
     let transcript = Transcript::new(&handle).await;
     let long_text = format!("{}{}", "head ".repeat(100), "tail ".repeat(60));
     let (long_message, long_chunks) = transcript.append(&long_text).await;
-    let [first, second] = long_chunks[..] else {
+    let [_, second] = long_chunks[..] else {
         panic!("expected two chunks, got {}", long_chunks.len());
     };
-    embed_chunk(&store, first, &unit_vec(0.3)).await;
-    embed_chunk(&store, second, &unit_vec(0.0)).await;
+    let windows = texts_to_embed(&store, ChunkSource::Message).await;
+    embed_text(&store, ChunkSource::Message, &windows[0], &unit_vec(0.3)).await;
+    embed_text(&store, ChunkSource::Message, &windows[1], &unit_vec(0.0)).await;
     let short = transcript
         .embedded_chunk(&store, "short", &unit_vec(1.5))
         .await;
@@ -259,17 +281,15 @@ async fn documents_and_messages_rank_apart_and_reindexing_replaces_document_chun
         .await;
     let path = PathBuf::from("/notes/plan.md");
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
-    let stale = store
-        .index_document(
-            pass,
-            path.clone(),
-            STAMP,
-            one_page("draft"),
-            EmptyPages::Final,
-        )
-        .await
-        .unwrap();
-    embed_chunk(&store, stale[0], &unit_vec(0.1)).await;
+    let draft = store.index_document(
+        pass,
+        path.clone(),
+        STAMP,
+        one_page("draft"),
+        EmptyPages::Final,
+    );
+    draft.await.unwrap();
+    embed_document_text(&store, "draft", &unit_vec(0.1)).await;
     let section = format!("{}{}", "intro ".repeat(90), "detail ".repeat(60));
     let fresh_chunks = store
         .index_document(
@@ -298,8 +318,14 @@ async fn documents_and_messages_rank_apart_and_reindexing_replaces_document_chun
     let [intro, detail] = fresh_chunks[..] else {
         panic!("expected two chunks, got {fresh_chunks:?}");
     };
-    embed_chunk(&store, stale[0], &unit_vec(0.0)).await;
-    embed_chunk(&store, detail, &unit_vec(0.2)).await;
+    assert_eq!(
+        stored_vectors(&handle, "document_vectors").await,
+        0,
+        "the vector of replaced text goes with its last chunk"
+    );
+    embed_document_text(&store, "draft", &unit_vec(0.0)).await;
+    let detail_text = &texts_to_embed(&store, ChunkSource::Document).await[1];
+    embed_document_text(&store, detail_text, &unit_vec(0.2)).await;
 
     let messages = store
         .nearest_chunks(unit_vec(0.0), 5, SessionScope::All)
@@ -392,14 +418,16 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
 
     let first = store.begin_index_pass(root).await.unwrap();
     let indexed = index(first, &plan, STAMP, &section).await.unwrap();
-    let [intro, detail] = indexed[..] else {
-        panic!("expected two chunks, got {indexed:?}");
-    };
+    assert_eq!(indexed.len(), 2);
     let deleted = index(first, &gone, STAMP, "deleted before the next pass");
     deleted.await.unwrap();
     assert_eq!(store.finish_index_pass(first).await.unwrap(), 0);
-    embed_chunk(&store, intro, &unit_vec(0.0)).await;
-    embed_chunk(&store, detail, &unit_vec(0.1)).await;
+    let texts = texts_to_embed(&store, ChunkSource::Document).await;
+    let [intro_text, detail_text, _] = &texts[..] else {
+        panic!("expected a text per chunk, got {texts:?}");
+    };
+    embed_document_text(&store, intro_text, &unit_vec(0.0)).await;
+    embed_document_text(&store, detail_text, &unit_vec(0.1)).await;
 
     let second = store.begin_index_pass(root).await.unwrap();
     let never_indexed = root.join("new.md");
@@ -427,11 +455,7 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
     assert!(changed.is_empty(), "the stored stamp is the touched one");
     let edit = section.replace("detail", "change");
     let edited = index(second, &plan, touched, &edit).await.unwrap();
-    assert_eq!(
-        edited.len(),
-        1,
-        "only the chunk the edit reached is replaced"
-    );
+    assert_eq!(edited.len(), 1, "only the text the edit reached is new");
     assert_eq!(store.finish_index_pass(second).await.unwrap(), 1);
     assert!(!store.remove_document(&gone).await.unwrap());
 
@@ -439,8 +463,12 @@ async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_do
         .search_documents(String::new(), unit_vec(0.0), 5)
         .await
         .unwrap();
-    let hit_ids: Vec<ChunkId> = hits.iter().map(|hit| hit.chunk_id).collect();
-    assert_eq!(hit_ids, [intro], "the untouched chunk keeps its vector");
+    let hit_texts: Vec<&str> = hits.iter().map(|hit| hit.text.as_str()).collect();
+    assert_eq!(
+        hit_texts,
+        [intro_text],
+        "the untouched text keeps its vector"
+    );
     assert_eq!(store.count_missing().await.unwrap().document_chunks, 1);
 
     assert_eq!(store.index_roots().await.unwrap(), [root]);
@@ -582,53 +610,29 @@ async fn a_pass_over_part_of_a_root_drops_only_the_unseen_documents_under_it() {
 }
 
 #[tokio::test]
-async fn a_document_chunk_keeps_its_vector_wherever_its_text_moves() {
-    let (_handle, store, _temp) = fresh().await;
+async fn a_document_stored_again_lists_only_its_new_text_wherever_the_rest_moved() {
+    let (handle, store, _temp) = fresh().await;
     let path = PathBuf::from("/notes/plan.md");
     let [one, two, six] = ["# One\n\nalpha", "# Two\n\nbravo", "# Six\n\ndelta"];
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
-    let stored = store
-        .index_document(
-            pass,
-            path.clone(),
-            STAMP,
-            one_page([one, two, six].join("\n\n")),
-            EmptyPages::Final,
-        )
-        .await
-        .unwrap();
-    let [one_chunk, two_chunk, six_chunk] = stored[..] else {
-        panic!("expected a chunk per section, got {stored:?}");
+    let index = |pages: Vec<String>| {
+        store.index_document(pass, path.clone(), STAMP, pages, EmptyPages::Final)
     };
-    for (chunk, angle) in [(one_chunk, 0.0), (two_chunk, 0.1), (six_chunk, 0.2)] {
-        embed_chunk(&store, chunk, &unit_vec(angle)).await;
+    let stored = index(one_page([one, two, six].join("\n\n"))).await.unwrap();
+    assert_eq!(stored.len(), 3, "a chunk per section");
+    for (text, angle) in [(one, 0.0), (two, 0.1), (six, 0.2)] {
+        embed_document_text(&store, text, &unit_vec(angle)).await;
     }
 
     let opening = "A new opening paragraph.";
-    let prepended = [opening, one, two, six].join("\n\n");
-    let added = store
-        .index_document(
-            pass,
-            path.clone(),
-            STAMP,
-            one_page(prepended),
-            EmptyPages::Final,
-        )
-        .await
-        .unwrap();
-    assert_eq!(added.len(), 1, "only the new paragraph is a new chunk");
-
-    let swapped = [opening, two, one, six].join("\n\n");
-    let added = store
-        .index_document(pass, path, STAMP, one_page(swapped), EmptyPages::Final)
-        .await
-        .unwrap();
-    assert!(added.is_empty(), "sections trading places are not new text");
+    let swapped = [opening, two, one].join("\n\n");
+    let added = index(vec![swapped, six.to_string()]).await.unwrap();
+    assert_eq!(added.len(), 1, "only the new paragraph has no vector");
     assert_eq!(
-        store.count_missing().await.unwrap().document_chunks,
-        1,
-        "every section keeps its vector"
+        texts_to_embed(&store, ChunkSource::Document).await,
+        [opening]
     );
+    assert_eq!(stored_vectors(&handle, "document_vectors").await, 3);
 
     let hits = store
         .search_documents(String::new(), unit_vec(0.0), 5)
@@ -637,62 +641,119 @@ async fn a_document_chunk_keeps_its_vector_wherever_its_text_moves() {
     let [hit] = &hits[..] else {
         panic!("the document must hit once, got {hits:?}");
     };
-    assert_eq!((hit.chunk_id, hit.text.as_str()), (one_chunk, one));
+    assert_eq!((hit.text.as_str(), hit.page, hit.page_count), (one, 0, 2));
     let adjacent = store.adjacent_chunks(&locator_of(hit)).await.unwrap();
-    assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(two_chunk));
-    assert_eq!(adjacent.after.map(|chunk| chunk.chunk_id), Some(six_chunk));
+    assert_eq!(adjacent.before.map(|chunk| chunk.text), Some(two.into()));
+    assert_eq!(adjacent.after.map(|chunk| chunk.text), Some(six.into()));
 }
 
 #[tokio::test]
-async fn a_chunk_stays_on_its_page_and_keeps_its_vector_when_the_page_moves() {
+async fn a_text_several_documents_hold_has_one_vector_until_none_of_them_holds_it() {
+    let (handle, store, _temp) = fresh().await;
+    let root = Path::new("/notes");
+    let [original, copy, renamed] = ["a.md", "b.md", "moved/a.md"].map(|name| root.join(name));
+    let shared = "the terms of the lease";
+    let pass = store.begin_index_pass(root).await.unwrap();
+    let index = |path: &Path| {
+        let (path, pages) = (path.to_path_buf(), one_page(shared));
+        store.index_document(pass, path, STAMP, pages, EmptyPages::Final)
+    };
+    let found = async || {
+        let hits = store.search_documents(String::new(), unit_vec(0.0), 5);
+        let hits = hits.await.unwrap();
+        hits.into_iter().map(|hit| hit.path).collect::<Vec<_>>()
+    };
+
+    index(&original).await.unwrap();
+    index(&copy).await.unwrap();
+    assert_eq!(
+        texts_to_embed(&store, ChunkSource::Document).await,
+        [shared],
+        "a text two documents hold is embedded once"
+    );
+    assert_eq!(store.count_missing().await.unwrap().document_chunks, 2);
+    embed_document_text(&store, shared, &unit_vec(0.0)).await;
+    assert_eq!(stored_vectors(&handle, "document_vectors").await, 1);
+    assert_eq!(store.count_missing().await.unwrap().document_chunks, 0);
+    assert_eq!(found().await, [original.clone(), copy.clone()]);
+
+    let rows_to_embed = store.rows_to_embed();
+    assert!(signalled(&rows_to_embed));
+    let moved = index(&renamed).await.unwrap();
+    assert!(
+        moved.is_empty() && !signalled(&rows_to_embed),
+        "a file stored under another path has nothing to embed"
+    );
+
+    assert!(store.remove_document(&original).await.unwrap());
+    assert!(store.remove_document(&copy).await.unwrap());
+    assert_eq!(found().await, [renamed.as_path()], "one holder is left");
+    assert!(store.remove_document(&renamed).await.unwrap());
+    assert_eq!(
+        stored_vectors(&handle, "document_vectors").await,
+        0,
+        "the vector goes with the last chunk holding its text"
+    );
+    embed_document_text(&store, shared, &unit_vec(0.0)).await;
+    assert_eq!(
+        stored_vectors(&handle, "document_vectors").await,
+        0,
+        "a vector for text no chunk holds is not stored"
+    );
+}
+
+#[tokio::test]
+async fn a_document_with_hundreds_of_near_texts_does_not_crowd_out_the_next_nearest() {
     let (_handle, store, _temp) = fresh().await;
-    let path = PathBuf::from("/notes/scan.pdf");
     let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
-    let body = vec!["alpha".to_string(), String::new(), "bravo".to_string()];
-    let stored = store
-        .index_document(pass, path.clone(), STAMP, body.clone(), EmptyPages::Final)
-        .await
-        .unwrap();
-    let [alpha, bravo] = stored[..] else {
-        panic!("two short pages must not share a chunk, got {stored:?}");
+    let index = |name: &str, text: String| {
+        let path = Path::new("/notes").join(name);
+        store.index_document(pass, path, STAMP, one_page(text), EmptyPages::Final)
     };
-    let missing = store.chunks_missing_embedding(ChunkSource::Document, None, 100);
-    assert_eq!(
-        missing.await.unwrap(),
-        [(alpha, "alpha".to_string()), (bravo, "bravo".to_string())]
-    );
-    embed_chunk(&store, alpha, &unit_vec(0.0)).await;
-    embed_chunk(&store, bravo, &unit_vec(1.0)).await;
+    let sections: Vec<String> = (0..320)
+        .map(|n| format!("# Part {n}\n\nbody {n}"))
+        .collect();
+    let manual = index("manual.md", sections.join("\n\n")).await.unwrap();
+    assert_eq!(manual.len(), sections.len(), "a chunk per section");
+    index("note.md", "elsewhere".to_string()).await.unwrap();
+    for section in &sections {
+        embed_document_text(&store, section, &unit_vec(0.1)).await;
+    }
+    embed_document_text(&store, "elsewhere", &unit_vec(0.5)).await;
 
-    let with_cover = [vec!["Cover".to_string()], body].concat();
-    let added = store
-        .index_document(pass, path, STAMP, with_cover, EmptyPages::Final)
+    let hits = store.search_documents(String::new(), unit_vec(0.0), 5);
+    let found: Vec<PathBuf> = hits
         .await
-        .unwrap();
-    let [cover] = added[..] else {
-        panic!("only the new page is new text, got {added:?}");
-    };
+        .unwrap()
+        .into_iter()
+        .map(|hit| hit.path)
+        .collect();
     assert_eq!(
-        store.count_missing().await.unwrap().document_chunks,
-        1,
-        "every page that moved keeps its vectors"
+        found,
+        ["/notes/manual.md", "/notes/note.md"].map(PathBuf::from)
     );
+}
 
-    let hits = store
-        .search_documents(String::new(), unit_vec(0.0), 5)
-        .await
-        .unwrap();
-    let [hit] = &hits[..] else {
-        panic!("the document must hit once, got {hits:?}");
-    };
-    assert_eq!(
-        (hit.chunk_id, hit.page, hit.page_count, hit.bytes.clone()),
-        (alpha, 1, 4, 0..5),
-        "the page without text still counts"
-    );
-    let adjacent = store.adjacent_chunks(&locator_of(hit)).await.unwrap();
-    assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(cover));
-    assert_eq!(adjacent.after.map(|chunk| chunk.chunk_id), Some(bravo));
+#[tokio::test]
+async fn undoing_a_turn_deletes_the_vectors_only_its_messages_named() {
+    let (handle, store, _temp) = fresh().await;
+    let transcript = Transcript::new(&handle).await;
+    for text in ["said twice", "said twice", "said once"] {
+        transcript
+            .embedded_chunk(&store, text, &unit_vec(0.0))
+            .await;
+    }
+    assert_eq!(stored_vectors(&handle, "message_vectors").await, 2);
+
+    for (vectors_left, undone) in [(1, "said once"), (1, "a repeat"), (0, "the last holder")] {
+        let undo = transcript.store.undo_last_turn(transcript.branch);
+        undo.await.unwrap();
+        assert_eq!(
+            stored_vectors(&handle, "message_vectors").await,
+            vectors_left,
+            "after undoing {undone}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -713,9 +774,10 @@ async fn a_document_holding_the_querys_words_ranks_with_those_nearest_in_meaning
     let ledger = index("ledger.md", "paid INV-2024-0113 in full")
         .await
         .unwrap()[0];
-    embed_chunk(&store, terms_intro, &unit_vec(0.0)).await;
-    embed_chunk(&store, terms_reference, &unit_vec(1.4)).await;
-    embed_chunk(&store, invoice, &unit_vec(1.5)).await;
+    let texts = texts_to_embed(&store, ChunkSource::Document).await;
+    for (text, angle) in texts.iter().zip([0.0, 1.4, 1.5]) {
+        embed_document_text(&store, text, &unit_vec(angle)).await;
+    }
     let search = async |query: &str| {
         let hits = store.search_documents(query.to_string(), unit_vec(0.0), 5);
         let hits = hits.await.unwrap();
@@ -758,9 +820,7 @@ async fn keyword_search_follows_a_document_through_reindexing_and_removal() {
     let found = async |word: &str| {
         let hits = store.search_documents(word.to_string(), Vec::new(), 5);
         let hits = hits.await.unwrap();
-        hits.iter()
-            .map(|hit| (hit.chunk_id, hit.page))
-            .collect::<Vec<_>>()
+        hits.iter().map(|hit| hit.page).collect::<Vec<_>>()
     };
     let indexed_chunks = async || {
         let count = |c: &rusqlite::Connection| {
@@ -772,24 +832,16 @@ async fn keyword_search_follows_a_document_through_reindexing_and_removal() {
     };
 
     let stored = index(&["alpha", "draft"]).await.unwrap();
-    let [alpha, draft] = stored[..] else {
-        panic!("two short pages must not share a chunk, got {stored:?}");
-    };
-    assert_eq!(found("alpha").await, [(alpha, 0)]);
-    assert_eq!(found("draft").await, [(draft, 1)]);
+    assert_eq!(stored.len(), 2, "two short pages must not share a chunk");
+    assert_eq!(found("alpha").await, [0]);
+    assert_eq!(found("draft").await, [1]);
 
-    let added = index(&["Cover", "alpha", "final"]).await.unwrap();
-    assert_eq!(
-        added.len(),
-        2,
-        "only the cover and the rewritten page are new"
+    index(&["Cover", "alpha", "final"]).await.unwrap();
+    assert_eq!(found("alpha").await, [1], "text that moved keeps its words");
+    assert!(
+        found("draft").await.is_empty(),
+        "replaced text must not be found"
     );
-    assert_eq!(
-        found("alpha").await,
-        [(alpha, 1)],
-        "a kept chunk keeps its words"
-    );
-    assert_eq!(found("draft").await, [], "replaced text must not be found");
     assert_eq!(found("final").await.len(), 1);
     assert_eq!(
         indexed_chunks().await,
@@ -798,7 +850,7 @@ async fn keyword_search_follows_a_document_through_reindexing_and_removal() {
     );
 
     assert!(store.remove_document(&path).await.unwrap());
-    assert_eq!(found("alpha").await, []);
+    assert!(found("alpha").await.is_empty());
     assert_eq!(
         indexed_chunks().await,
         0,
@@ -1148,7 +1200,7 @@ async fn unembeddable_rows_are_neither_missing_nor_searched_until_cleared_or_cha
     let cleared_mem = save_memory(&handle, "cleared", "v1").await;
     let changed_mem = save_memory(&handle, "changed", "v2").await;
     let unembeddable = [
-        (EmbeddingTarget::Chunk(chunk), "y"),
+        (EmbeddingTarget::ChunkText(ChunkSource::Message), "y"),
         (EmbeddingTarget::Memory(cleared_mem), "v1"),
         (EmbeddingTarget::Memory(changed_mem), "v2"),
     ]
@@ -1253,7 +1305,7 @@ async fn adopting_a_different_embedding_space_drops_every_vector() {
             .is_empty()
     );
 
-    embed_chunk(&store, chunk, &unit_vec(0.0)).await;
+    embed_text(&store, ChunkSource::Message, "text", &unit_vec(0.0)).await;
     let hits = store.nearest_chunks(unit_vec(0.0), 5, all_messages).await;
     assert_eq!(hits.unwrap()[0].chunk_id, chunk);
     assert_eq!(

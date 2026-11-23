@@ -538,7 +538,7 @@ mod tests {
 
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        AdjacentChunks, BranchId, BranchSummary, DocumentHit, DocumentText, Embedding,
+        AdjacentChunks, BranchId, BranchSummary, ChunkSource, DocumentHit, DocumentText, Embedding,
         EmbeddingQueue, EmbeddingTarget, MemoryError, MemoryStore, NoSemanticStore,
         PersistedMessage, Seq, SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore,
     };
@@ -684,16 +684,15 @@ mod tests {
             }
         }
 
-        /// Store one user/assistant exchange, embedding the chunks of whichever
-        /// side `embed_reply` picks.
+        /// Store one user/assistant exchange, each side short enough to be one chunk,
+        /// embedding whichever side `embed_reply` picks.
         async fn exchange(&self, prompt: &str, reply: &str, embed_reply: bool) {
             let opened = self
                 .transcripts
                 .begin_turn(self.branch, PersistedMessage::user(prompt))
                 .await
                 .unwrap();
-            let answered = self
-                .transcripts
+            self.transcripts
                 .append_message_to_branch(
                     self.branch,
                     opened.turn,
@@ -701,20 +700,15 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let embedded = if embed_reply {
-                answered.chunks
-            } else {
-                opened.message.chunks
+            let embedding = Embedding {
+                target: EmbeddingTarget::ChunkText(ChunkSource::Message),
+                text: if embed_reply { reply } else { prompt }.to_owned(),
+                vector: Some(vec![1.0]),
             };
-            let embeddings = embedded
-                .into_iter()
-                .map(|chunk| Embedding {
-                    target: EmbeddingTarget::Chunk(chunk),
-                    text: String::new(),
-                    vector: Some(vec![1.0]),
-                })
-                .collect();
-            self.semantic.store_embeddings(embeddings).await.unwrap();
+            self.semantic
+                .store_embeddings(vec![embedding])
+                .await
+                .unwrap();
         }
 
         fn short_id(&self) -> String {

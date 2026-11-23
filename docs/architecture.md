@@ -249,9 +249,9 @@ stored work. Its contract has four parts.
 
 | Backlog          | A row is                                             | Page | Permit              | Cannot be done                    | Wake                   | Retry               |
 |------------------|------------------------------------------------------|------|---------------------|-----------------------------------|------------------------|---------------------|
-| Message chunks   | a chunk of a message with no vector                  | 32   | none                | marked refused (a `NULL` vector)  | `rows_to_embed`        | 1 s, doubling to 60 |
+| Message chunks   | a message chunk whose text has no vector             | 32   | none                | marked refused (a `NULL` vector)  | `rows_to_embed`        | 1 s, doubling to 60 |
 | Memories         | a saved memory with no vector                        | 32   | none                | marked refused                    | `rows_to_embed`        | the same            |
-| Document chunks  | a chunk of an indexed document with no vector        | 32   | `DocumentEmbedding` | marked refused                    | `rows_to_embed`        | the same            |
+| Document chunks  | a document chunk whose text has no vector            | 32   | `DocumentEmbedding` | marked refused                    | `rows_to_embed`        | the same            |
 | Waiting pages    | a PDF page without text, recorded as waiting         | 1    | `PageTranscription` | recorded as failed                | `pages_to_transcribe`  | 5 minutes           |
 
 The embedding worker drains its three backlogs in that order in one
@@ -1001,8 +1001,10 @@ Saving through the `remember` tool inserts the K/V row, and each user
 or assistant message is chunked in the transaction that saves it. With
 `embedding.enabled = false` no chunks are cut; the next start with
 embedding on cuts them for the messages stored meanwhile. Embedding
-is a [backlog](#backlogs): a memory or chunk with no row in its
-embeddings table is pending. The store signals after each committed
+is a [backlog](#backlogs): a memory with no row in its embeddings
+table is pending, and so is a chunk whose text has no row in the
+vector table of its kind, which holds one vector for each distinct
+text under the hash of that text. The store signals after each committed
 write that leaves a row pending, and the signal wakes
 a background task, which pages through the pending rows, sends batches to the embedding server
 (a second, smaller llama-server child process configured under
@@ -1035,8 +1037,8 @@ rejects; a document chunk marked so is still found by its words. A `remember` se
 cosine similarity; the `reminisce` tool runs the same kind of search
 over transcript chunks from earlier sessions. Indexed local documents
 own chunks in the same table, but their vectors are kept in a table
-of their own, quantised to a byte per dimension, so message recall never
-reads or ranks document chunks. Document chunks alone also have their
+of their own, so message recall never reads or ranks document chunks.
+Every chunk vector is quantised to a byte per dimension. Document chunks alone also have their
 words in a full-text index, for the keyword half of a document search.
 Like model requests,
 embedding requests are sent only while the embedding server's
@@ -1255,9 +1257,8 @@ such as a ruled line or empty table cells, does not count.
 
 A page's text is stored as soon as it is read, so a wake in the middle of a
 document loses at most the page in flight, which stays waiting. When a
-document's last waiting page is done its pages are cut into chunks again, the
-chunks whose text did not change keeping their vectors, and the new ones wake
-the embedding worker. Until then the transcribed pages can be read but are
+document's last waiting page is done the pages read are cut into chunks, and
+those whose text has no vector yet wake the embedding worker. Until then the transcribed pages can be read but are
 not found by a search. A page is failed, and the run goes on, when it cannot
 be rendered, when the worker exits over it twice, or when its request fails
 with the model still loaded. A failed page is tried again when its file
@@ -1696,12 +1697,13 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
 
 4. **Store** ([`crates/assistd-core/src/documents/pass.rs`](../crates/assistd-core/src/documents/pass.rs)).
    One transaction writes the pages, cuts them into chunks and adds the
-   chunks' words to the keyword index; a chunk whose text is unchanged
-   keeps its vector. From here a search finds the file by its exact
+   chunks' words to the keyword index; text that already has a vector,
+   from this file as it was or from any other, is not embedded again.
+   From here a search finds the file by its exact
    words. A page with no text is recorded as waiting for
    [page transcription](#page-transcription-assistd-core). Once the
-   transaction commits the store wakes the embedding worker for new
-   chunks, and page transcription for a waiting page.
+   transaction commits the store wakes the embedding worker for chunks
+   whose text has no vector, and page transcription for a waiting page.
 
 5. **Embed permit** ([`crates/assistd-core/src/admission/activity.rs`](../crates/assistd-core/src/admission/activity.rs)).
    The embedding worker embeds pending message chunks and memories
@@ -1711,7 +1713,7 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
    daemon sleeps for another process's VRAM, unless `[documents]` lets
    embedding through that state
    ([activity and permits](#activity-and-permits)). Each vector is quantised into
-   `document_chunk_embeddings`
+   `document_vectors`, once for its text however many chunks hold it
    ([memory](#memory-assistd-memory--assistd-embed)).
 
 6. **Search** ([`crates/assistd-tools/src/commands/docs.rs`](../crates/assistd-tools/src/commands/docs.rs)).
