@@ -698,9 +698,10 @@ mod tests {
 
     use assistd_memory::{
         BranchId, BranchSummary, ChunkId, DocumentId, DocumentStore, Embedding, EmbeddingQueue,
-        EmptyPages, FileStamp, MemoryStore, PersistedMessage, Seq, SqliteHandle,
+        EmptyPages, FileStamp, MemoryStore, MessageChunker, PersistedMessage, Seq, SqliteHandle,
         SqliteSemanticStore, SqliteTranscriptStore,
     };
+    use assistd_utils::backlog::{Signals, drain};
     use assistd_utils::readiness::Readiness;
 
     use super::*;
@@ -785,6 +786,7 @@ mod tests {
 
     /// A saved session's main branch, for appending dialogue.
     struct PastSession {
+        handle: SqliteHandle,
         transcripts: Arc<SqliteTranscriptStore>,
         semantic: Arc<SqliteSemanticStore>,
         session: SessionId,
@@ -800,11 +802,25 @@ mod tests {
                 .await
                 .unwrap();
             Self {
+                handle: handle.clone(),
                 transcripts,
                 semantic: Arc::new(SqliteSemanticStore::new(handle.clone())),
                 session,
                 branch,
             }
+        }
+
+        /// Cut every saved message that has no chunks, as the daemon's chunker does
+        /// when woken.
+        async fn chunk_saved_messages(&self) {
+            let (_keep_running, shutdown) = watch::channel(false);
+            let signals = Signals {
+                wake: Arc::default(),
+                shutdown,
+            };
+            drain(&mut MessageChunker::new(self.handle.clone()), &signals)
+                .await
+                .unwrap();
         }
 
         /// Store one user/assistant exchange, each side short enough to be one chunk,
@@ -823,6 +839,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            self.chunk_saved_messages().await;
             let embedding = Embedding {
                 source: ChunkSource::Message,
                 text: if embed_reply { reply } else { prompt }.to_owned(),

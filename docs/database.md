@@ -1,8 +1,15 @@
 # Database schema
 
-`assistd-memory` keeps everything the daemon remembers in one SQLite
-file, `$XDG_DATA_HOME/assistd/memory.db` (`~/.local/share/assistd/memory.db`
-by default).
+`assistd-memory` keeps what the daemon remembers in two SQLite files in
+`$XDG_DATA_HOME/assistd` (`~/.local/share/assistd` by default).
+
+- **`memory.db`** holds what exists nowhere else: sessions, memories and
+  tasks. The daemon never replaces it.
+- **`index.db`** holds what can be built again from `memory.db` and from
+  the files on disk: document text, the chunks of every kind, their
+  keyword index and their vectors. The daemon builds it again itself
+  when it has to ([Two files](#two-files)).
+
 Chats are saved whatever `[memory] enabled` says; turning it off only
 withholds the memory tools and recalled context from the model.
 
@@ -36,6 +43,15 @@ erDiagram
     task_runs ||--o| sessions : "recorded in"
     sessions ||--o| active_session : "pointed at by"
 
+    database_identity {
+        int id PK "always 0"
+        blob identity "16 random bytes, written when memory.db is created"
+    }
+    chunked_source {
+        int id PK "always 0"
+        blob memory_identity "the database_identity its chunks were cut from"
+        int chunked_through "the highest message id whose chunks are cut"
+    }
     sessions {
         int id PK
         text uuid UK
@@ -231,10 +247,57 @@ Every table is `STRICT`, and every timestamp is Unix milliseconds.
 Branches, turns, and messages carry their `session_id` and reference
 each other through composite `(session_id, id)` keys, so nothing can
 point across sessions. Deleting a session, branch, message, or memory
-cascades to the rows that hang off it. `chunks.source` names a row of
-one of three tables, which no foreign key can say, so triggers on
-`messages`, `memories` and `document_pages` delete a deleted row's
-chunks.
+cascades to the rows that hang off it in its own file.
+
+`index.db` holds `chunked_source`, `index_roots`, `documents`,
+`skipped_files`, `document_pages`, `page_transcriptions`, `chunks`,
+`chunk_words`, the three vector tables, `removed_chunk_texts` and
+`embedding_meta`; every other table is in `memory.db`. `chunks.source`
+names a row of one of three tables, which no foreign key can say. A
+trigger on `document_pages`, in the same file, deletes a deleted page's
+chunks. A message or a memory is in the other file, and
+[Two files](#two-files) says what holds its chunks to it.
+
+## Two files
+
+Inside a file rows are tied by keys, cascades and triggers. No
+transaction covers both files, so a row of `memory.db` is always written
+first and `index.db` follows it. A crash between the two leaves
+`index.db` behind, never wrong, and the next start brings it level.
+
+- **Identity.** `database_identity` holds 16 random bytes written when
+  `memory.db` is created. `chunked_source` records the identity
+  `index.db` cut its message and memory chunks from. When the two differ
+  at start, those chunks are dropped and cut again, so the ids of a new
+  `memory.db` never meet another database's chunks. Document chunks
+  stay: they name no row of `memory.db`.
+- **Messages.** A message is saved without chunks.
+  `chunked_source.chunked_through` is the highest message id whose
+  chunks are cut, and the message chunker cuts every user and assistant
+  message above it, at start and each time one is saved. It is a backlog
+  ([architecture](architecture.md#backlogs)) and the only code that cuts
+  a message. Message ids never recycle, so a stale chunk cannot come to
+  name another message. With `embedding.enabled = false` the chunker
+  does not run and the messages wait above the mark. A start lowers the
+  mark to the highest message stored, so a `memory.db` put back from an
+  older copy has its next messages chunked.
+- **Memories.** Once a save has committed, the memory's chunk is compared
+  with the value now stored, by hash, and cut again when they differ. A
+  start compares every memory the same way.
+- **Deletes.** A delete commits in `memory.db`, and then the chunks whose
+  message or memory is gone are removed from `index.db` and its WAL
+  truncated. A start removes them too. Until then a search skips them.
+
+A step on `index.db` that fails after its `memory.db` write committed is
+logged and left to the next start.
+
+The daemon deletes `index.db` and creates it empty when the file is not
+a database SQLite can read, or when its `PRAGMA user_version` is not the
+one this build writes; a missing file is created. The messages and
+memories are then chunked again, the next pass over each root reads its
+files, and everything is embedded again. Scanned pages go back to wait
+for the OCR model. `index.db` has no migrations: a change to its schema
+takes the next version number.
 
 ## Transcripts
 
@@ -287,9 +350,9 @@ chunks.
 **`memories`** holds the facts saved by the `remember` tool and
 `assistd memory`, one row per unique `key`. Saving an existing key
 overwrites `value` in place and bumps `updated_at`. A memory has one
-chunk over its whole value, written with it; a save that changes the
-value replaces the chunk in the same transaction, which deletes the old
-value's vector unless another memory holds that value.
+chunk over its whole value, cut once the save has committed; a save that
+changes the value replaces the chunk, which deletes the old value's
+vector unless another memory holds that value.
 
 ## Tasks
 
@@ -313,8 +376,8 @@ resumed, saying which.
   twice. `kind` says which of the three and `source` is that row's id,
   so a new kind of text needs a code and a vector table, not columns.
   A memory is one chunk over its whole value. User and assistant messages are cut into overlapping windows of
-  512 characters (64 shared) in the same transaction that saves the
-  message; tool results are not chunked. A document is cut page by
+  512 characters (64 shared) by the message chunker, after the message
+  is saved; tool results are not chunked. A document is cut page by
   page, so no chunk spans two pages, and within a page where its text
   divides: at blank lines and Markdown headings, with whole paragraphs
   packed into a chunk of up to 512 characters and a heading always
@@ -341,7 +404,7 @@ resumed, saying which.
   that last saw it, and finishing a pass deletes the documents it did
   not see: all of the root's, or for a pass over changed paths those at
   or under them. The rows are a rebuildable cache of files on disk,
-  so a reset of `memory.db` costs only a re-index.
+  so losing `index.db` costs only a re-index.
 - **`skipped_files`**: files that were read and left nothing to
   index, one row per path, each with the stamp it had and why:
   unsupported, binary, undecodable, password protected, without text,
@@ -392,8 +455,8 @@ resumed, saying which.
   and wakes the worker.
 - **`removed_chunk_texts`**: empty between writes. A trigger on `chunks`
   records the kind and hash of every chunk a write deletes, however the
-  chunk goes: with its message on undo, with its session, with its
-  memory or that memory's old value, with its page or its document. Before the write commits it deletes the vector of each
+  chunk goes: with its page or its document, with a memory's old
+  value, or after its message or memory was deleted. Before the write commits it deletes the vector of each
   recorded text that no chunk of that kind holds any more, and empties
   the table. The check runs after the write's inserts, so a document
   stored again, whose chunks are removed and added, keeps the vectors
@@ -542,26 +605,32 @@ match.
 
 ## Storage
 
-- One read-write connection runs every write in order; three
-  read-only connections serve history loads, message and memory vector
-  scans, and document vector scans, so none blocks another.
-- The database runs in WAL mode with foreign keys and `secure_delete`
-  on. After a delete or overwrite the WAL is checkpointed and truncated
-  so removed text doesn't linger in the sidecar files.
+- Each file has one read-write connection, which runs that file's
+  writes in order, so storing a large document does not queue ahead of a
+  message being saved. The one onto `index.db` has `memory.db` attached
+  read-only, to read the messages and memories it chunks. Three
+  read-only connections onto both files serve history loads, message and
+  memory vector scans, and document vector scans, so none blocks another.
+- Both files run in WAL mode with foreign keys and `secure_delete`
+  on. After a delete or overwrite the WAL of the file written is
+  checkpointed and truncated so removed text doesn't linger in the
+  sidecar files.
 - New databases use 16 KiB pages, which pack several 768- or
   1024-dimension vectors per page.
-- The data directory is created `0700` and the database and its
+- The data directory is created `0700` and each database and its
   `-wal`, `-shm`, and `-journal` files are kept `0600`.
-- The whole schema is one `rusqlite_migration` step, applied when an
-  empty database opens and recorded as version 1 in
+- The whole schema of `memory.db` is one `rusqlite_migration` step,
+  applied when an empty database opens and recorded as version 1 in
   `PRAGMA user_version`. A schema change is a new migration appended
   after it.
-- The daemon refuses to start when the database cannot be opened or
+- The daemon refuses to start when `memory.db` cannot be opened or
   migrated, including one whose `user_version` is above the binary's:
   one written by a newer `assistd`, or by a release from before the
   schema became a single version. It never runs without persistence
-  and never replaces the file itself.
+  and never replaces that file itself.
 - Resetting is manual: stop the daemon and move `memory.db` and its
   `-wal` and `-shm` files aside; the next start creates an empty
-  database. A schema change may require a reset instead of shipping a
-  migration.
+  database, and `index.db` drops the chunks cut from the old one. A
+  schema change to `memory.db` may require a reset instead of shipping a
+  migration. Deleting `index.db` while the daemon is stopped loses
+  nothing that is not built again.

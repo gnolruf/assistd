@@ -1,9 +1,11 @@
-//! Persistent memory: the key/value, transcript, task, and semantic stores over one
-//! SQLite database, and the semantic store's no-op fallback for when embedding is off.
+//! Persistent memory: the key/value, transcript and task stores over one SQLite
+//! database, the semantic store over a second that can be built again from the first
+//! and from disk, and that store's no-op fallback for when embedding is off.
 
 mod chunking;
 mod error;
 mod ids;
+mod index_schema;
 mod memories;
 mod migrations;
 mod relay_traces;
@@ -29,7 +31,8 @@ pub use semantic::{
     UnindexedRows, WaitingPage,
 };
 pub use sqlite::{
-    MemoryStore, SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore, TaskStore,
+    MemoryStore, MessageChunker, SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore,
+    TaskStore,
 };
 pub use tasks::{PrunedRuns, RecoveredQueue, TaskRecord, TaskRunEnd, UndecodableTask, WaitingRun};
 pub use transcripts::{

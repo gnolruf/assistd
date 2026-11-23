@@ -176,7 +176,7 @@ impl EmbeddingQueue for SqliteSemanticStore {
         let space = space.clone();
         let replaced = self
             .handle
-            .write("adopt_embedding_space", move |tx| {
+            .write_index("adopt_embedding_space", move |tx| {
                 let recorded = recorded_space(tx)?;
                 if recorded.as_ref() == Some(&space) {
                     return Ok(None);
@@ -247,7 +247,7 @@ impl EmbeddingQueue for SqliteSemanticStore {
             return Ok(());
         }
         self.handle
-            .write("store_embeddings", move |tx| {
+            .write_index("store_embeddings", move |tx| {
                 embeddings
                     .iter()
                     .try_for_each(|embedding| upsert_text_vector(tx, embedding).map(drop))
@@ -258,7 +258,7 @@ impl EmbeddingQueue for SqliteSemanticStore {
     async fn clear_unembeddable(&self) -> Result<u64> {
         let cleared = self
             .handle
-            .write("clear_unembeddable", |tx| {
+            .write_index("clear_unembeddable", |tx| {
                 let cleared = CHUNK_SOURCES
                     .map(vector_table)
                     .iter()
@@ -281,7 +281,7 @@ impl DocumentStore for SqliteSemanticStore {
     async fn begin_index_pass(&self, root: &Path) -> Result<IndexPass> {
         let root = root.to_path_buf();
         self.handle
-            .write("begin_index_pass", move |tx| {
+            .write_index("begin_index_pass", move |tx| {
                 documents::begin_pass(tx, &root)
             })
             .await
@@ -293,7 +293,7 @@ impl DocumentStore for SqliteSemanticStore {
         files: Vec<(PathBuf, FileStamp)>,
     ) -> Result<Vec<UnindexedFile>> {
         self.handle
-            .write("unindexed_files", move |tx| {
+            .write_index("unindexed_files", move |tx| {
                 let mut unindexed = Vec::new();
                 for (path, stamp) in files {
                     if documents::mark_seen_if_unchanged(tx, pass, &path, stamp)? {
@@ -319,7 +319,7 @@ impl DocumentStore for SqliteSemanticStore {
         cause: SkippedRead,
     ) -> Result<()> {
         self.handle
-            .write("record_skipped_file", move |tx| {
+            .write_index("record_skipped_file", move |tx| {
                 documents::record_skipped(tx, pass, &path, stamp, cause)
             })
             .await
@@ -327,7 +327,7 @@ impl DocumentStore for SqliteSemanticStore {
 
     async fn forget_skipped_files(&self) -> Result<u64> {
         self.handle
-            .write("forget_skipped_files", |tx| documents::forget_skipped(tx))
+            .write_index("forget_skipped_files", |tx| documents::forget_skipped(tx))
             .await
     }
 
@@ -341,7 +341,7 @@ impl DocumentStore for SqliteSemanticStore {
     ) -> Result<Vec<ChunkId>> {
         let stored = self
             .handle
-            .write("index_document", move |tx| {
+            .write_index("index_document", move |tx| {
                 documents::store_document(tx, pass, &path, stamp, &pages, empty_pages)
             })
             .await?;
@@ -369,7 +369,7 @@ impl DocumentStore for SqliteSemanticStore {
     ) -> Result<Vec<ChunkId>> {
         let unembedded = self
             .handle
-            .write("store_page_reading", move |tx| {
+            .write_index("store_page_reading", move |tx| {
                 documents::store_page_reading(tx, &page, &reading)
             })
             .await?;
@@ -386,7 +386,7 @@ impl DocumentStore for SqliteSemanticStore {
     async fn retry_failed_transcriptions(&self) -> Result<u64> {
         let waiting = self
             .handle
-            .write("retry_failed_transcriptions", |tx| {
+            .write_index("retry_failed_transcriptions", |tx| {
                 documents::retry_failed_transcriptions(tx)
             })
             .await?;
@@ -398,7 +398,7 @@ impl DocumentStore for SqliteSemanticStore {
 
     async fn finish_index_pass(&self, pass: IndexPass) -> Result<u64> {
         self.handle
-            .write("finish_index_pass", move |tx| {
+            .write_index("finish_index_pass", move |tx| {
                 documents::remove_unseen(tx, pass)
             })
             .await
@@ -406,7 +406,7 @@ impl DocumentStore for SqliteSemanticStore {
 
     async fn finish_index_pass_under(&self, pass: IndexPass, paths: Vec<PathBuf>) -> Result<u64> {
         self.handle
-            .write("finish_index_pass_under", move |tx| {
+            .write_index("finish_index_pass_under", move |tx| {
                 paths
                     .iter()
                     .map(|path| documents::remove_unseen_under(tx, pass, path))
@@ -418,7 +418,7 @@ impl DocumentStore for SqliteSemanticStore {
     async fn remove_document(&self, path: &Path) -> Result<bool> {
         let path = path.to_path_buf();
         self.handle
-            .write("remove_document", move |tx| {
+            .write_index("remove_document", move |tx| {
                 documents::remove_document(tx, &path)
             })
             .await
@@ -454,7 +454,7 @@ impl DocumentStore for SqliteSemanticStore {
     async fn remove_index_root(&self, root: &Path) -> Result<u64> {
         let root = root.to_path_buf();
         self.handle
-            .write("remove_index_root", move |tx| {
+            .write_index("remove_index_root", move |tx| {
                 documents::remove_root(tx, &root)
             })
             .await

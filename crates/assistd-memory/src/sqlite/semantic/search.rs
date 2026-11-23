@@ -424,7 +424,8 @@ fn reciprocal(rank: usize) -> f32 {
 
 /// The first `top_k` of `chunks`, in their order, that hold a text none before them
 /// holds, each with how many other searched sources hold its text; chunks deleted
-/// since they were ranked are skipped. A memory is always shown and never counted.
+/// since they were ranked are skipped, and so are those whose message or memory is
+/// gone. A memory is always shown and never counted.
 fn distinct_texts(
     conn: &Connection,
     searched: &Searched,
@@ -433,7 +434,12 @@ fn distinct_texts(
 ) -> rusqlite::Result<Vec<Shown>> {
     let texts = conn
         .prepare_cached(
-            "SELECT id, kind, hash FROM chunks WHERE id IN (SELECT value FROM json_each(?1))",
+            "SELECT cc.id, cc.kind, cc.hash FROM chunks cc
+             WHERE cc.id IN (SELECT value FROM json_each(?1))
+               AND CASE cc.kind
+                   WHEN 0 THEN EXISTS (SELECT 1 FROM messages m WHERE m.id = cc.source)
+                   WHEN 1 THEN EXISTS (SELECT 1 FROM memories mem WHERE mem.id = cc.source)
+                   ELSE 1 END",
         )?
         .query_map(rusqlite::params![json_id_array(chunks)], |row| {
             Ok((row.get(0)?, (row.get(1)?, row.get(2)?)))

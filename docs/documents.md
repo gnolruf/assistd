@@ -295,11 +295,13 @@ assistd documents search lease renewal terms
 ## Privacy
 
 - **The text of every indexed file is copied** into
-  `~/.local/share/assistd/memory.db`, with its path, and stays there
+  `~/.local/share/assistd/index.db`, with its path, and stays there
   until the file is deleted, excluded, or its folder is removed from
   `roots`. The data directory is only readable by you (`0700`, the
   database `0600`), but a backup or a copy of that file contains your
-  documents. Passwords and keys are safer kept out of indexed folders
+  documents. `memory.db`, beside it, holds your sessions and memories
+  and none of the indexed text, and `index.db` is built again when it is
+  missing, so a backup needs only `memory.db`. Passwords and keys are safer kept out of indexed folders
   than left to the `sensitive` rule.
 - **Nothing leaves the machine.** The worker that parses files has no
   network, and of your home directory it sees only the indexed folders,

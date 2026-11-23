@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use assistd_ipc::TaskRunSummary;
 
-use crate::{BranchId, ChunkId, MessageId, PersistedRelayStep, Result, Seq, SessionId, TurnId};
+use crate::{BranchId, MessageId, PersistedRelayStep, Result, Seq, SessionId, TurnId};
 
 /// Role of a persisted message, stored as the `messages.role` code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -225,9 +225,6 @@ pub struct AppendedMessage {
     pub id: MessageId,
     /// Its position on the branch it was appended to.
     pub seq: Seq,
-    /// The chunks cut from it for embedding; empty for tool results, and for every
-    /// message of a store that cuts none.
-    pub chunks: Vec<ChunkId>,
 }
 
 /// Result of [`TranscriptStore::begin_turn`].
@@ -283,8 +280,7 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// Read the current branch pointer for `session`, if any.
     async fn current_branch(&self, session: SessionId) -> Result<Option<BranchId>>;
 
-    /// Append `msg` to `branch` and its session, chunking user and assistant text for
-    /// embedding, all in one transaction. Errors with
+    /// Append `msg` to `branch` and its session in one transaction. Errors with
     /// [`MemoryError::BranchNotFound`](crate::MemoryError::BranchNotFound) when `branch` is missing.
     async fn append_message_to_branch(
         &self,

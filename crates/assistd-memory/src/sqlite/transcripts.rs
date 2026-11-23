@@ -1,7 +1,6 @@
 //! SQLite-backed [`TranscriptStore`] over sessions, turns, branches, and messages.
 
 use std::collections::HashMap;
-use std::ops::Range;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -12,15 +11,13 @@ use tracing::warn;
 
 use assistd_ipc::{TaskId, TaskName, TaskRunId, TaskRunSummary};
 
-use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
-    AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, ChunkId, ChunkSource,
-    HistoryRow, HistoryScope, MemoryError, MessageId, MessageKind, OpenedTurn, PersistedMessage,
-    PersistedRelayStep, PersistedRole, PersistedToolCall, Reasoning, Result, ResumeCandidate, Seq,
-    SessionId, ToolOutcome, TranscriptStore, TurnId, TurnStats, UndoOutcome,
+    AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, HistoryRow, HistoryScope,
+    MemoryError, MessageId, MessageKind, OpenedTurn, PersistedMessage, PersistedRelayStep,
+    PersistedRole, PersistedToolCall, Reasoning, Result, ResumeCandidate, Seq, SessionId,
+    ToolOutcome, TranscriptStore, TurnId, TurnStats, UndoOutcome,
 };
 
-use super::chunks::{ChunkOwner, insert_chunk};
 use super::connection::{Erasing, SqliteHandle};
 use super::rows::decodable_rows;
 use super::tasks::run_state_at;
@@ -64,36 +61,12 @@ const BRANCH_INFO_SELECT: &str = "
 #[derive(Debug, Clone)]
 pub struct SqliteTranscriptStore {
     handle: SqliteHandle,
-    chunk_messages: bool,
 }
 
 impl SqliteTranscriptStore {
-    /// Store over the shared database handle, cutting each stored message into chunks
-    /// for embedding.
+    /// Store over the shared database handle.
     pub fn new(handle: SqliteHandle) -> Self {
-        Self {
-            handle,
-            chunk_messages: true,
-        }
-    }
-
-    /// Store messages without cutting chunks, for a run that embeds nothing.
-    pub fn without_message_chunks(mut self) -> Self {
-        self.chunk_messages = false;
-        self
-    }
-
-    /// Cut the chunks of every user and assistant message stored without any,
-    /// returning how many chunks were added.
-    pub async fn chunk_unchunked_messages(&self) -> Result<u64> {
-        let added = self
-            .handle
-            .write("chunk_unchunked_messages", cut_missing_chunks)
-            .await?;
-        if added > 0 {
-            self.handle.rows_to_embed().notify_one();
-        }
-        Ok(added)
+        Self { handle }
     }
 
     /// Every saved relay answer a stored relay step names.
@@ -103,14 +76,13 @@ impl SqliteTranscriptStore {
             .await
     }
 
-    fn message_row(&self, msg: PersistedMessage) -> MessageRow {
-        MessageRow::new(msg, now_millis(), self.chunk_messages)
-    }
-
-    /// Wake the embedding worker for the chunks cut from the stored `message`.
-    fn signal_chunks_of(&self, message: &AppendedMessage) {
-        if !message.chunks.is_empty() {
-            self.handle.rows_to_embed().notify_one();
+    /// Wake the message chunker when a saved message of `role` is one it cuts.
+    fn signal_saved_message(&self, role: PersistedRole) {
+        match role {
+            PersistedRole::User | PersistedRole::Assistant => {
+                self.handle.messages_to_chunk().notify_one();
+            }
+            PersistedRole::Tool => {}
         }
     }
 }
@@ -129,7 +101,8 @@ impl TranscriptStore for SqliteTranscriptStore {
     }
 
     async fn begin_turn(&self, branch: BranchId, prompt: PersistedMessage) -> Result<OpenedTurn> {
-        let row = self.message_row(prompt);
+        let row = MessageRow::new(prompt, now_millis());
+        let role = row.role;
         let opened = self
             .handle
             .try_write(move |tx| {
@@ -145,7 +118,7 @@ impl TranscriptStore for SqliteTranscriptStore {
                 "begin_turn",
                 MemoryError::BranchNotFound(branch),
             ))?;
-        self.signal_chunks_of(&opened.message);
+        self.signal_saved_message(role);
         Ok(opened)
     }
 
@@ -203,7 +176,8 @@ impl TranscriptStore for SqliteTranscriptStore {
         turn: TurnId,
         msg: PersistedMessage,
     ) -> Result<AppendedMessage> {
-        let row = self.message_row(msg);
+        let row = MessageRow::new(msg, now_millis());
+        let role = row.role;
         let appended = self
             .handle
             .try_write(move |tx| {
@@ -215,7 +189,7 @@ impl TranscriptStore for SqliteTranscriptStore {
                 "append_message_to_branch",
                 MemoryError::BranchNotFound(branch),
             ))?;
-        self.signal_chunks_of(&appended);
+        self.signal_saved_message(role);
         Ok(appended)
     }
 
@@ -226,7 +200,8 @@ impl TranscriptStore for SqliteTranscriptStore {
         msg: PersistedMessage,
         steps: Vec<PersistedRelayStep>,
     ) -> Result<AppendedMessage> {
-        let row = self.message_row(msg);
+        let row = MessageRow::new(msg, now_millis());
+        let role = row.role;
         let appended = self
             .handle
             .try_write(move |tx| {
@@ -240,7 +215,7 @@ impl TranscriptStore for SqliteTranscriptStore {
                 "append_relay_result",
                 MemoryError::BranchNotFound(branch),
             ))?;
-        self.signal_chunks_of(&appended);
+        self.signal_saved_message(role);
         Ok(appended)
     }
 
@@ -513,31 +488,21 @@ impl TranscriptStore for SqliteTranscriptStore {
     }
 }
 
-/// One `messages` row ready to insert, with the byte ranges of the chunks
-/// embedded from it; tool results get none, as does every row of a store that cuts none.
+/// One `messages` row ready to insert.
 struct MessageRow {
     created_at: i64,
     role: PersistedRole,
     content: String,
     columns: MessageColumns,
-    chunk_bytes: Vec<Range<usize>>,
 }
 
 impl MessageRow {
-    fn new(msg: PersistedMessage, created_at: i64, chunk_messages: bool) -> Self {
-        let role = msg.role();
-        let chunk_bytes = match role {
-            PersistedRole::User | PersistedRole::Assistant if chunk_messages => {
-                chunk_ranges(&msg.content, ChunkingConfig::MESSAGES)
-            }
-            PersistedRole::User | PersistedRole::Assistant | PersistedRole::Tool => Vec::new(),
-        };
+    fn new(msg: PersistedMessage, created_at: i64) -> Self {
         Self {
             created_at,
-            role,
+            role: msg.role(),
             content: msg.content,
             columns: MessageColumns::from_kind(msg.kind),
-            chunk_bytes,
         }
     }
 }
@@ -645,7 +610,7 @@ fn claim_next_seq(tx: &Transaction<'_>, branch: BranchId) -> rusqlite::Result<Br
     })
 }
 
-/// Insert `row` as part of `turn` at `slot` on `branch`, along with its chunks.
+/// Insert `row` as part of `turn` at `slot` on `branch`.
 fn store_message(
     tx: &Transaction<'_>,
     branch: BranchId,
@@ -658,12 +623,7 @@ fn store_message(
         "INSERT INTO branch_messages (branch_id, seq, message_id) VALUES (?1, ?2, ?3)",
     )?
     .execute(rusqlite::params![branch, slot.seq, id])?;
-    let chunks = insert_chunks(tx, id, &row.content, &row.chunk_bytes)?;
-    Ok(AppendedMessage {
-        id,
-        seq: slot.seq,
-        chunks,
-    })
+    Ok(AppendedMessage { id, seq: slot.seq })
 }
 
 /// Insert `row` into the session with rowid `session_rowid`, returning its id.
@@ -700,48 +660,6 @@ fn insert_message(
         ],
         |r| r.get(0),
     )
-}
-
-/// Store chunks over `chunk_bytes` of `content`, the content of `message`, returning
-/// their ids in order.
-fn insert_chunks(
-    tx: &Transaction<'_>,
-    message: MessageId,
-    content: &str,
-    chunk_bytes: &[Range<usize>],
-) -> rusqlite::Result<Vec<ChunkId>> {
-    chunk_bytes
-        .iter()
-        .map(|bytes| {
-            insert_chunk(tx, ChunkOwner::Message(message), content, bytes).map(|(chunk, _)| chunk)
-        })
-        .collect()
-}
-
-/// Cut and store the chunks of every user and assistant message that has none,
-/// returning how many chunks were added.
-fn cut_missing_chunks(tx: &Transaction<'_>) -> rusqlite::Result<u64> {
-    let unchunked: Vec<(MessageId, String)> = tx
-        .prepare(
-            "SELECT m.id, m.content FROM messages m
-             WHERE m.role IN (?1, ?2) AND m.content != ''
-               AND NOT EXISTS (SELECT 1 FROM chunks cc WHERE cc.kind = ?3 AND cc.source = m.id)",
-        )?
-        .query_map(
-            rusqlite::params![
-                PersistedRole::User,
-                PersistedRole::Assistant,
-                ChunkSource::Message
-            ],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut added = 0;
-    for (message, content) in unchunked {
-        let chunk_bytes = chunk_ranges(&content, ChunkingConfig::MESSAGES);
-        added += insert_chunks(tx, message, &content, &chunk_bytes)?.len() as u64;
-    }
-    Ok(added)
 }
 
 /// `calls` as the `messages.tool_calls` JSON array, or `None` when there are none.
