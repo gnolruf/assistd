@@ -262,7 +262,6 @@ mod tests {
             Ok(AppendedMessage {
                 id: MessageId(0),
                 seq,
-                chunks: Vec::new(),
             })
         }
     }

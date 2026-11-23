@@ -1,5 +1,5 @@
-//! Memory subsystem wiring for the daemon: open SQLite, then resume the
-//! active session or start an unsaved one.
+//! Memory subsystem wiring for the daemon: open SQLite, keep saved messages chunked,
+//! then resume the active session or start an unsaved one.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -9,10 +9,15 @@ use anyhow::{Context, Result};
 use assistd_core::branch_replay;
 use assistd_llm::HistoryReplay;
 use assistd_memory::{
-    BranchHistory, BranchId, HistoryScope, MemoryStore, SessionId, SqliteHandle,
+    BranchHistory, BranchId, HistoryScope, MemoryStore, MessageChunker, SessionId, SqliteHandle,
     SqliteTranscriptStore, TaskStore, TranscriptStore,
 };
+use tokio::sync::watch;
 use tracing::info;
+
+use super::background_service::BackgroundService;
+
+const MESSAGE_CHUNKING: &str = "message chunking";
 
 pub(super) struct MemorySubsystem {
     pub memory_store: Arc<MemoryStore>,
@@ -26,21 +31,45 @@ pub(super) struct MemorySubsystem {
     pub sqlite_handle: SqliteHandle,
     /// Every saved relay answer the database names; `None` when it cannot say.
     pub relay_answer_files: Option<HashSet<PathBuf>>,
+    message_chunking: MessageChunking,
 }
 
 impl MemorySubsystem {
-    /// Close the database once its queued writes have run. Must run after every other
-    /// database client has stopped.
+    /// Stop cutting messages into chunks, then close the databases once their queued
+    /// writes have run. Must run after every other database client has stopped.
     pub(super) async fn shutdown(self) {
+        self.message_chunking.stop.send_replace(true);
+        self.message_chunking.task.join().await;
         if let Err(e) = self.sqlite_handle.close().await {
             tracing::warn!("memory: closing the database failed at shutdown: {e:#}");
         }
     }
 }
 
-/// Open the memory database and pick the session to continue; messages are cut into
-/// chunks only when `embedding_enabled`. Fails when there is no data directory or the
-/// database cannot be opened or migrated.
+/// The task that cuts saved messages into chunks, and what stops it.
+struct MessageChunking {
+    task: BackgroundService<()>,
+    stop: watch::Sender<bool>,
+}
+
+impl MessageChunking {
+    /// Cut the messages saved without chunks and each one saved from now on when
+    /// `embedding_enabled`; otherwise they wait for a start that has it.
+    fn start(handle: &SqliteHandle, embedding_enabled: bool) -> Self {
+        let (stop, stopped) = watch::channel(false);
+        let task = if embedding_enabled {
+            let chunker = MessageChunker::new(handle.clone());
+            BackgroundService::spawn(MESSAGE_CHUNKING, chunker.keep_chunked(stopped))
+        } else {
+            BackgroundService::disabled(MESSAGE_CHUNKING)
+        };
+        Self { task, stop }
+    }
+}
+
+/// Open the memory database and its index and pick the session to continue; messages
+/// are cut into chunks only when `embedding_enabled`. Fails when there is no data
+/// directory or the memory database cannot be opened or migrated.
 pub(super) async fn init(embedding_enabled: bool) -> Result<MemorySubsystem> {
     let db_path = db_path().context("no data directory for memory.db (is $HOME set?)")?;
     let handle = SqliteHandle::open(&db_path).await.with_context(|| {
@@ -50,7 +79,7 @@ pub(super) async fn init(embedding_enabled: bool) -> Result<MemorySubsystem> {
         )
     })?;
 
-    let transcripts = Arc::new(transcript_store(handle.clone(), embedding_enabled).await);
+    let transcripts = Arc::new(SqliteTranscriptStore::new(handle.clone()));
     let mem_store = Arc::new(MemoryStore::new(handle.clone()));
     let (session_id, branch_id, resumed_history) =
         resume_or_start_unsaved_session(transcripts.as_ref(), &db_path).await;
@@ -68,27 +97,10 @@ pub(super) async fn init(embedding_enabled: bool) -> Result<MemorySubsystem> {
         session_id,
         branch_id,
         resumed_history,
+        message_chunking: MessageChunking::start(&handle, embedding_enabled),
         sqlite_handle: handle,
         relay_answer_files,
     })
-}
-
-/// The transcript store: with embedding on it cuts chunks, first for the messages
-/// stored while embedding was off; with it off it cuts none.
-async fn transcript_store(handle: SqliteHandle, embedding_enabled: bool) -> SqliteTranscriptStore {
-    let transcripts = SqliteTranscriptStore::new(handle);
-    if !embedding_enabled {
-        return transcripts.without_message_chunks();
-    }
-    match transcripts.chunk_unchunked_messages().await {
-        Ok(0) => {}
-        Ok(added) => info!("memory: cut {added} chunks from messages stored without embedding"),
-        Err(e) => tracing::warn!(
-            "memory: cannot chunk messages stored without embedding ({e:#}); \
-             they stay out of semantic search"
-        ),
-    }
-    transcripts
 }
 
 /// Resume the active session, else start an unsaved session that is inserted

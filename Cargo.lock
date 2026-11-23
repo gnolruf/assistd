@@ -398,6 +398,7 @@ name = "assistd-memory"
 version = "0.7.0"
 dependencies = [
  "assistd-ipc",
+ "assistd-utils",
  "async-trait",
  "chrono",
  "num-traits",

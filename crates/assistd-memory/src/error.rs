@@ -11,7 +11,7 @@ use crate::{BranchId, SessionId, TurnId};
 /// An error from the SQLite driver, kept opaque so callers don't depend on it.
 pub type BackendError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Failures from opening or operating on the memory database.
+/// Failures from opening or operating on the memory database and its index.
 #[derive(Debug, Error)]
 pub enum MemoryError {
     #[error("create memory.db parent dir {}: {source}", path.display())]
@@ -33,6 +33,13 @@ pub enum MemoryError {
         path: PathBuf,
         #[source]
         source: BackendError,
+    },
+
+    #[error("delete the unusable index file {}: {source}", path.display())]
+    DiscardIndex {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
     },
 
     #[error("run migrations: {0}")]

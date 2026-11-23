@@ -1,10 +1,9 @@
 //! The key/value [`MemoryStore`] over the `memories` table.
 
-use rusqlite::{OptionalExtension, Row, Transaction};
+use rusqlite::{OptionalExtension, Row};
 
-use crate::{ChunkSource, MemoryId, MemoryRecord, Result, SavedMemory};
+use crate::{MemoryId, MemoryRecord, Result, SavedMemory};
 
-use super::chunks::{ChunkOwner, insert_chunk};
 use super::connection::{Erasing, SqliteHandle};
 use super::timestamp::{now_millis, timestamp_at};
 
@@ -21,8 +20,8 @@ impl MemoryStore {
     }
 
     /// Persist `value` under `key`, overwriting any existing value. A changed value
-    /// bumps `updated_at`, replaces the memory's chunk, wakes the embedding worker,
-    /// and truncates the WAL so the old value leaves no trace.
+    /// bumps `updated_at` and truncates the WAL so the old value leaves no trace; once
+    /// it is committed the memory's chunk is cut again and the embedding worker woken.
     pub async fn save(&self, key: &str, value: String) -> Result<SavedMemory> {
         let key = key.to_string();
         let now = now_millis();
@@ -43,9 +42,6 @@ impl MemoryStore {
                     |r| r.get(0),
                 )?;
                 let value_changed = previous_value.as_deref() != Some(value.as_str());
-                if value_changed {
-                    replace_chunk(tx, id, &value)?;
-                }
                 Ok(Erasing {
                     value: SavedMemory { id, value_changed },
                     erased: value_changed && previous_value.is_some(),
@@ -53,7 +49,7 @@ impl MemoryStore {
             })
             .await?;
         if saved.value_changed {
-            self.handle.rows_to_embed().notify_one();
+            self.handle.recut_memory_chunk(saved.id).await;
         }
         Ok(saved)
     }
@@ -125,17 +121,6 @@ fn value_at(c: &rusqlite::Connection, key: &str) -> rusqlite::Result<Option<Stri
         |r| r.get(0),
     )
     .optional()
-}
-
-/// Store one chunk over the whole of `value`, the new value of `memory`, in place of
-/// the chunk it has; a value of whitespace alone has none.
-fn replace_chunk(tx: &Transaction<'_>, memory: MemoryId, value: &str) -> rusqlite::Result<()> {
-    tx.prepare_cached("DELETE FROM chunks WHERE kind = ?1 AND source = ?2")?
-        .execute(rusqlite::params![ChunkSource::Memory, memory])?;
-    if !value.trim().is_empty() {
-        insert_chunk(tx, ChunkOwner::Memory(memory), value, &(0..value.len()))?;
-    }
-    Ok(())
 }
 
 fn memory_record(row: &Row<'_>) -> rusqlite::Result<MemoryRecord> {

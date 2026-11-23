@@ -69,7 +69,7 @@ flowchart TB
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec and presets file + control plane + `PageTranscriber` for the OCR model. | `config`, `ipc`, `utils`                                                         |
 | `assistd-mcp`    | Stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools.  | `config`, `ipc`, `tools`, `utils`                                                |
-| `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `SemanticStore`, `TaskStore`.   | `ipc`                                                                            |
+| `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `TaskStore` in `memory.db`, `SemanticStore` in the rebuildable `index.db`. | `ipc`, `utils`                                                                   |
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, the `backlog` loop that drains stored rows lacking their result, tilde expansion, `human_size`, Hugging Face file IDs, binary-content sniffing, non-blocking regular-file open, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the chat-template token list and its neutraliser for text and JSON, terminal-safe escaping of daemon-supplied text, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, the `ChildServer` supervisor, and the `pipe_worker` supervisor and pending-reply map the extraction and voice workers run under. | none                                                                             |
@@ -249,12 +249,16 @@ stored work. Its contract has four parts.
 
 | Backlog          | A row is                                             | Page | Permit              | Cannot be done                    | Wake                   | Retry               |
 |------------------|------------------------------------------------------|------|---------------------|-----------------------------------|------------------------|---------------------|
-| Message chunks   | a message chunk whose text has no vector             | 32   | none                | marked refused (a `NULL` vector)  | `rows_to_embed`        | 1 s, doubling to 60 |
+| Saved messages   | a user or assistant message above the highest one chunked | 64 | none             | never: a page always cuts its rows | `messages_to_chunk`   | 1 s, doubling to 60 |
+| Message chunks   | a message chunk whose text has no vector             | 32   | none                | marked refused (a `NULL` vector)  | `rows_to_embed`        | the same            |
 | Memory chunks    | a memory's chunk whose text has no vector            | 32   | none                | marked refused                    | `rows_to_embed`        | the same            |
 | Document chunks  | a document chunk whose text has no vector            | 32   | `DocumentEmbedding` | marked refused                    | `rows_to_embed`        | the same            |
 | Waiting pages    | a PDF page without text, recorded as waiting         | 1    | `PageTranscription` | recorded as failed                | `pages_to_transcribe`  | 5 minutes           |
 
-The embedding worker drains its three backlogs in that order in one
+The message chunker (`MessageChunker` in `assistd-memory`) cuts saved
+messages into chunks and runs whenever embedding is enabled, with or
+without the embedding server; the chunks it adds wake the embedding
+worker. The embedding worker drains its three backlogs in that order in one
 pass, so a wake in the middle of the document chunks sends it back to
 the messages first. Page transcription drains inside a loan of the
 drowsy server and lists again after a wake without giving the loan up.
@@ -975,18 +979,24 @@ on `assistd::policy`; nothing is added to the allowlist.
 
 ### Memory (`assistd-memory` + `assistd-embed`)
 
-One SQLite database (default: `~/.local/share/assistd/memory.db`)
-holds four schemas: a key/value `MemoryStore` for durable facts, a
+Two SQLite databases sit in `~/.local/share/assistd`. `memory.db` holds
+what exists nowhere else: a key/value `MemoryStore` for durable facts, a
 `TranscriptStore` for full per-session transcripts (with branching
-and undo), a `SemanticStore` for embedding-indexed chunks, and a
-`TaskStore` for saved tasks and their runs. The semantic store is three
-traits, `RecallStore`, `EmbeddingQueue` and `DocumentStore`, and each
-consumer holds only the ones it calls. Every
-write runs in order on the only read-write connection. Document vector
+and undo), and a `TaskStore` for saved tasks and their runs. `index.db`
+holds the `SemanticStore`: document text and the chunks, keyword index
+and vectors of every kind, all of which the daemon builds again when the
+file is missing, unreadable or from another schema version. The semantic
+store is three traits, `RecallStore`, `EmbeddingQueue` and
+`DocumentStore`, and each consumer holds only the ones it calls. Each
+file has one read-write connection that runs its writes in order, so a
+document being stored never holds up a message being saved. A row of
+`memory.db` is written first and `index.db` follows: a memory's chunk is
+cut after its save, a saved message is cut by the message chunker, and
+the chunks of deleted rows are removed after the delete. Document vector
 scans, other vector scans and other reads each get their own read-only
-connection, so a long scan holds up neither a write, a history load
-nor a scan of the other kind. Shutdown closes the
-database once queued writes have run. [database.md](database.md) maps
+connection onto both files, so a long scan holds up neither a write, a
+history load nor a scan of the other kind. Shutdown stops the message
+chunker and closes the databases once queued writes have run. [database.md](database.md) maps
 the tables.
 
 Transcript rows keep each step's reasoning, every tool call's arguments,

@@ -1,7 +1,12 @@
+use std::sync::Arc;
+
+use assistd_utils::backlog::{Signals, drain};
+use tokio::sync::watch;
+
 use super::*;
 use crate::{
-    ChunkSource, EmbeddingQueue, PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, Seq,
-    SqliteSemanticStore,
+    ChunkSource, EmbeddingQueue, MessageChunker, PersistedRelayEnd, PersistedRelayEntry,
+    PersistedRelayRun, Seq, SqliteSemanticStore,
 };
 
 /// The returned temp dir must outlive the store.
@@ -11,6 +16,27 @@ async fn fresh_store() -> (SqliteTranscriptStore, tempfile::TempDir) {
         .await
         .unwrap();
     (SqliteTranscriptStore::new(handle), temp)
+}
+
+/// Cut every saved message that has no chunks, as the daemon's chunker does when woken.
+async fn chunk_saved_messages(handle: &SqliteHandle) {
+    let (_keep_running, shutdown) = watch::channel(false);
+    let signals = Signals {
+        wake: Arc::default(),
+        shutdown,
+    };
+    drain(&mut MessageChunker::new(handle.clone()), &signals)
+        .await
+        .unwrap();
+}
+
+/// The text of every message chunk that has no vector, in the order they were cut.
+async fn message_chunk_texts(handle: &SqliteHandle) -> Vec<String> {
+    let pending = SqliteSemanticStore::new(handle.clone())
+        .chunks_missing_embedding(ChunkSource::Message, None, 10)
+        .await
+        .unwrap();
+    pending.into_iter().map(|(_, text)| text).collect()
 }
 
 fn look_first() -> Reasoning {
@@ -63,8 +89,10 @@ async fn a_tool_turn_round_trips_with_its_stats_on_its_last_row() {
         )
         .await
         .unwrap();
-    assert!(
-        result.chunks.is_empty(),
+    chunk_saved_messages(&store.handle).await;
+    assert_eq!(
+        message_chunk_texts(&store.handle).await,
+        ["list files"],
         "tool results are never chunked for embedding"
     );
 
@@ -544,27 +572,28 @@ async fn relay_trace_round_trips_follows_forks_and_goes_with_undo() {
 }
 
 #[tokio::test]
-async fn messages_stored_without_chunks_are_chunked_later() {
-    let (store, _temp) = fresh_store().await;
-    let unchunked = store.clone().without_message_chunks();
-    let branch = unchunked
+async fn a_message_saved_without_chunks_has_them_after_the_next_start() {
+    let (store, temp) = fresh_store().await;
+    let branch = store
         .begin_session_with_main_branch(SessionId::new())
         .await
         .unwrap();
-    let opened = unchunked
+    store
         .begin_turn(branch, PersistedMessage::user("where is the spare key"))
         .await
         .unwrap();
-    assert!(opened.message.chunks.is_empty());
+    store.handle.close().await.unwrap();
 
-    assert_eq!(store.chunk_unchunked_messages().await.unwrap(), 1);
-    assert_eq!(store.chunk_unchunked_messages().await.unwrap(), 0);
-    let pending = SqliteSemanticStore::new(store.handle.clone())
-        .chunks_missing_embedding(ChunkSource::Message, None, 10)
+    let handle = SqliteHandle::open(&temp.path().join("memory.db"))
         .await
         .unwrap();
-    let texts: Vec<&str> = pending.iter().map(|(_, text)| text.as_str()).collect();
-    assert_eq!(texts, ["where is the spare key"]);
+    assert!(message_chunk_texts(&handle).await.is_empty());
+    chunk_saved_messages(&handle).await;
+    chunk_saved_messages(&handle).await;
+    assert_eq!(
+        message_chunk_texts(&handle).await,
+        ["where is the spare key"]
+    );
 }
 
 #[tokio::test]

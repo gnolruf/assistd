@@ -1,8 +1,11 @@
 use std::future::Future;
 use std::pin::pin;
 
+use assistd_utils::backlog::{Signals, drain};
+use tokio::sync::watch;
+
 use super::*;
-use crate::sqlite::SqliteTranscriptStore;
+use crate::sqlite::{MessageChunker, SqliteTranscriptStore};
 use crate::{
     BranchId, MemoryId, MemoryStore, PersistedMessage, PersistedRole, SearchRanking, SessionId,
     SessionScope, TranscriptStore,
@@ -26,6 +29,7 @@ async fn fresh() -> (SqliteHandle, SqliteSemanticStore, tempfile::TempDir) {
 
 /// One saved session's main branch, to append user messages to.
 struct Transcript {
+    handle: SqliteHandle,
     store: SqliteTranscriptStore,
     session: SessionId,
     branch: BranchId,
@@ -37,21 +41,35 @@ impl Transcript {
         let session = SessionId::new();
         let branch = store.begin_session_with_main_branch(session).await.unwrap();
         Self {
+            handle: handle.clone(),
             store,
             session,
             branch,
         }
     }
 
-    /// Append user message `text`, returning its id and stored chunks.
+    /// Append user message `text` and cut its chunks, returning its id and theirs.
     async fn append(&self, text: &str) -> (MessageId, Vec<ChunkId>) {
-        let appended = self
-            .store
-            .begin_turn(self.branch, PersistedMessage::user(text))
+        let message = self.save(text).await;
+        chunk_saved_messages(&self.handle).await;
+        let chunks = self
+            .handle
+            .read("chunks of a message", move |c| {
+                c.prepare("SELECT id FROM chunks WHERE kind = 0 AND source = ?1 ORDER BY id")?
+                    .query_map([message], |row| row.get(0))?
+                    .collect()
+            })
             .await
-            .unwrap()
-            .message;
-        (appended.id, appended.chunks)
+            .unwrap();
+        (message, chunks)
+    }
+
+    /// Append user message `text` and leave it without chunks.
+    async fn save(&self, text: &str) -> MessageId {
+        let opened = self
+            .store
+            .begin_turn(self.branch, PersistedMessage::user(text));
+        opened.await.unwrap().message.id
     }
 
     /// Append user message `text`, short enough to be one chunk, and embed its text.
@@ -68,6 +86,18 @@ impl Transcript {
         embed_text(store, ChunkSource::Message, text, vector).await;
         chunk
     }
+}
+
+/// Cut every saved message that has no chunks, as the daemon's chunker does when woken.
+async fn chunk_saved_messages(handle: &SqliteHandle) {
+    let (_keep_running, shutdown) = watch::channel(false);
+    let signals = Signals {
+        wake: Arc::default(),
+        shutdown,
+    };
+    drain(&mut MessageChunker::new(handle.clone()), &signals)
+        .await
+        .unwrap();
 }
 
 /// A file `unindexed_files` reports as not read at `stamp`.
@@ -1244,8 +1274,8 @@ async fn memories_rank_by_their_values_vectors_and_two_holding_one_value_are_bot
 }
 
 #[tokio::test]
-async fn deleting_a_session_removes_its_chunks_their_words_and_the_vectors_only_they_named() {
-    let (handle, store, _temp) = fresh().await;
+async fn chunks_of_a_deleted_session_are_skipped_by_search_and_removed_at_the_next_start() {
+    let (handle, store, temp) = fresh().await;
     let deleted = Transcript::new(&handle).await;
     let kept = Transcript::new(&handle).await;
     for (transcript, text) in [
@@ -1267,13 +1297,57 @@ async fn deleting_a_session_removes_its_chunks_their_words_and_the_vectors_only_
         move |tx: &Transaction<'_>| tx.execute("DELETE FROM sessions WHERE uuid = ?1", [session]);
     handle.write("delete session", delete).await.unwrap();
 
-    assert_eq!(rows("chunks").await, 1);
-    assert_eq!(rows("chunk_words").await, 1);
-    assert_eq!(rows("message_vectors").await, 1);
+    assert_eq!(rows("chunks").await, 3, "the index was not told");
     let hits = nearest_chunks(&store, unit_vec(0.0), 5, SessionScope::All);
     let hits = hits.await.unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].text, "said in both");
+
+    handle.close().await.unwrap();
+    let handle = SqliteHandle::open(&temp.path().join("memory.db"))
+        .await
+        .unwrap();
+    let rows = async |table: &'static str| stored_vectors(&handle, table).await;
+    assert_eq!(rows("chunks").await, 1);
+    assert_eq!(rows("chunk_words").await, 1);
+    assert_eq!(rows("message_vectors").await, 1);
+}
+
+#[tokio::test]
+async fn an_index_built_from_another_memory_database_has_its_message_chunks_cut_again() {
+    let (handle, store, temp) = fresh().await;
+    let memory_db = temp.path().join("memory.db");
+    let other_memory_db = temp.path().join("other/memory.db");
+    Transcript::new(&handle)
+        .await
+        .append("said in the first")
+        .await;
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
+    let path = PathBuf::from("/notes/a.md");
+    let indexed = store.index_document(pass, path, STAMP, one_page("on disk"), EmptyPages::Final);
+    indexed.await.unwrap();
+    handle.close().await.unwrap();
+    let other = SqliteHandle::open(&other_memory_db).await.unwrap();
+    let same_id_elsewhere = Transcript::new(&other).await;
+    same_id_elsewhere
+        .save("in the second, said at length")
+        .await;
+    other.close().await.unwrap();
+    std::fs::copy(&other_memory_db, &memory_db).unwrap();
+
+    let handle = SqliteHandle::open(&memory_db).await.unwrap();
+    let store = SqliteSemanticStore::new(handle.clone());
+    assert!(
+        texts_to_embed(&store, ChunkSource::Message)
+            .await
+            .is_empty()
+    );
+    assert_eq!(store.count_document_chunks().await.unwrap(), 1);
+    chunk_saved_messages(&handle).await;
+    assert_eq!(
+        texts_to_embed(&store, ChunkSource::Message).await,
+        ["in the second, said at length"]
+    );
 }
 
 #[tokio::test]
@@ -1585,24 +1659,11 @@ async fn a_write_signals_the_embedding_worker_only_when_it_leaves_a_row_to_embed
     let transcript = Transcript::new(&handle).await;
     assert!(!signalled(&rows_to_embed), "a session with no message");
 
-    transcript.append("said").await;
+    transcript.save("said").await;
+    assert!(!signalled(&rows_to_embed), "a message saved, not yet cut");
+    chunk_saved_messages(&handle).await;
     assert!(signalled(&rows_to_embed), "a message cut into a chunk");
-    let uncut = SqliteTranscriptStore::new(handle.clone()).without_message_chunks();
-    let stored_uncut = uncut.begin_turn(transcript.branch, PersistedMessage::user("uncut"));
-    stored_uncut.await.unwrap();
-    assert!(
-        !signalled(&rows_to_embed),
-        "a message stored without chunks"
-    );
-    assert_eq!(
-        transcript.store.chunk_unchunked_messages().await.unwrap(),
-        1
-    );
-    assert!(signalled(&rows_to_embed), "a stored message cut later");
-    assert_eq!(
-        transcript.store.chunk_unchunked_messages().await.unwrap(),
-        0
-    );
+    chunk_saved_messages(&handle).await;
     assert!(!signalled(&rows_to_embed), "no message left to cut");
 
     memories.save("k", "v".into()).await.unwrap();
