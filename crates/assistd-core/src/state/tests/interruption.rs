@@ -86,7 +86,8 @@ impl Harness {
         (handle, rx)
     }
 
-    /// Run query `text` to its end, returning when its reply finished.
+    /// Run query `text` to its end, returning when its reply finished. It may be told
+    /// first that it waits behind the run on the lane.
     async fn ask(&self, text: &str) -> Instant {
         let (res, events) = tokio::time::timeout(
             Duration::from_secs(5),
@@ -95,7 +96,7 @@ impl Harness {
         .await
         .unwrap_or_else(|_| panic!("query {text:?} never reached the model"));
         res.unwrap();
-        assert_eq!(events, [done(text)]);
+        assert_eq!(events.last(), Some(&done(text)), "{events:?}");
         Instant::now()
     }
 

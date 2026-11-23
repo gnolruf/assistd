@@ -122,13 +122,6 @@ pub(crate) struct InteractionTurn {
     quiet: Duration,
 }
 
-impl InteractionTurn {
-    /// End a turn that never ran, leaving no quiet time behind it.
-    pub(crate) fn abandon(mut self) {
-        self.quiet = Duration::ZERO;
-    }
-}
-
 impl Drop for InteractionTurn {
     fn drop(&mut self) {
         self.interaction.end_turn(self.quiet);

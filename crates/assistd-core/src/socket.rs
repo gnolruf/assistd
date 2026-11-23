@@ -921,7 +921,8 @@ mod tests {
                 handles.push(tokio::spawn(async move {
                     let text = format!("msg-{i}");
                     let body = format!(r#"{{"type":"query","id":"shared","text":"{text}"}}"#);
-                    let events = send_request_collect_events(&p, &body).await;
+                    let mut events = send_request_collect_events(&p, &body).await;
+                    events.retain(|event| !matches!(event.body, EventBody::Queued { .. }));
                     assert_eq!(events, [delta("shared", &text), done("shared")], "conn {i}");
                 }));
             }

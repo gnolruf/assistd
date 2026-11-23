@@ -9,8 +9,8 @@ use tokio::sync::{Notify, mpsc, watch};
 
 use assistd_config::Config;
 use assistd_ipc::{
-    Event, EventBody, EventKind, HostName, PermissionMode, PresenceTarget, Request, RequestBody,
-    SubscribeFilter, SuspendReason, TaskQueueOp, TaskRequest, TaskRunState,
+    Event, EventBody, EventKind, HostName, LaneHolder, PermissionMode, PresenceTarget, Request,
+    RequestBody, SubscribeFilter, SuspendReason, TaskQueueOp, TaskRequest, TaskRunState,
 };
 use assistd_llm::{EchoBackend, ScriptedBackend, Step, ToolCall, TurnBackend};
 use assistd_memory::{HistoryScope, SessionId};
@@ -376,14 +376,9 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
         "the allowed host was fetched unasked"
     );
     assert_eq!(queued_runs(&state), [(run, TaskRunState::NeedsInput)]);
-    assert!(
-        state
-            .tasks
-            .deps
-            .admission
-            .agent_turn_lock
-            .try_lock()
-            .is_ok(),
+    assert_eq!(
+        state.tasks.deps.admission.queue_snapshot().lanes,
+        [LaneHolder::Main],
         "a paused run holds no lane"
     );
     tokio::time::sleep(Duration::from_millis(1500)).await;
