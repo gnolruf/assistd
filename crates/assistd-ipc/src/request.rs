@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EventKind, ImageAttachment, PermissionMode, PlanMode, PlanVerdict, PresenceTarget, TaskRequest,
-    WakeWordOp,
+    EventKind, ImageAttachment, PermissionMode, PlanMode, PlanVerdict, PresenceTarget, SearchKind,
+    TaskRequest, WakeWordOp,
 };
 
 /// Event-kind filter for [`RequestBody::Subscribe`]; empty `kinds` matches every kind.
@@ -63,11 +63,10 @@ impl Request {
             RequestBody::MemoryListAll { .. } => "memory_list_all",
             RequestBody::MemoryDelete { .. } => "memory_delete",
             RequestBody::MemoryForget { .. } => "memory_forget",
-            RequestBody::MemorySemanticSearch { .. } => "memory_semantic_search",
             RequestBody::MemoryReindex => "memory_reindex",
             RequestBody::DocumentsStatus => "documents_status",
             RequestBody::DocumentsReindex => "documents_reindex",
-            RequestBody::DocumentsSearch { .. } => "documents_search",
+            RequestBody::Search { .. } => "search",
             RequestBody::ConfirmResponse { .. } => "confirm_response",
             RequestBody::SetPermissionMode { .. } => "set_permission_mode",
             RequestBody::PlanVerdict { .. } => "plan_verdict",
@@ -151,14 +150,6 @@ pub enum RequestBody {
     MemoryDelete { key: String },
     /// Remove the row with id `memory_id`. Emits `MemoryForgetResult`, then `Done`.
     MemoryForget { memory_id: i64 },
-    /// Rank past messages by meaning and by the words of `query`; `limit = 0` uses the
-    /// daemon default.
-    /// Emits `SemanticHit`s best-first, then `Done`.
-    MemorySemanticSearch {
-        query: String,
-        #[serde(default)]
-        limit: u32,
-    },
     /// Have the embedding worker retry the rows it marked as refused. Emits `ReindexProgress`es
     /// until no row waits to be embedded, then `Done`.
     MemoryReindex,
@@ -168,13 +159,15 @@ pub enum RequestBody {
     /// Start a pass over every index root and follow it. Emits `DocumentPassProgress`es and
     /// one `DocumentPassEnded` per root, then `Done`; errors when no extraction worker runs.
     DocumentsReindex,
-    /// Rank the indexed documents by meaning and by the words of `query`, as the `search`
-    /// command does; `limit = 0` uses `embedding.top_k`. Emits `DocumentHit`s best-first, then
-    /// `Done`.
-    DocumentsSearch {
+    /// Rank the stored text of `kinds` by meaning and by the words of `query`; no kind
+    /// means every kind turned on, and `limit = 0` uses `embedding.top_k`. Emits `SearchHit`s
+    /// best-first, then `Done`; errors when a kind named is turned off.
+    Search {
         query: String,
         #[serde(default)]
         limit: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        kinds: Vec<SearchKind>,
     },
     /// Answer the [`EventBody::ConfirmRequest`](crate::EventBody::ConfirmRequest) with this
     /// `confirm_id` on the same connection.

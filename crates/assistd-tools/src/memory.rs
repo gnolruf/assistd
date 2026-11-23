@@ -9,9 +9,6 @@ pub use assistd_memory::MemoryRecord;
 
 type Result<T> = std::result::Result<T, MemoryError>;
 
-/// Result cap applied when a search passes `limit = 0`.
-pub const DEFAULT_SEARCH_LIMIT: usize = 50;
-
 /// Combined handle over the key/value store and session transcripts.
 /// Cheap to clone.
 #[derive(Debug, Clone)]

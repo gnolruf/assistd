@@ -10,7 +10,7 @@ use assistd_utils::terminal_text::escape_controls;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use client::{documents, listen, mcp, memory, presence, ptt, task, voice_ctl};
+use client::{documents, listen, mcp, memory, presence, ptt, search, task, voice_ctl};
 
 mod client;
 mod daemon;
@@ -98,6 +98,12 @@ enum Commands {
     /// lived; suitable for compositor autostart (`exec assistd tray`).
     #[cfg(feature = "tray")]
     Tray(tray::TrayArgs),
+
+    /// Search past sessions, saved memories and indexed documents at once, by meaning
+    /// and by exact words. Prints one tab-separated line per hit, best first, as the
+    /// model's `search` command lists them: kind, where the passage is, similarity,
+    /// passage.
+    Search(search::SearchArgs),
 
     /// Inspect or mutate persistent memory: search session
     /// transcripts, save / load / list / forget / delete key-value
@@ -189,6 +195,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Settings(args) => assistd_chat::settings::run(args).await,
         #[cfg(feature = "tray")]
         Commands::Tray(args) => tray::run(args).await,
+        Commands::Search(args) => search::run(args).await,
         Commands::Memory(args) => memory::run(args).await,
         Commands::Documents(args) => documents::run(args).await,
         Commands::Task(args) => task::run(args).await,

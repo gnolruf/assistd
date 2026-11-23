@@ -1232,8 +1232,12 @@ none ever starts while `documents.ocr.model` is unset or
 forgets the skipped files, asks for a round of passes and streams the progress of the round that answers
 it, which is the next one when a round is already under way; it is refused
 when no worker will run, and is not held to the dispatch timeout.
-`assistd documents search <query>` (`DocumentsSearch`) ranks the documents as
-`search --in documents` does, without a turn.
+`assistd search <query>` (`Search`) ranks sessions, memories and documents as
+the model's `search` does, without a turn, and prints each `SearchHit` as the
+line `search` lists it on; unlike a turn's search it has no context to leave
+out, so it also ranks the messages of the session in progress.
+`assistd documents search` and `assistd memory reminisce` are the same
+request held to one kind.
 
 ### Page transcription (`assistd-core`)
 

@@ -289,6 +289,9 @@ yourself:
 assistd documents search lease renewal terms
 ```
 
+`assistd search` runs it over past sessions and saved memories as well;
+`--in` holds it to the kinds named.
+
 ## Privacy
 
 - **The text of every indexed file is copied** into

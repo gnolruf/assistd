@@ -475,7 +475,9 @@ document, shown through its best-ranked chunk.
 |------------------------------------------------|-----------|--------------------|
 | Recalled context                               | memories, then messages of other sessions | vector, above `embedding.min_similarity` |
 | `search`                                       | the kinds enabled, or those `--in` names | vector and keyword |
-| `search --session`, `assistd memory reminisce` | messages  | vector and keyword |
+| `search --session`                             | messages of one past session | vector and keyword |
+| `assistd search`                               | the kinds enabled, or those `--in` names | vector and keyword |
+| `assistd memory reminisce`                     | messages  | vector and keyword |
 | `assistd documents search`                     | documents | vector and keyword |
 
 Embeddings match meaning and miss exact strings: an identifier, an error

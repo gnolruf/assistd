@@ -4,12 +4,13 @@
 use std::io::{self, Write};
 
 use anyhow::Result;
-use assistd_ipc::{EventBody, Request, RequestBody};
+use assistd_ipc::{EventBody, Request, RequestBody, SearchKind};
 use assistd_utils::terminal_text::{escape_controls, escape_controls_single_line};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
 
 use super::run_one_shot;
+use super::search::{self, hit_count, print_hits};
 
 #[derive(Args)]
 pub(crate) struct MemoryArgs {
@@ -19,14 +20,12 @@ pub(crate) struct MemoryArgs {
 
 #[derive(Subcommand)]
 pub(crate) enum MemoryAction {
-    /// Semantic search over persisted session transcripts, so paraphrases still hit.
-    /// Requires the embedding subsystem; with embeddings disabled it returns no hits.
+    /// Rank the messages of saved sessions by meaning and by the query's exact words:
+    /// `assistd search --in sessions`.
     Reminisce {
-        /// Natural-language query. The daemon embeds this and finds
-        /// the top-`limit` most semantically similar past messages.
         query: String,
         /// Cap on number of hits returned.
-        #[arg(long, default_value = "5")]
+        #[arg(long, default_value = "5", value_parser = hit_count())]
         limit: u32,
     },
     /// Persist a value under `key`. Overwrites any prior value.
@@ -59,7 +58,7 @@ impl MemoryAction {
     fn into_request(self, id: String) -> Request {
         match self {
             MemoryAction::Reminisce { query, limit } => {
-                Request::new(id, RequestBody::MemorySemanticSearch { query, limit })
+                search::request(query, limit, vec![SearchKind::Sessions])
             }
             MemoryAction::Save { key, value } => {
                 Request::new(id, RequestBody::MemorySave { key, value })
@@ -83,25 +82,15 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
         _ => None,
     };
     let reindex_quiet = matches!(&args.action, MemoryAction::Reindex { quiet: true });
+    let searching = matches!(&args.action, MemoryAction::Reminisce { .. });
 
     let req = args.action.into_request(Uuid::new_v4().to_string());
+    if searching {
+        return print_hits(req).await;
+    }
     let mut reindex_reported = false;
     run_one_shot(req, |event| {
         match &event.body {
-            EventBody::SemanticHit { message_id, session_id, timestamp, role, content, similarity, held_elsewhere, .. } => {
-                let session_short = session_id.chars().take(8).collect::<String>();
-                let flattened = content.replace('\n', " ");
-                let single_line = escape_controls_single_line(&flattened);
-                let also_in = match held_elsewhere {
-                    0 => String::new(),
-                    others => format!("  also_in={others}"),
-                };
-                writeln!(
-                    io::stdout(),
-                    "{timestamp}  {role:9}  msg={message_id:<6}  sess={session_short}  sim={}{also_in}  {single_line}",
-                    similarity.map_or_else(|| "n/a".to_string(), |similarity| format!("{similarity:.2}")),
-                )?;
-            }
             EventBody::MemoryValue { key, value } => match value {
                 Some(v) => writeln!(
                     io::stdout(),
@@ -114,7 +103,11 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
                     std::process::exit(2);
                 }
             },
-            EventBody::MemoryRow { memory_id, key, value } => {
+            EventBody::MemoryRow {
+                memory_id,
+                key,
+                value,
+            } => {
                 let key = escape_controls_single_line(key);
                 let flattened = value.replace('\n', " ");
                 let single_line = escape_controls_single_line(&flattened);
@@ -136,9 +129,11 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
                 writeln!(io::stderr(), "no memory with id={id}")?;
                 std::process::exit(2);
             }
-            EventBody::ReindexProgress { message_chunks, document_chunks, memories }
-                if !reindex_quiet =>
-            {
+            EventBody::ReindexProgress {
+                message_chunks,
+                document_chunks,
+                memories,
+            } if !reindex_quiet => {
                 reindex_reported = true;
                 print_reindex_progress(*message_chunks, *document_chunks, *memories);
             }

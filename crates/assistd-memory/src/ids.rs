@@ -6,7 +6,8 @@ use std::str::FromStr;
 
 use uuid::Uuid;
 
-const SHORT_SESSION_ID_CHARS: usize = 8;
+/// Hex digits of a session id shown wherever a session is named.
+pub const SHORT_SESSION_ID_CHARS: usize = 8;
 
 macro_rules! row_id {
     ($(#[$doc:meta])* $name:ident) => {
