@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::pin;
 
-use assistd_utils::backlog::{Signals, drain};
+use assistd_utils::backlog::{Pass, Signals};
 use tokio::sync::watch;
 
 use super::*;
@@ -95,9 +95,8 @@ async fn chunk_saved_messages(handle: &SqliteHandle) {
         wake: Arc::default(),
         shutdown,
     };
-    drain(&mut MessageChunker::new(handle.clone()), &signals)
-        .await
-        .unwrap();
+    let mut chunker = MessageChunker::new(handle.clone());
+    chunker.run(&signals).await.unwrap();
 }
 
 /// A file `unindexed_files` reports as not read at `stamp`.
@@ -1347,6 +1346,98 @@ async fn an_index_built_from_another_memory_database_has_its_message_chunks_cut_
     assert_eq!(
         texts_to_embed(&store, ChunkSource::Message).await,
         ["in the second, said at length"]
+    );
+}
+
+#[tokio::test]
+async fn a_rebuilt_index_finds_its_vectors_waiting_and_drops_those_of_what_is_gone() {
+    let (handle, store, temp) = fresh().await;
+    let transcript = Transcript::new(&handle).await;
+    for text in ["said and kept", "said and undone"] {
+        transcript
+            .embedded_chunk(&store, text, &unit_vec(0.0))
+            .await;
+    }
+    save_memory(&handle, "colour", "teal").await;
+    embed_text(&store, ChunkSource::Memory, "teal", &unit_vec(0.0)).await;
+    handle.close().await.unwrap();
+    std::fs::remove_file(temp.path().join("index.db")).unwrap();
+
+    let handle = SqliteHandle::open(&temp.path().join("memory.db"))
+        .await
+        .unwrap();
+    let store = SqliteSemanticStore::new(handle.clone());
+    let transcripts = SqliteTranscriptStore::new(handle.clone());
+    transcripts.undo_last_turn(transcript.branch).await.unwrap();
+    assert_eq!(
+        stored_vectors(&handle, "message_vectors").await,
+        2,
+        "no vector goes while messages wait to be chunked"
+    );
+    chunk_saved_messages(&handle).await;
+
+    assert_eq!(
+        store.count_missing().await.unwrap(),
+        UnindexedRows::default()
+    );
+    assert_eq!(
+        stored_vectors(&handle, "message_vectors").await,
+        1,
+        "the undone message's vector goes once every message is chunked"
+    );
+    assert_eq!(stored_vectors(&handle, "memory_vectors").await, 1);
+    let hits = nearest_chunks(&store, unit_vec(0.0), 5, SessionScope::All);
+    assert_eq!(hits.await.unwrap()[0].text, "said and kept");
+}
+
+#[tokio::test]
+async fn document_vectors_outlast_a_rebuilt_index_until_every_root_is_walked_again() {
+    let (handle, store, temp) = fresh().await;
+    let roots = ["/notes", "/drive"].map(PathBuf::from);
+    let index = async |store: &SqliteSemanticStore, root: &Path, files: &[(&str, &str)]| {
+        let pass = store.begin_index_pass(root).await.unwrap();
+        let mut unembedded = Vec::new();
+        for (name, text) in files {
+            let (path, pages) = (root.join(name), one_page(*text));
+            let stored = store.index_document(pass, path, STAMP, pages, EmptyPages::Final);
+            unembedded.extend(stored.await.unwrap());
+        }
+        store.finish_index_pass(pass).await.unwrap();
+        unembedded
+    };
+    index(&store, &roots[0], &[("a.md", "kept on disk")]).await;
+    index(
+        &store,
+        &roots[1],
+        &[("b.md", "on the drive"), ("c.md", "deleted since")],
+    )
+    .await;
+    for text in ["kept on disk", "on the drive", "deleted since"] {
+        embed_document_text(&store, text, &unit_vec(0.0)).await;
+    }
+    handle.close().await.unwrap();
+    std::fs::remove_file(temp.path().join("index.db")).unwrap();
+
+    let handle = SqliteHandle::open(&temp.path().join("memory.db"))
+        .await
+        .unwrap();
+    let store = SqliteSemanticStore::new(handle.clone());
+    let unembedded = index(&store, &roots[0], &[("a.md", "kept on disk")]).await;
+    assert!(unembedded.is_empty(), "its vector was waiting");
+    let removed = store.remove_unheld_document_vectors(roots.to_vec());
+    assert_eq!(removed.await.unwrap(), 0, "a root is still to be walked");
+    assert_eq!(stored_vectors(&handle, "document_vectors").await, 3);
+
+    let unembedded = index(&store, &roots[1], &[("b.md", "on the drive")]).await;
+    assert!(
+        unembedded.is_empty(),
+        "the root that came back embeds nothing"
+    );
+    let removed = store.remove_unheld_document_vectors(roots.to_vec());
+    assert_eq!(removed.await.unwrap(), 1, "the deleted file's vector");
+    assert_eq!(
+        store.count_missing().await.unwrap(),
+        UnindexedRows::default()
     );
 }
 

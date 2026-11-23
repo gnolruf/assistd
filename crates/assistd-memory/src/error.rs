@@ -35,8 +35,8 @@ pub enum MemoryError {
         source: BackendError,
     },
 
-    #[error("delete the unusable index file {}: {source}", path.display())]
-    DiscardIndex {
+    #[error("delete the unusable database file {}: {source}", path.display())]
+    DiscardUnusable {
         path: PathBuf,
         #[source]
         source: std::io::Error,

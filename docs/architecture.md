@@ -69,7 +69,7 @@ flowchart TB
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec and presets file + control plane + `PageTranscriber` for the OCR model. | `config`, `ipc`, `utils`                                                         |
 | `assistd-mcp`    | Stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools.  | `config`, `ipc`, `tools`, `utils`                                                |
-| `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `TaskStore` in `memory.db`, `SemanticStore` in the rebuildable `index.db`. | `ipc`, `utils`                                                                   |
+| `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `TaskStore` in `memory.db`, `SemanticStore` in the rebuildable `index.db` and `vectors.db`. | `ipc`, `utils`                                                                   |
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, the `backlog` loop that drains stored rows lacking their result, tilde expansion, `human_size`, Hugging Face file IDs, binary-content sniffing, non-blocking regular-file open, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the chat-template token list and its neutraliser for text and JSON, terminal-safe escaping of daemon-supplied text, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, the `ChildServer` supervisor, and the `pipe_worker` supervisor and pending-reply map the extraction and voice workers run under. | none                                                                             |
@@ -979,22 +979,29 @@ on `assistd::policy`; nothing is added to the allowlist.
 
 ### Memory (`assistd-memory` + `assistd-embed`)
 
-Two SQLite databases sit in `~/.local/share/assistd`. `memory.db` holds
+Three SQLite databases sit in `~/.local/share/assistd`. `memory.db` holds
 what exists nowhere else: a key/value `MemoryStore` for durable facts, a
 `TranscriptStore` for full per-session transcripts (with branching
-and undo), and a `TaskStore` for saved tasks and their runs. `index.db`
-holds the `SemanticStore`: document text and the chunks, keyword index
-and vectors of every kind, all of which the daemon builds again when the
-file is missing, unreadable or from another schema version. The semantic
+and undo), and a `TaskStore` for saved tasks and their runs. The other two
+hold the `SemanticStore`: `index.db` the document text and the chunks
+and keyword index of every kind, `vectors.db` the vector of each
+distinct chunk text under the hash of that text. The daemon produces
+either again when it is missing, unreadable or from another schema
+version, and because a vector names no row, an `index.db` built again
+finds its vectors waiting and embeds nothing. The semantic
 store is three traits, `RecallStore`, `EmbeddingQueue` and
-`DocumentStore`, and each consumer holds only the ones it calls. Each
-file has one read-write connection that runs its writes in order, so a
+`DocumentStore`, and each consumer holds only the ones it calls.
+`memory.db` has one read-write connection and the other two share one,
+each running its writes in order, so a
 document being stored never holds up a message being saved. A row of
 `memory.db` is written first and `index.db` follows: a memory's chunk is
 cut after its save, a saved message is cut by the message chunker, and
-the chunks of deleted rows are removed after the delete. Document vector
+the chunks of deleted rows are removed after the delete. A vector goes
+with the write that removes the last chunk holding its text, and those
+left behind by a crash or by a rebuilt index are removed once every
+chunk of their kind is cut. Document vector
 scans, other vector scans and other reads each get their own read-only
-connection onto both files, so a long scan holds up neither a write, a
+connection onto all three files, so a long scan holds up neither a write, a
 history load nor a scan of the other kind. Shutdown stops the message
 chunker and closes the databases once queued writes have run. [database.md](database.md) maps
 the tables.
@@ -1742,7 +1749,7 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
    daemon sleeps for another process's VRAM, unless `[documents]` lets
    embedding through that state
    ([activity and permits](#activity-and-permits)). Each vector is quantised into
-   `document_vectors`, once for its text however many chunks hold it
+   `document_vectors` in `vectors.db`, once for its text however many chunks hold it
    ([memory](#memory-assistd-memory--assistd-embed)).
 
 6. **Search** ([`crates/assistd-tools/src/commands/search.rs`](../crates/assistd-tools/src/commands/search.rs)).

@@ -1,4 +1,4 @@
-//! Opens the two database files and hands out the shared [`SqliteHandle`].
+//! Opens the three database files and hands out the shared [`SqliteHandle`].
 
 use std::ffi::OsString;
 use std::io;
@@ -12,7 +12,7 @@ use rusqlite::{ErrorCode, OpenFlags, Transaction};
 use tokio::sync::Notify;
 use tokio_rusqlite::Connection;
 
-use crate::{MemoryError, MemoryId, Result, index_schema, migrations};
+use crate::{MemoryError, MemoryId, Result, index_schema, migrations, vectors_schema};
 
 use super::chunks::delete_vectors_of_removed_texts;
 use super::reconcile;
@@ -21,11 +21,35 @@ use super::reconcile;
 /// the files on disk.
 const INDEX_FILE_NAME: &str = "index.db";
 
+/// The file beside `memory.db` that holds the vectors of the texts `index.db` chunks.
+const VECTORS_FILE_NAME: &str = "vectors.db";
+
 /// The schema name `memory.db` has on the index writer.
 const ATTACHED_MEMORY: &str = "mem";
 
 /// The schema name `index.db` has on the read-only connections.
 const ATTACHED_INDEX: &str = "idx";
+
+/// The schema name `vectors.db` has on the index writer and the read-only connections.
+const ATTACHED_VECTORS: &str = "vec";
+
+/// The databases whose WAL `memory.db`'s writer truncates after erasing rows.
+const MEMORY_WRITER_FILES: &[&str] = &["main"];
+
+/// The databases whose WAL the index writer truncates after erasing rows.
+const INDEX_WRITER_FILES: &[&str] = &["main", ATTACHED_VECTORS];
+
+/// `index.db` as the daemon replaces it: chunks and document text it cuts again.
+const INDEX_FILE: ReplaceableFile = ReplaceableFile {
+    name: "index.db",
+    version: index_schema::VERSION,
+};
+
+/// `vectors.db` as the daemon replaces it: vectors the embedding model computes again.
+const VECTORS_FILE: ReplaceableFile = ReplaceableFile {
+    name: "vectors.db",
+    version: vectors_schema::VERSION,
+};
 
 /// How long a statement waits on a lock held by another process (e.g. a
 /// `sqlite3` shell) before failing with `SQLITE_BUSY`.
@@ -49,9 +73,10 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// Cheaply cloneable handle shared by every store, over `memory.db` and the `index.db`
-/// beside it. Each file has one writable connection, which runs its writes in
-/// submission order on its own thread; document searches, other vector scans and
-/// other reads each go to their own read-only connection onto both files.
+/// and `vectors.db` beside it. `memory.db` has one writable connection and the other
+/// two share one, each running its writes in submission order on its own thread;
+/// document searches, other vector scans and other reads each go to their own
+/// read-only connection onto all three files, each file mapped apart from the others.
 /// It also carries the wake signal of each backlog the databases hold.
 #[derive(Debug, Clone)]
 pub struct SqliteHandle {
@@ -59,7 +84,7 @@ pub struct SqliteHandle {
     search_reader: Connection,
     document_search_reader: Connection,
     writer: Connection,
-    /// Writes `index.db`, with `memory.db` attached to read.
+    /// Writes `index.db` and `vectors.db`, with `memory.db` attached to read.
     index_writer: Connection,
     rows_to_embed: Arc<Notify>,
     pages_to_transcribe: Arc<Notify>,
@@ -67,19 +92,24 @@ pub struct SqliteHandle {
 }
 
 impl SqliteHandle {
-    /// Open `memory.db` at `path` and `index.db` beside it (creating parent
-    /// directories), restrict them to their owner, apply pragmas, and migrate
-    /// `memory.db`. An `index.db` that is not a readable database or holds another
-    /// schema version is replaced by an empty one, and the message and memory chunks
-    /// it holds are brought in line with `memory.db`.
+    /// Open `memory.db` at `path` with `index.db` and `vectors.db` beside it (creating
+    /// parent directories), restrict them to their owner, apply pragmas, and migrate
+    /// `memory.db`. Either of the other two that is not a readable database or holds
+    /// another schema version is replaced by an empty one, and the message and memory
+    /// chunks of `index.db` are brought in line with `memory.db`.
     pub async fn open(path: &Path) -> Result<Self> {
-        let index_path = path.with_file_name(INDEX_FILE_NAME);
+        let files = DatabaseFiles {
+            memory: path,
+            index: &path.with_file_name(INDEX_FILE_NAME),
+            vectors: &path.with_file_name(VECTORS_FILE_NAME),
+        };
         prepare_private_db_file(path).await?;
         let writer = open_writer(path).await?;
-        let index_writer = open_index_writer(&index_path, path).await?;
-        let reader = open_reader(path, &index_path).await?;
-        let search_reader = open_reader(path, &index_path).await?;
-        let document_search_reader = open_reader(path, &index_path).await?;
+        let vectors_created = create_vectors_file(files.vectors).await?;
+        let index_writer = open_index_writer(&files).await?;
+        let reader = open_reader(&files).await?;
+        let search_reader = open_reader(&files).await?;
+        let document_search_reader = open_reader(&files).await?;
         let handle = Self {
             reader,
             search_reader,
@@ -91,6 +121,9 @@ impl SqliteHandle {
             messages_to_chunk: Arc::default(),
         };
         handle.reconcile_index().await?;
+        if vectors_created {
+            handle.log_texts_without_vector().await?;
+        }
         Ok(handle)
     }
 
@@ -110,9 +143,9 @@ impl SqliteHandle {
     }
 
     /// Refresh planner statistics and close every connection once every call
-    /// already queued has run; later calls through any clone fail. Each file's
-    /// writer closes after its readers so it checkpoints the WAL into the database
-    /// and removes it.
+    /// already queued has run; later calls through any clone fail. The writers close
+    /// after the readers so each checkpoints the WAL of its files into them and
+    /// removes it.
     pub async fn close(self) -> Result<()> {
         for writer in [&self.index_writer, &self.writer] {
             if let Err(e) = writer
@@ -222,17 +255,18 @@ impl SqliteHandle {
         F: FnOnce(&Transaction<'_>) -> rusqlite::Result<Erasing<T>> + Send + 'static,
         T: Send + 'static,
     {
-        let (value, erased) =
-            commit_erasing(&self.writer, op, move |c| in_transaction(c, statements)).await?;
+        let commit = move |c: &mut rusqlite::Connection| in_transaction(c, statements);
+        let (value, erased) = commit_erasing(&self.writer, MEMORY_WRITER_FILES, op, commit).await?;
         if erased {
             self.remove_orphaned_chunks().await;
         }
         Ok(value)
     }
 
-    /// Run `statements` in one transaction on `index.db`'s writable connection, drop
-    /// the vectors of the texts it removed the last chunk of, and commit it; a failure
-    /// is reported as `op`.
+    /// Run `statements` in one transaction on the writable connection onto `index.db`
+    /// and `vectors.db`, drop the vectors of the texts it removed the last chunk of,
+    /// and commit it; a failure is reported as `op`. A crash can keep one file's half
+    /// of the commit without the other's.
     pub(super) async fn write_index<T, F>(&self, op: &'static str, statements: F) -> Result<T>
     where
         F: FnOnce(&Transaction<'_>) -> rusqlite::Result<T> + Send + 'static,
@@ -244,8 +278,8 @@ impl SqliteHandle {
             .map_err(MemoryError::sqlite(op))
     }
 
-    /// Like [`Self::write_index`], then truncate the WAL when the committed write
-    /// erased rows.
+    /// Like [`Self::write_index`], then truncate the WAL of both files when the
+    /// committed write erased rows.
     pub(super) async fn write_index_erasing<T, F>(
         &self,
         op: &'static str,
@@ -256,7 +290,7 @@ impl SqliteHandle {
         T: Send + 'static,
     {
         let commit = move |c: &mut rusqlite::Connection| in_index_transaction(c, statements);
-        let (value, _) = commit_erasing(&self.index_writer, op, commit).await?;
+        let (value, _) = commit_erasing(&self.index_writer, INDEX_WRITER_FILES, op, commit).await?;
         Ok(value)
     }
 
@@ -311,7 +345,7 @@ impl SqliteHandle {
             .write_index_erasing("reconcile index.db with memory.db", |tx| {
                 let reconciled = reconcile::reconcile(tx)?;
                 Ok(Erasing {
-                    erased: reconciled.removed_chunks(),
+                    erased: reconciled.erased_rows(),
                     value: reconciled,
                 })
             })
@@ -327,10 +361,72 @@ impl SqliteHandle {
             target: "assistd::memory",
             orphans_removed = reconciled.orphans_removed,
             memories_recut = reconciled.memories.cut,
+            memory_vectors_removed = reconciled.unheld_vectors_removed,
             "index.db reconciled with memory.db"
         );
         Ok(())
     }
+
+    /// Remove the message vectors whose text no message chunk holds, unless saved
+    /// messages still wait to be chunked; returns whether it could.
+    pub(super) async fn remove_unheld_message_vectors(&self) -> Result<bool> {
+        let removed = self
+            .write_index_erasing("remove unheld message vectors", |tx| {
+                let removed = reconcile::remove_unheld_message_vectors(tx)?;
+                Ok(Erasing {
+                    erased: removed.is_some_and(|vectors| vectors > 0),
+                    value: removed,
+                })
+            })
+            .await?;
+        if let Some(vectors) = removed {
+            tracing::debug!(
+                target: "assistd::memory",
+                vectors,
+                "removed the message vectors no chunk holds the text of"
+            );
+        }
+        Ok(removed.is_some())
+    }
+
+    async fn log_texts_without_vector(&self) -> Result<()> {
+        let texts: u64 = self
+            .read("count chunk texts without a vector", |c| {
+                c.query_row(
+                    "SELECT count(*) FROM (SELECT DISTINCT kind, hash FROM chunks)",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await?;
+        tracing::info!(
+            target: "assistd::memory",
+            texts,
+            "vectors.db was created empty; every chunk text waits to be embedded"
+        );
+        Ok(())
+    }
+}
+
+/// Where the three database files are.
+struct DatabaseFiles<'a> {
+    memory: &'a Path,
+    index: &'a Path,
+    vectors: &'a Path,
+}
+
+/// A database file holding only what the daemon can produce again, stamped with the
+/// version of its schema.
+struct ReplaceableFile {
+    name: &'static str,
+    version: i64,
+}
+
+/// How a connection may use a database it attaches.
+#[derive(Clone, Copy)]
+enum Access {
+    ReadOnly,
+    ReadWrite,
 }
 
 /// A write's result, and whether it deleted or overwrote rows whose old contents
@@ -340,8 +436,8 @@ pub(super) struct Erasing<T> {
     pub erased: bool,
 }
 
-/// What a probe of the `index.db` on disk found.
-enum StoredIndex {
+/// What a probe of a [`ReplaceableFile`] on disk found.
+enum StoredFile {
     /// No file, or an empty one.
     Absent,
     /// A database, with the schema version it is stamped with.
@@ -361,9 +457,15 @@ where
         .map_err(MemoryError::sqlite(op))
 }
 
-/// Run `commit` on `writer` and truncate its WAL when the write it committed erased
-/// rows. Returns the write's value and whether it erased any.
-async fn commit_erasing<T, F>(writer: &Connection, op: &'static str, commit: F) -> Result<(T, bool)>
+/// Run `commit` on `writer` and truncate the WAL of each of `files`, its schema names
+/// for them, when the write it committed erased rows. Returns the write's value and
+/// whether it erased any.
+async fn commit_erasing<T, F>(
+    writer: &Connection,
+    files: &'static [&'static str],
+    op: &'static str,
+    commit: F,
+) -> Result<(T, bool)>
 where
     F: FnOnce(&mut rusqlite::Connection) -> rusqlite::Result<Erasing<T>> + Send + 'static,
     T: Send + 'static,
@@ -372,7 +474,7 @@ where
         .call(move |c| {
             let Erasing { value, erased } = commit(c)?;
             if erased {
-                truncate_wal(c);
+                files.iter().for_each(|file| truncate_wal(c, file));
             }
             Ok((value, erased))
         })
@@ -412,19 +514,42 @@ async fn open_writer(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// The writable connection onto `index.db`, with the `memory.db` at `memory_path`
-/// attached to read. A file that is not a readable database or holds another schema
-/// version is deleted first, and an empty one is given the schema.
-async fn open_index_writer(path: &Path, memory_path: &Path) -> Result<Connection> {
-    discard_unusable_index(path).await?;
-    prepare_private_db_file(path).await?;
-    let conn = open_writable(path).await?;
+/// The writable connection onto `index.db`, with `memory.db` attached to read and
+/// `vectors.db` to write. An `index.db` that is not a readable database or holds
+/// another schema version is deleted first, and an empty one is given the schema.
+async fn open_index_writer(files: &DatabaseFiles<'_>) -> Result<Connection> {
+    discard_unusable(files.index, &INDEX_FILE).await?;
+    prepare_private_db_file(files.index).await?;
+    let conn = open_writable(files.index).await?;
     conn.call(index_schema::create)
         .await
         .map_err(MemoryError::sqlite("create the index.db schema"))?;
-    attach_read_only(&conn, memory_path, ATTACHED_MEMORY).await?;
+    attach(&conn, files.memory, ATTACHED_MEMORY, Access::ReadOnly).await?;
+    attach(&conn, files.vectors, ATTACHED_VECTORS, Access::ReadWrite).await?;
+    conn.call(|c| -> rusqlite::Result<_> {
+        c.pragma_update(Some(ATTACHED_VECTORS), "synchronous", "NORMAL")?;
+        c.pragma_update(Some(ATTACHED_VECTORS), "secure_delete", "ON")
+    })
+    .await
+    .map_err(MemoryError::sqlite("apply SQLite pragmas to vectors.db"))?;
     refresh_planner_statistics(&conn).await?;
     Ok(conn)
+}
+
+/// Give the `vectors.db` at `path` its schema, after deleting one that is not a
+/// readable database or holds another schema version. Returns whether the file is new.
+async fn create_vectors_file(path: &Path) -> Result<bool> {
+    let created = discard_unusable(path, &VECTORS_FILE).await?;
+    prepare_private_db_file(path).await?;
+    let conn = open_writable(path).await?;
+    conn.call(vectors_schema::create)
+        .await
+        .map_err(MemoryError::sqlite("create the vectors.db schema"))?;
+    conn.close().await.map_err(|source| MemoryError::Open {
+        path: path.to_path_buf(),
+        source: source.into(),
+    })?;
+    Ok(created)
 }
 
 /// A writable connection onto the database at `path` with the pragmas every writer runs under.
@@ -455,9 +580,11 @@ async fn refresh_planner_statistics(writer: &Connection) -> Result<()> {
         .map_err(MemoryError::sqlite("optimize query planner statistics"))
 }
 
-/// A read-only connection onto `memory.db` at `path` with `index.db` attached; opened
-/// after the writers have switched both databases to WAL.
-async fn open_reader(path: &Path, index_path: &Path) -> Result<Connection> {
+/// A read-only connection onto `memory.db` with `index.db` and `vectors.db` attached,
+/// each mapped up to [`READER_MMAP_BYTES`]; opened after the writers have switched
+/// every database to WAL.
+async fn open_reader(files: &DatabaseFiles<'_>) -> Result<Connection> {
+    let path = files.memory;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_URI;
@@ -467,7 +594,8 @@ async fn open_reader(path: &Path, index_path: &Path) -> Result<Connection> {
             path: path.to_path_buf(),
             source: source.into(),
         })?;
-    attach_read_only(&conn, index_path, ATTACHED_INDEX).await?;
+    attach(&conn, files.index, ATTACHED_INDEX, Access::ReadOnly).await?;
+    attach(&conn, files.vectors, ATTACHED_VECTORS, Access::ReadOnly).await?;
     conn.call(|c| -> rusqlite::Result<_> {
         c.pragma_update(None, "mmap_size", READER_MMAP_BYTES)?;
         c.busy_timeout(BUSY_TIMEOUT)
@@ -477,9 +605,14 @@ async fn open_reader(path: &Path, index_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Attach the database at `path` to `conn` under `schema`, for reading only.
-async fn attach_read_only(conn: &Connection, path: &Path, schema: &'static str) -> Result<()> {
-    let uri = read_only_uri(path);
+/// Attach the database at `path` to `conn` under `schema`.
+async fn attach(
+    conn: &Connection,
+    path: &Path,
+    schema: &'static str,
+    access: Access,
+) -> Result<()> {
+    let uri = database_uri(path, access);
     conn.call(move |c| c.execute(&format!("ATTACH DATABASE ?1 AS {schema}"), [uri]))
         .await
         .map_err(|source| MemoryError::Open {
@@ -489,9 +622,9 @@ async fn attach_read_only(conn: &Connection, path: &Path, schema: &'static str) 
     Ok(())
 }
 
-/// The SQLite URI that opens the file at `path` read-only, with every byte a URI
-/// gives a meaning to percent-encoded.
-fn read_only_uri(path: &Path) -> String {
+/// The SQLite URI that opens the existing file at `path` for `access`, with every byte
+/// a URI gives a meaning to percent-encoded.
+fn database_uri(path: &Path, access: Access) -> String {
     let encoded: String = path
         .as_os_str()
         .as_bytes()
@@ -504,49 +637,55 @@ fn read_only_uri(path: &Path) -> String {
             }
         })
         .collect();
-    format!("file:{encoded}?mode=ro")
+    let mode = match access {
+        Access::ReadOnly => "ro",
+        Access::ReadWrite => "rw",
+    };
+    format!("file:{encoded}?mode={mode}")
 }
 
-/// Delete the `index.db` at `path` with its sidecars unless it is absent or holds this
-/// build's schema version; everything in it can be built again.
-async fn discard_unusable_index(path: &Path) -> Result<()> {
-    match stored_index(path).await? {
-        StoredIndex::Absent => return Ok(()),
-        StoredIndex::Version(index_schema::VERSION) => return Ok(()),
-        StoredIndex::Version(version) => tracing::warn!(
+/// Delete `file` at `path` with its sidecars unless it is absent or holds this
+/// build's schema version. Returns whether no usable file is left there.
+async fn discard_unusable(path: &Path, file: &ReplaceableFile) -> Result<bool> {
+    match stored_file(path).await? {
+        StoredFile::Absent => return Ok(true),
+        StoredFile::Version(version) if version == file.version => return Ok(false),
+        StoredFile::Version(version) => tracing::warn!(
             target: "assistd::memory",
             path = %path.display(),
             version,
-            expected = index_schema::VERSION,
-            "index.db holds another schema version; building it again"
+            expected = file.version,
+            "{} holds another schema version; building it again",
+            file.name
         ),
-        StoredIndex::Unreadable => tracing::warn!(
+        StoredFile::Unreadable => tracing::warn!(
             target: "assistd::memory",
             path = %path.display(),
-            "index.db is not a readable database; building it again"
+            "{} is not a readable database; building it again",
+            file.name
         ),
     }
     for file in std::iter::once(path.to_path_buf()).chain(sidecar_paths(path)) {
         match tokio::fs::remove_file(&file).await {
             Err(source) if source.kind() != io::ErrorKind::NotFound => {
-                return Err(MemoryError::DiscardIndex { path: file, source });
+                return Err(MemoryError::DiscardUnusable { path: file, source });
             }
             _ => {}
         }
     }
-    Ok(())
+    Ok(true)
 }
 
-/// What the `index.db` at `path` is, read without changing it.
-async fn stored_index(path: &Path) -> Result<StoredIndex> {
+/// What the replaceable file at `path` is, read without changing it.
+async fn stored_file(path: &Path) -> Result<StoredFile> {
     let open_error = |source: tokio_rusqlite::Error| MemoryError::Open {
         path: path.to_path_buf(),
         source: source.into(),
     };
     match tokio::fs::metadata(path).await {
         Ok(file) if file.len() > 0 => {}
-        Ok(_) => return Ok(StoredIndex::Absent),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(StoredIndex::Absent),
+        Ok(_) => return Ok(StoredFile::Absent),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(StoredFile::Absent),
         Err(source) => {
             return Err(MemoryError::Open {
                 path: path.to_path_buf(),
@@ -560,7 +699,7 @@ async fn stored_index(path: &Path) -> Result<StoredIndex> {
     let version = conn
         .call(|c| {
             c.busy_timeout(BUSY_TIMEOUT)?;
-            let version = index_schema::stored_version(c)?;
+            let version = c.pragma_query_value(Some("main"), "user_version", |row| row.get(0))?;
             c.query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
                 row.get::<_, i64>(0)
             })?;
@@ -569,8 +708,8 @@ async fn stored_index(path: &Path) -> Result<StoredIndex> {
         .await;
     conn.close().await.map_err(open_error)?;
     match version {
-        Ok(version) => Ok(StoredIndex::Version(version)),
-        Err(e) if is_unreadable_database(&e) => Ok(StoredIndex::Unreadable),
+        Ok(version) => Ok(StoredFile::Version(version)),
+        Err(e) if is_unreadable_database(&e) => Ok(StoredFile::Unreadable),
         Err(e) => Err(open_error(e)),
     }
 }
@@ -633,11 +772,12 @@ async fn restrict_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Checkpoint and empty the WAL of `c`'s own database so frames holding deleted or
-/// overwritten rows don't outlive the write. Never waits on readers: a blocked or
-/// failed checkpoint is logged, and the frames go at the next checkpoint or at close.
-fn truncate_wal(c: &rusqlite::Connection) {
-    match checkpoint_without_waiting(c) {
+/// Checkpoint and empty the WAL of the database `c` names `file` so frames holding
+/// deleted or overwritten rows don't outlive the write. Never waits on readers: a
+/// blocked or failed checkpoint is logged, and the frames go at the next checkpoint
+/// or at close.
+fn truncate_wal(c: &rusqlite::Connection, file: &str) {
+    match checkpoint_without_waiting(c, file) {
         Ok(true) => tracing::warn!(
             target: "assistd::memory",
             "WAL checkpoint blocked by a reader; old rows stay in the WAL until the next checkpoint"
@@ -653,9 +793,10 @@ fn truncate_wal(c: &rusqlite::Connection) {
 
 /// Run a truncating checkpoint with the busy handler off, returning whether a
 /// reader blocked it.
-fn checkpoint_without_waiting(c: &rusqlite::Connection) -> rusqlite::Result<bool> {
+fn checkpoint_without_waiting(c: &rusqlite::Connection, file: &str) -> rusqlite::Result<bool> {
     c.busy_timeout(Duration::ZERO)?;
-    let blocked = c.query_row("PRAGMA main.wal_checkpoint(TRUNCATE)", [], |r| r.get(0));
+    let checkpoint = format!("PRAGMA {file}.wal_checkpoint(TRUNCATE)");
+    let blocked = c.query_row(&checkpoint, [], |r| r.get(0));
     c.busy_timeout(BUSY_TIMEOUT)?;
     blocked
 }
@@ -708,27 +849,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_replaces_an_index_that_is_unreadable_or_from_another_version() {
+    async fn open_replaces_an_index_or_vectors_file_that_is_unreadable_or_from_another_version() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");
-        let index = temp.path().join(INDEX_FILE_NAME);
-        std::fs::write(&index, b"not a database, and longer than a header").unwrap();
+        for (name, version) in [
+            (INDEX_FILE_NAME, index_schema::VERSION),
+            (VECTORS_FILE_NAME, vectors_schema::VERSION),
+        ] {
+            let file = temp.path().join(name);
+            std::fs::write(&file, b"not a database, and longer than a header").unwrap();
 
-        let handle = SqliteHandle::open(&path).await.unwrap();
-        handle.close().await.unwrap();
-        rusqlite::Connection::open(&index)
-            .unwrap()
-            .pragma_update(None, "user_version", index_schema::VERSION + 1)
-            .unwrap();
+            let handle = SqliteHandle::open(&path).await.unwrap();
+            handle.close().await.unwrap();
+            rusqlite::Connection::open(&file)
+                .unwrap()
+                .pragma_update(None, "user_version", version + 1)
+                .unwrap();
 
-        let handle = SqliteHandle::open(&path).await.unwrap();
-        handle.close().await.unwrap();
-        let version: i64 = rusqlite::Connection::open(&index)
-            .unwrap()
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, index_schema::VERSION);
-        assert_eq!(mode_of(&index), PRIVATE_FILE_MODE);
+            let handle = SqliteHandle::open(&path).await.unwrap();
+            handle.close().await.unwrap();
+            let stored: i64 = rusqlite::Connection::open(&file)
+                .unwrap()
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(stored, version, "{name}");
+            assert_eq!(mode_of(&file), PRIVATE_FILE_MODE, "{name}");
+        }
     }
 
     #[tokio::test]

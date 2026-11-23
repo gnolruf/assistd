@@ -490,6 +490,11 @@ pub trait DocumentStore: fmt::Debug + Send + Sync + 'static {
     /// that walked only those parts of its root.
     async fn finish_index_pass_under(&self, pass: IndexPass, paths: Vec<PathBuf>) -> Result<u64>;
 
+    /// Remove the vectors of the texts no document chunk holds, returning how many;
+    /// none until a pass over the whole of each of `roots` has finished since the
+    /// index was last built, as a root not yet walked has chunks still to be cut.
+    async fn remove_unheld_document_vectors(&self, roots: Vec<PathBuf>) -> Result<u64>;
+
     /// Remove the document at `path` with its chunks, and the vectors of the texts
     /// only they held; `false` when none was indexed.
     async fn remove_document(&self, path: &Path) -> Result<bool>;
@@ -627,6 +632,9 @@ impl DocumentStore for NoSemanticStore {
         Ok(0)
     }
     async fn finish_index_pass_under(&self, _pass: IndexPass, _paths: Vec<PathBuf>) -> Result<u64> {
+        Ok(0)
+    }
+    async fn remove_unheld_document_vectors(&self, _roots: Vec<PathBuf>) -> Result<u64> {
         Ok(0)
     }
     async fn remove_document(&self, _path: &Path) -> Result<bool> {

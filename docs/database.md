@@ -1,14 +1,19 @@
 # Database schema
 
-`assistd-memory` keeps what the daemon remembers in two SQLite files in
-`$XDG_DATA_HOME/assistd` (`~/.local/share/assistd` by default).
+`assistd-memory` keeps what the daemon remembers in three SQLite files in
+`$XDG_DATA_HOME/assistd` (`~/.local/share/assistd` by default), split by
+what losing each would cost.
 
 - **`memory.db`** holds what exists nowhere else: sessions, memories and
   tasks. The daemon never replaces it.
-- **`index.db`** holds what can be built again from `memory.db` and from
-  the files on disk: document text, the chunks of every kind, their
-  keyword index and their vectors. The daemon builds it again itself
-  when it has to ([Two files](#two-files)).
+- **`index.db`** holds what can be built again in seconds from
+  `memory.db` and from the files on disk: document text, the chunks of
+  every kind and their keyword index. The daemon builds it again itself
+  when it has to ([Three files](#three-files)).
+- **`vectors.db`** holds what the embedding model computed: the vector
+  of every distinct chunk text, which takes hours of model time to
+  produce again. Nothing in it names a row of another file, so it
+  outlasts an `index.db` that is built again.
 
 Chats are saved whatever `[memory] enabled` says; turning it off only
 withholds the memory tools and recalled context from the model.
@@ -142,6 +147,7 @@ erDiagram
         int id PK
         blob path UK
         int pass "counts the walks over the root"
+        int finished_pass "the last pass to walk the whole root, else 0"
     }
     documents {
         int id PK
@@ -251,19 +257,21 @@ cascades to the rows that hang off it in its own file.
 
 `index.db` holds `chunked_source`, `index_roots`, `documents`,
 `skipped_files`, `document_pages`, `page_transcriptions`, `chunks`,
-`chunk_words`, the three vector tables, `removed_chunk_texts` and
-`embedding_meta`; every other table is in `memory.db`. `chunks.source`
-names a row of one of three tables, which no foreign key can say. A
-trigger on `document_pages`, in the same file, deletes a deleted page's
-chunks. A message or a memory is in the other file, and
-[Two files](#two-files) says what holds its chunks to it.
+`chunk_words` and `removed_chunk_texts`; `vectors.db` holds the three
+vector tables and `embedding_meta`; every other table is in `memory.db`.
+`chunks.source` names a row of one of three tables, which no foreign key
+can say. A trigger on `document_pages`, in the same file, deletes a
+deleted page's chunks. A message or a memory is in another file, and so
+is a chunk's vector; [Three files](#three-files) says what holds them
+together.
 
-## Two files
+## Three files
 
 Inside a file rows are tied by keys, cascades and triggers. No
-transaction covers both files, so a row of `memory.db` is always written
-first and `index.db` follows it. A crash between the two leaves
-`index.db` behind, never wrong, and the next start brings it level.
+transaction covers `memory.db` and `index.db`, so a row of `memory.db`
+is always written first and `index.db` follows it. A crash between the
+two leaves `index.db` behind, never wrong, and the next start brings it
+level.
 
 - **Identity.** `database_identity` holds 16 random bytes written when
   `memory.db` is created. `chunked_source` records the identity
@@ -291,13 +299,42 @@ first and `index.db` follows it. A crash between the two leaves
 A step on `index.db` that fails after its `memory.db` write committed is
 logged and left to the next start.
 
+`index.db` and `vectors.db` are written by one connection, in one
+transaction, but each file commits on its own, so a crash can keep one
+file's half of a write. Both ways heal: a chunk whose hash has no vector
+is embedded, and a vector whose text no chunk holds is removed.
+
+- **Finding a vector.** A chunk's vector is the row of its kind's table
+  in `vectors.db` under `chunks.hash`. The embedding queue is the chunks
+  whose hash has no row there.
+- **Removing a vector, after a write.** A write that removes chunks
+  deletes, in the same transaction, the vector of each text it removed
+  the last chunk of (`removed_chunk_texts` below).
+- **Removing a vector, by comparing a whole kind.** Every vector of a
+  kind whose hash no chunk of that kind holds is deleted, but only while
+  that kind's chunks are all cut, since a vector may be waiting for a
+  chunk that will hold it. Memory chunks are all cut once a start has
+  compared them, and the comparison follows. Message chunks are all cut
+  when the message chunker first leaves no message above its mark after
+  a start. Document chunks are all cut once a pass has walked the whole
+  of every root in `documents.roots` since `index.db` was created, which
+  `index_roots.finished_pass` records; the comparison runs at the end of
+  each round of passes.
+
+So an `index.db` built again finds its vectors waiting and embeds
+nothing, and so does a root that was unavailable while it was built and
+comes back. A message undone while its chunks are being cut again keeps
+its vector until they all are; in every other case a vector goes with
+the write that removed its last chunk.
+
 The daemon deletes `index.db` and creates it empty when the file is not
 a database SQLite can read, or when its `PRAGMA user_version` is not the
 one this build writes; a missing file is created. The messages and
-memories are then chunked again, the next pass over each root reads its
-files, and everything is embedded again. Scanned pages go back to wait
-for the OCR model. `index.db` has no migrations: a change to its schema
-takes the next version number.
+memories are then chunked again and the next pass over each root reads
+its files. Scanned pages go back to wait for the OCR model. `vectors.db`
+is replaced on the same two conditions; every chunk text is then
+embedded again, and the daemon logs how many wait. Neither file has
+migrations: a change to its schema takes the next version number.
 
 ## Transcripts
 
@@ -388,6 +425,8 @@ resumed, saying which.
 - **`index_roots`**: the folders indexed for document search. Each
   walk over a root, whole or held to the paths that changed under it,
   is a pass and bumps `pass`; deleting a root deletes its documents.
+  `finished_pass` is the last pass that walked the whole root to its
+  end, 0 until one has since `index.db` was created.
 - **`documents`**: local files indexed for search, one row per path.
   A file whose `mtime_ns`, `size` and chunking match its row is not
   read again. One that is read and hashes to the stored `content_hash`,
@@ -404,7 +443,8 @@ resumed, saying which.
   that last saw it, and finishing a pass deletes the documents it did
   not see: all of the root's, or for a pass over changed paths those at
   or under them. The rows are a rebuildable cache of files on disk,
-  so losing `index.db` costs only a re-index.
+  so losing `index.db` costs only a re-index, and the re-indexed text
+  finds its vectors in `vectors.db`.
 - **`skipped_files`**: files that were read and left nothing to
   index, one row per path, each with the stamp it had and why:
   unsupported, binary, undecodable, password protected, without text,
@@ -435,8 +475,8 @@ resumed, saying which.
   extracted, which drops the transcribed text with its chunks, and
   starts every empty page waiting again. A daemon start sets the failed
   rows back to waiting.
-- **`message_vectors`** / **`memory_vectors`** / **`document_vectors`**:
-  one vector for each
+- **`message_vectors`** / **`memory_vectors`** / **`document_vectors`**,
+  in `vectors.db`: one vector for each
   distinct text the chunks of that kind hold, under the text's
   `chunks.hash`. No chunk id appears in them, so a text that sits in
   many places is embedded and stored once, and a vector follows its
@@ -444,7 +484,8 @@ resumed, saying which.
   kind from reading the vectors of another. A chunk whose hash has no row is pending,
   and the background embedding worker is given the first chunk holding
   each pending text. A vector is stored only while a chunk of its kind
-  holds its text.
+  holds its text, and kept while `index.db` is being built again
+  ([Three files](#three-files)).
   Vectors are L2-normalised by the embedder, so a dot product is cosine
   similarity, and quantised to a quarter of their `f32`s: a
   little-endian `f32` step, sized so the vector's largest component is
@@ -456,12 +497,12 @@ resumed, saying which.
 - **`removed_chunk_texts`**: empty between writes. A trigger on `chunks`
   records the kind and hash of every chunk a write deletes, however the
   chunk goes: with its page or its document, with a memory's old
-  value, or after its message or memory was deleted. Before the write commits it deletes the vector of each
+  value, or after its message or memory was deleted. Before the write commits it deletes from `vectors.db` the vector of each
   recorded text that no chunk of that kind holds any more, and empties
   the table. The check runs after the write's inserts, so a document
   stored again, whose chunks are removed and added, keeps the vectors
-  of the text it still has, and a vector is erased in the same
-  transaction as the last text it was made from.
+  of the text it still has, and a vector is erased by the same
+  write as the last text it was made from.
 - **`chunk_words`**: an FTS5 index of the words of every chunk of every
   kind. It is contentless:
   a row carries its chunk's id and the index entries for the chunk's
@@ -476,11 +517,11 @@ resumed, saying which.
   context ranks by vector alone. On the document
   index measured below it takes
   25 MB beside 62 MB of page text and 124 MB of vectors.
-- **`embedding_meta`**: the one row naming what produced every stored
-  vector: `embedding.model`, the vector dimension the server reported,
+- **`embedding_meta`**, in `vectors.db`: the one row naming what
+  produced every stored vector: `embedding.model`, the vector dimension the server reported,
   `embedding.custom_args` and `embedding.document_prefix`. When the
   embedder comes up and any of the four differs from the row, the three
-  vector tables are dropped and recreated empty before anything can
+  vector tables are emptied before anything can
   search or write, so vectors from two embedding spaces are never
   compared, and the worker embeds everything again.
   `embedding.query_prefix` is not recorded: it shapes only the query
@@ -605,16 +646,19 @@ match.
 
 ## Storage
 
-- Each file has one read-write connection, which runs that file's
-  writes in order, so storing a large document does not queue ahead of a
-  message being saved. The one onto `index.db` has `memory.db` attached
-  read-only, to read the messages and memories it chunks. Three
-  read-only connections onto both files serve history loads, message and
-  memory vector scans, and document vector scans, so none blocks another.
-- Both files run in WAL mode with foreign keys and `secure_delete`
-  on. After a delete or overwrite the WAL of the file written is
-  checkpointed and truncated so removed text doesn't linger in the
-  sidecar files.
+- `memory.db` has one read-write connection, and `index.db` and
+  `vectors.db` share another. Each runs its writes in order, so storing
+  a large document does not queue ahead of a message being saved. The
+  second has `memory.db` attached read-only, to read the messages and
+  memories it chunks. Three read-only connections onto all three files
+  serve history loads, message and memory vector scans, and document
+  vector scans, so none blocks another. Each maps up to 256 MiB of each
+  file, so the vectors a scan reads are mapped apart from page text and
+  the keyword index.
+- Every file runs in WAL mode with foreign keys and `secure_delete`
+  on. After a delete or overwrite the WAL of each file written is
+  checkpointed and truncated so removed text, and the vectors made from
+  it, don't linger in the sidecar files.
 - New databases use 16 KiB pages, which pack several 768- or
   1024-dimension vectors per page.
 - The data directory is created `0700` and each database and its
@@ -633,4 +677,5 @@ match.
   database, and `index.db` drops the chunks cut from the old one. A
   schema change to `memory.db` may require a reset instead of shipping a
   migration. Deleting `index.db` while the daemon is stopped loses
-  nothing that is not built again.
+  nothing that is not built again, in seconds; deleting `vectors.db`
+  costs the time to embed everything again.

@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 use crate::chunking::{ChunkingConfig, TextHash, chunk_ranges, text_hash};
 use crate::{ChunkSource, MemoryId, MessageId, PersistedRole};
 
-use super::chunks::{ChunkOwner, insert_chunk};
+use super::chunks::{ChunkOwner, delete_unheld_vectors, insert_chunk};
 
 /// The kinds of chunk cut from a table of `memory.db`, each with that table.
 const MEMORY_DATABASE_SOURCES: [(ChunkSource, &str); 2] = [
@@ -26,12 +26,17 @@ pub(super) struct Reconciled {
     /// Chunks removed because their message or memory is gone.
     pub orphans_removed: usize,
     pub memories: RecutMemories,
+    /// Memory vectors removed because no memory's chunk holds their text.
+    pub unheld_vectors_removed: usize,
 }
 
 impl Reconciled {
-    /// Whether any chunk was removed.
-    pub(super) fn removed_chunks(&self) -> bool {
-        self.built_from_another || self.orphans_removed > 0 || self.memories.replaced > 0
+    /// Whether any chunk or vector was removed.
+    pub(super) fn erased_rows(&self) -> bool {
+        self.built_from_another
+            || self.orphans_removed > 0
+            || self.memories.replaced > 0
+            || self.unheld_vectors_removed > 0
     }
 }
 
@@ -46,16 +51,19 @@ pub(super) struct RecutMemories {
 
 /// Bring the message and memory chunks in line with the attached `memory.db`: drop
 /// them all when they were cut from another, remove those whose source is gone, and
-/// cut again each memory's chunk that does not cover its value.
+/// cut again each memory's chunk that does not cover its value. Every memory then
+/// has its chunk, so the memory vectors none of them holds are removed.
 pub(super) fn reconcile(tx: &Transaction<'_>) -> rusqlite::Result<Reconciled> {
     let built_from_another = adopt_memory_database(tx)?;
     let orphans_removed = remove_orphaned_chunks(tx)?;
     lower_mark_to_stored_messages(tx)?;
     let memories = recut_changed_memories(tx, None)?;
+    let unheld_vectors_removed = delete_unheld_vectors(tx, ChunkSource::Memory)?;
     Ok(Reconciled {
         built_from_another,
         orphans_removed,
         memories,
+        unheld_vectors_removed,
     })
 }
 
@@ -162,6 +170,15 @@ pub(super) fn chunk_messages(
     tx.prepare_cached("UPDATE chunked_source SET chunked_through = max(chunked_through, ?1)")?
         .execute([last])?;
     Ok(added)
+}
+
+/// Remove the message vectors whose text no message chunk holds, returning how many;
+/// `None`, removing nothing, while a saved message waits to be chunked.
+pub(super) fn remove_unheld_message_vectors(conn: &Connection) -> rusqlite::Result<Option<usize>> {
+    if !unchunked_messages(conn, None, 1)?.is_empty() {
+        return Ok(None);
+    }
+    delete_unheld_vectors(conn, ChunkSource::Message).map(Some)
 }
 
 /// Record the attached `memory.db` as the one whose messages and memories are chunked
