@@ -29,12 +29,12 @@ fn planning_registry() -> Arc<ToolRegistry> {
         confirmation_gate: gate,
         search: None,
         docs: None,
+        stored_search: None,
     });
     planning_tools(PlanningToolDeps {
         commands,
         output_cap: Arc::new(OutputCap::new(PresentSpec::default())),
         scratch_dir: None,
-        reminisce: None,
         checks: ActionCheck::new(sandbox.search_path(), None),
     })
     .registry

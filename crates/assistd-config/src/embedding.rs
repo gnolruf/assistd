@@ -46,7 +46,7 @@ pub struct EmbeddingConfig {
     /// state, fail to parse. Any change drops the stored vectors, embedded again after.
     pub custom_args: CustomArgs<EmbeddingServer>,
     /// Nearest-neighbour matches per search: the most saved memories and past-chat
-    /// matches auto-injected, and the `reminisce` and `docs search` default. `1..=20`.
+    /// matches auto-injected, and the `search` command's default. `1..=20`.
     pub top_k: Bounded<1, 20>,
     /// Prepend matching saved memories, and one pointer per matching past chat, to a
     /// new session's first query of three or more characters; resumed sessions get

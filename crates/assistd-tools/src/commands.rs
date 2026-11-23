@@ -18,6 +18,7 @@ pub mod echo;
 pub mod ls;
 pub mod program;
 pub mod screenshot;
+pub mod search;
 pub mod see;
 pub mod web;
 pub mod wm;
@@ -34,6 +35,7 @@ pub use echo::EchoCommand;
 pub use ls::LsCommand;
 pub use program::ProgramCommand;
 pub use screenshot::{ScreenshotCommand, ScreenshotPolicyCfg};
+pub use search::{SavedSessions, SearchCommand, Searched};
 pub use see::SeeCommand;
 pub use web::WebCommand;
 pub use wm::WmCommand;
@@ -41,7 +43,7 @@ pub use write::{WriteCommand, WritePolicyCfg};
 
 #[cfg(test)]
 pub(crate) use test_support::{
-    RecordingGate, hold_fifo_open, make_fifo, permissive_write, probed_sandbox,
+    FixedEmbedder, RecordingGate, hold_fifo_open, make_fifo, permissive_write, probed_sandbox,
     register_test_readers, test_cat, test_registry, test_registry_in, test_sandbox,
     test_screenshot, test_see, test_wm,
 };

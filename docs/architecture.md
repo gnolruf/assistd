@@ -692,8 +692,9 @@ A planning turn shows how the agent means to do a piece of work before
 anything runs. The `Planner` drives the
 agent loop over a given backend with the planning registry, which
 `build_tools()` assembles beside the main one: `run` over the
-readers, `web`, `docs` with `documents.enabled`, and a `bash` whose policy
-holds no "always allow" approvals, plus `reminisce` when memory is on. No
+readers, `web`, `docs` with `documents.enabled`, `search` with that or
+`memory.enabled`, and a `bash` whose policy
+holds no "always allow" approvals. No
 `write`, `wm`, `see`, `screenshot`, `relay`, `remember` or MCP tools. The
 turn runs under
 `ConfirmRouter::for_planning`, which refuses every ask without prompting
@@ -786,13 +787,14 @@ and dispatched through an internal `CommandRegistry` of Rust handlers.
 So `cat /etc/hosts | grep -v '^#'` is one tool call that fans out into
 two commands chained by a byte-level pipe.
 
-Three additional `Tool`s sit alongside `run`: `relay` (hand a task to a
-sub-agent), `remember` (save or search facts) and `reminisce`. They don't fit the shell mold, so they're regular
+Two additional `Tool`s sit alongside `run`: `relay` (hand a task to a
+sub-agent) and `remember` (save a fact). They don't fit the shell mold, so they're regular
 LLM-facing tools with their own JSON schemas.
 
 Built-in commands: `bash`, `cat`, `docs`, `echo`, `grep`, `head`, `ls`,
-`screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`,
-`write`. `docs` is registered only with `documents.enabled`. `cat`, `ls`
+`screenshot`, `search`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`,
+`write`. `docs` is registered only with `documents.enabled`, and `search`
+with that or `memory.enabled`. `cat`, `ls`
 and `echo` run in the daemon; `cat` and `see` put
 each file through the path guards first and ask before reading
 credentials or an owner-only file in `$HOME`. `grep`, `head`,
@@ -861,8 +863,8 @@ has read. Once a tool call has read this machine into a history, `web fetch`
 asks about every URL, approved host or not, with no "always allow", and `relay`
 asks before a plan with a web step starts, showing those steps' tasks: either
 could carry what was read. `Tool::reads_host` decides what counts: every tool
-and `run` command does except `web`, a `relay` of web steps only, a `remember`
-save, and the plan-mode tools. The record (`HostReads`) travels in the `TurnContext`. The
+and `run` command does except `web`, a `relay` of web steps only, `remember`,
+and the plan-mode tools. The record (`HostReads`) travels in the `TurnContext`. The
 user's turns keep one between them. Each tool result is saved with whether its
 call read this machine (`messages.tool_read_host`), decided by the tools the
 call ran on, and when another branch becomes active the record is read back
@@ -1033,16 +1035,15 @@ document chunks in one index, 156 came to more, up to 600 tokens.
 llama-server answers an input over the count with a server error, as it
 would a fault of its own, so the client tells that refusal by its
 message and the row is marked and skipped like any other the server
-rejects; a document chunk marked so is still found by its words. A `remember` search embeds its query and ranks saved memories by
-cosine similarity; the `reminisce` tool searches transcript chunks from
-earlier sessions that way and by the query's words as well. Messages, memories and
+rejects; a document chunk marked so is still found by its words. The `search` command embeds its query and ranks saved memories, transcript chunks from
+earlier sessions and document chunks together, by cosine similarity and by the query's words. Messages, memories and
 indexed local documents own chunks in one table, but each kind's vectors
 are kept in a table of their own, so message recall never reads or ranks
 document chunks.
 Every vector is quantised to a byte per dimension. Every chunk also has its
 words in one full-text index. All of these are one search in the store,
 which is told the kinds to search and whether to rank by keyword as well
-([how](database.md#search)); a document search and `reminisce` ask for
+([how](database.md#search)); `search` asks for
 the keyword half.
 Like model requests,
 embedding requests are sent only while the embedding server's
@@ -1063,8 +1064,8 @@ The semantic store exists from daemon start, but the
 embedder sits behind an `EmbedderHandle` that is `Starting` until the
 embedding server answers. The worker starts then, and its first pass
 embeds every row still pending, whether written during startup or left
-over from an earlier run. Semantic search, reindex, `remember`
-searches and `reminisce` report "embedding is still starting" (or why it is
+over from an earlier run. Semantic search, reindex and the `search`
+command report "embedding is still starting" (or why it is
 unavailable) until then, and per-turn context injection skips recall.
 
 ### Document extraction (`assistd-documents`)
@@ -1232,7 +1233,7 @@ forgets the skipped files, asks for a round of passes and streams the progress o
 it, which is the next one when a round is already under way; it is refused
 when no worker will run, and is not held to the dispatch timeout.
 `assistd documents search <query>` (`DocumentsSearch`) ranks the documents as
-`docs search` does, without a turn.
+`search --in documents` does, without a turn.
 
 ### Page transcription (`assistd-core`)
 
@@ -1281,17 +1282,27 @@ wait, and reports none while there is no embedder to take them. The chat's
 status line shows `indexing documents` during a pass, one over changed paths
 included, and otherwise the chunks left to embed.
 
-The model reaches the index through the `docs` command, which `build_tools()`
-registers behind `run` only with `documents.enabled`; the system prompt then
-gains one line saying so. `docs search <query>` embeds the query, ranks the
-documents both by vector and by the query's words, and fuses the two rankings
-([how](database.md#search)), so an identifier, an error message, a
-name or a number is found as written. It prints
-one line per document for the `embedding.top_k` best (or `-n`, at most 20):
-path, cosine similarity (`n/a` for a chunk found by its words before it was
-embedded), the page of the best-matching chunk as `page 12 of 212`, the
-chunk's byte range within that page, the date the document was indexed, and
-the chunk. `docs read [--page P] [--offset N] <path>` prints the stored text
+The model reaches the index through two commands that `build_tools()`
+registers behind `run`: `search`, with `documents.enabled` or
+`memory.enabled`, and `docs`, only with `documents.enabled`; the system prompt
+then gains one line saying what `search` covers. `search [-n N] [--in <kinds>]
+<query>` embeds the query and ranks past sessions, saved memories and
+documents in one list, both by vector and by the query's words, fusing the two
+rankings ([how](database.md#search)), so an identifier, an error message, a
+name or a number is found as written. `--in` holds it to the kinds named,
+`sessions`, `memories` or `documents`; a kind whose setting is off is left out
+of the default, and naming it is an error that names the setting. It prints
+one line per hit for the `embedding.top_k` best (or `-n`, at most 20): the
+kind, where the passage is, cosine similarity (`n/a` for a chunk found by its
+words before it was embedded), how many other places hold the same text, and
+the chunk. Where the passage is carries what the next command takes: a
+session's short id and title with the message's time and role, a memory's key,
+or a document's path, the page of the chunk as `page 12 of 212`, the chunk's
+byte range within that page and the date the document was indexed. A message
+of the session in progress is found only once its summary has replaced it.
+`search --session <id> <query>` ranks the messages of one past session alone
+and prints each hit between the messages before and after it, hits that share
+a neighbour merged into one exchange. `docs read [--page P] [--offset N] <path>` prints the stored text
 of an indexed document from a byte of a page, pages counted from 1, which is
 how a PDF is read at all, since `cat` refuses binary files; a path that is not
 indexed is an error pointing at `cat`, and a page past the last is one that
@@ -1301,11 +1312,11 @@ more than one page each page's text follows a line naming it, `[page 13 of
 search drops the lowest-ranked hits past 8 KiB or the result cap, and a read
 stops short of the cap and names on stderr the pages and bytes shown and the
 command that continues.
-Everything either prints from a document follows a header marking it as
+Everything either prints follows a header marking it as
 untrusted data, and both count as reading this machine, so a web request later
-in the turn asks first. A search says why when it cannot run: embedding is
-not ready, nothing is indexed, or nothing indexed is embedded yet. A relay's
-quarantine has no `docs`; a sub-agent reads the inputs it was given.
+in the turn asks first. A search says why when it cannot run or finds nothing:
+embedding is not ready, or nothing in the kinds searched matches. A relay's
+quarantine has no `docs` or `search`; a sub-agent reads the inputs it was given.
 
 ### Voice (`assistd-voice`)
 
@@ -1720,10 +1731,10 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
    `document_vectors`, once for its text however many chunks hold it
    ([memory](#memory-assistd-memory--assistd-embed)).
 
-6. **Search** ([`crates/assistd-tools/src/commands/docs.rs`](../crates/assistd-tools/src/commands/docs.rs)).
+6. **Search** ([`crates/assistd-tools/src/commands/search.rs`](../crates/assistd-tools/src/commands/search.rs)).
    In a later turn the model calls `run` with
-   `docs search lease renewal terms`. `DocsCommand` embeds the query,
-   and the store ranks the documents by vector and by keyword and fuses
+   `search lease renewal terms`. `SearchCommand` embeds the query,
+   and the store ranks the documents, with the sessions and memories, by vector and by keyword and fuses
    the two ([how](database.md#search)). The hit names the
    file, page and byte range; `docs read` prints the stored text from
    there. Both print under a header marking the text as untrusted, and

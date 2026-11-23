@@ -17,12 +17,12 @@ use assistd_search::{SearchError, SearxngClient};
 use assistd_tools::{
     APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ActionCheck,
     Allowlist, AllowlistError, ApprovalGate, Approvals, CommandRegistry, ConfirmationGate,
-    MemoryOps, OutputCap, PresentSpec, Protected, RememberTool, ReminisceTool, RunTool,
-    SandboxError, SandboxInfo, SandboxRequest, SharedDirs, StandingApprovals, ToolRegistry,
-    ToolSandbox, VisionGate,
+    MemoryOps, OutputCap, PresentSpec, Protected, RememberTool, RunTool, SandboxError, SandboxInfo,
+    SandboxRequest, SharedDirs, StandingApprovals, ToolRegistry, ToolSandbox, VisionGate,
     commands::{
-        BashCommand, BashPolicyCfg, DocsCommand, ScreenshotCommand, ScreenshotPolicyCfg,
-        SeeCommand, WebCommand, WmCommand, WriteCommand, WritePolicyCfg, register_readers,
+        BashCommand, BashPolicyCfg, DocsCommand, SavedSessions, ScreenshotCommand,
+        ScreenshotPolicyCfg, SearchCommand, Searched, SeeCommand, WebCommand, WmCommand,
+        WriteCommand, WritePolicyCfg, register_readers,
     },
     presentation::is_spill_file_name,
     probe_sandbox,
@@ -101,7 +101,7 @@ pub struct BuildToolsDeps<'a> {
     pub memory_ops: Arc<MemoryOps>,
     pub embedder: Arc<EmbedderHandle>,
     pub semantic: Arc<dyn SemanticStore>,
-    /// The active session, whose messages still in context `reminisce` excludes.
+    /// The active session, whose messages still in context `search` excludes.
     pub current_session: watch::Receiver<SessionId>,
     pub window_manager: Arc<dyn WindowManager>,
     /// Readiness of the SearXNG instance `web search` goes through.
@@ -151,8 +151,8 @@ pub fn mcp_tool_approvals(config_path: &Path) -> Result<Approvals, BuildToolsErr
 }
 
 /// Assemble the tool registry: the built-in commands behind `run`, `docs` among them only
-/// with `documents.enabled`, `relay` and, with `memory.enabled`, the memory tools; and beside
-/// it the planning registry. Removes earlier spill files from [`BuildToolsDeps::overflow_dir`].
+/// with `documents.enabled` and `search` with that or `memory.enabled`, `relay` and, with
+/// `memory.enabled`, `remember`; and beside it the planning registry. Removes earlier spill files from [`BuildToolsDeps::overflow_dir`].
 pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsError> {
     let BuildToolsDeps {
         config,
@@ -188,14 +188,16 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
         &config.tools.output,
         overflow_dir,
     )));
-    let reminisce = config.memory.enabled.then(|| {
-        ReminisceTool::new(
-            embedder.clone(),
-            semantic.clone(),
-            Arc::clone(&memory_ops.transcripts),
-            current_session.clone(),
-        )
-    });
+    let stored_text = StoredText {
+        config,
+        embedder: &embedder,
+        semantic: &semantic,
+        sessions: SavedSessions {
+            transcripts: Arc::clone(&memory_ops.transcripts),
+            current: current_session,
+        },
+        output_cap: &output_cap,
+    };
     let planning = planning_tools(PlanningToolDeps {
         commands: planning_commands(PlanningCommandDeps {
             bash_cfg: Arc::clone(&bash_cfg),
@@ -203,11 +205,11 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
             sandbox: Arc::clone(&sandbox),
             confirmation_gate: Arc::clone(&confirmation_gate),
             search: search.clone(),
-            docs: docs_command(config, &embedder, &semantic, &output_cap),
+            docs: stored_text.docs_command(),
+            stored_search: stored_text.search_command(),
         }),
         output_cap: Arc::clone(&output_cap),
         scratch_dir: scratch_dir.as_deref(),
-        reminisce,
         checks,
     });
     let relay = RelayTool::new(
@@ -235,7 +237,8 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
         vision_gate,
         window_manager,
         search,
-        docs: docs_command(config, &embedder, &semantic, &output_cap),
+        docs: stored_text.docs_command(),
+        stored_search: stored_text.search_command(),
     });
 
     let run = RunTool::new(Arc::new(commands), Arc::clone(&output_cap));
@@ -246,7 +249,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
     });
     tools.register(relay);
     if config.memory.enabled {
-        register_memory_tools(&mut tools, memory_ops, embedder, semantic, current_session);
+        tools.register(RememberTool::new(memory_ops));
     }
     Ok(BuiltTools {
         registry: Arc::new(tools),
@@ -254,45 +257,38 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
     })
 }
 
-/// `docs` over the document index, its results sized to fit `output_cap`; `None`
-/// unless `documents.enabled`.
-fn docs_command(
-    config: &Config,
-    embedder: &Arc<EmbedderHandle>,
-    semantic: &Arc<dyn SemanticStore>,
-    output_cap: &OutputCap,
-) -> Option<DocsCommand> {
-    config.documents.enabled.then(|| {
-        DocsCommand::new(
-            Arc::clone(embedder),
-            semantic.clone(),
-            semantic.clone(),
-            config.embedding.top_k.get() as usize,
-            output_cap.spec(),
-        )
-    })
+/// What the commands over stored text are built from.
+struct StoredText<'a> {
+    config: &'a Config,
+    embedder: &'a Arc<EmbedderHandle>,
+    semantic: &'a Arc<dyn SemanticStore>,
+    sessions: SavedSessions,
+    output_cap: &'a OutputCap,
 }
 
-/// Register `remember` over `memory_ops`' store, and `reminisce`.
-fn register_memory_tools(
-    tools: &mut ToolRegistry,
-    memory_ops: Arc<MemoryOps>,
-    embedder: Arc<EmbedderHandle>,
-    semantic: Arc<dyn SemanticStore>,
-    current_session: watch::Receiver<SessionId>,
-) {
-    let transcripts = Arc::clone(&memory_ops.transcripts);
-    tools.register(RememberTool::new(
-        memory_ops,
-        embedder.clone(),
-        semantic.clone(),
-    ));
-    tools.register(ReminisceTool::new(
-        embedder,
-        semantic,
-        transcripts,
-        current_session,
-    ));
+impl StoredText<'_> {
+    /// `docs` over the document index, its results sized to fit the output cap;
+    /// `None` unless `documents.enabled`.
+    fn docs_command(&self) -> Option<DocsCommand> {
+        self.config
+            .documents
+            .enabled
+            .then(|| DocsCommand::new(self.semantic.clone(), self.output_cap.spec()))
+    }
+
+    /// `search` over sessions and memories with `memory.enabled` and over documents
+    /// with `documents.enabled`; `None` when both are off.
+    fn search_command(&self) -> Option<SearchCommand> {
+        let sessions = self.config.memory.enabled.then(|| self.sessions.clone());
+        let searched = Searched::enabled(sessions, self.config.documents.enabled)?;
+        Some(SearchCommand::new(
+            Arc::clone(self.embedder),
+            self.semantic.clone(),
+            searched,
+            self.config.embedding.top_k.get() as usize,
+            self.output_cap.spec(),
+        ))
+    }
 }
 
 /// The approved apps, and the checks a plan's actions face: the sandbox's programs, and the
@@ -371,18 +367,15 @@ pub(crate) struct PlanningToolDeps<'a> {
     pub(crate) commands: CommandRegistry,
     pub(crate) output_cap: Arc<OutputCap>,
     pub(crate) scratch_dir: Option<&'a Path>,
-    pub(crate) reminisce: Option<ReminisceTool>,
     pub(crate) checks: ActionCheck,
 }
 
-/// `run` over `commands` and, with memory on, `reminisce`, each reporting refusals as
-/// [`PlanModeTool`] does.
+/// `run` over `commands`, reporting refusals as [`PlanModeTool`] does.
 pub(crate) fn planning_tools(deps: PlanningToolDeps<'_>) -> PlanningTools {
     let PlanningToolDeps {
         commands,
         output_cap,
         scratch_dir,
-        reminisce,
         checks,
     } = deps;
     let run = RunTool::new(Arc::new(commands), Arc::clone(&output_cap));
@@ -391,9 +384,6 @@ pub(crate) fn planning_tools(deps: PlanningToolDeps<'_>) -> PlanningTools {
         Some(scratch_dir) => run.with_scratch_dir(scratch_dir),
         None => run,
     }));
-    if let Some(reminisce) = reminisce {
-        registry.register(PlanModeTool::new(reminisce));
-    }
     PlanningTools {
         registry: Arc::new(registry),
         checks,
@@ -407,9 +397,10 @@ pub(crate) struct PlanningCommandDeps {
     pub(crate) confirmation_gate: Arc<dyn ConfirmationGate>,
     pub(crate) search: Option<SearxngClient>,
     pub(crate) docs: Option<DocsCommand>,
+    pub(crate) stored_search: Option<SearchCommand>,
 }
 
-/// The commands of a planning turn: the readers, `web`, `docs` when given, and `bash`, with no
+/// The commands of a planning turn: the readers, `web`, `docs` and `search` when given, and `bash`, with no
 /// "always allow" approvals, so a script or text program run unasked is read-only by its own class.
 pub(crate) fn planning_commands(deps: PlanningCommandDeps) -> CommandRegistry {
     let PlanningCommandDeps {
@@ -419,6 +410,7 @@ pub(crate) fn planning_commands(deps: PlanningCommandDeps) -> CommandRegistry {
         confirmation_gate,
         search,
         docs,
+        stored_search,
     } = deps;
     let unapproved = BashPolicyCfg {
         allowlist: Arc::new(Allowlist::unsaved(sandbox.search_path())),
@@ -430,6 +422,9 @@ pub(crate) fn planning_commands(deps: PlanningCommandDeps) -> CommandRegistry {
     commands.register(WebCommand::new(approved_hosts, search));
     if let Some(docs) = docs {
         commands.register(docs);
+    }
+    if let Some(stored_search) = stored_search {
+        commands.register(stored_search);
     }
     commands.register(BashCommand::new(unapproved, sandbox, confirmation_gate));
     commands
@@ -447,6 +442,7 @@ struct BuiltinCommandDeps {
     window_manager: Arc<dyn WindowManager>,
     search: Option<SearxngClient>,
     docs: Option<DocsCommand>,
+    stored_search: Option<SearchCommand>,
 }
 
 fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
@@ -462,6 +458,7 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
         window_manager,
         search,
         docs,
+        stored_search,
     } = deps;
 
     let mut commands = CommandRegistry::new();
@@ -480,6 +477,9 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
     commands.register(WebCommand::new(approved_hosts, search));
     if let Some(docs) = docs {
         commands.register(docs);
+    }
+    if let Some(stored_search) = stored_search {
+        commands.register(stored_search);
     }
     commands.register(BashCommand::new(
         bash_cfg.clone(),

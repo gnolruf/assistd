@@ -1,11 +1,12 @@
-//! Session-scoped `reminisce` hits laid out as runs of consecutive chunks, so
-//! hits that share a neighbour read as one exchange.
+//! `search --session` hits laid out as runs of consecutive chunks, so hits that
+//! share a neighbour read as one exchange.
 
 use std::iter;
 
 use assistd_memory::{AdjacentChunks, ChunkId, ChunkLocator, ContextChunk, SearchHit};
+use assistd_utils::text::collapse_whitespace;
 
-use super::{hit_score, locator_tag, one_line};
+use super::{hit_score, locator_tag};
 
 /// One printed chunk; `score` is set when the chunk was itself a hit.
 #[derive(Debug, Clone)]
@@ -43,7 +44,7 @@ impl ExchangeLine {
         format!(
             "{}{score}] {}",
             locator_tag(&self.locator),
-            one_line(&self.text)
+            collapse_whitespace(&self.text)
         )
     }
 }

@@ -409,8 +409,8 @@ resumed, saying which.
   though no query finds them, stay in the file until then. Words are split at every character that is not a
   letter or a digit and compared without case or accents, so
   `read_regular_file` is indexed as `read`, `regular`, `file` in a row.
-  Only a document search reads it so far, held to document chunks;
-  messages and memories are ranked by vector alone. On the document
+  The `search` command reads it for every kind it ranks; recalled
+  context ranks by vector alone. On the document
   index measured below it takes
   25 MB beside 62 MB of page text and 124 MB of vectors.
 - **`embedding_meta`**: the one row naming what produced every stored
@@ -423,7 +423,7 @@ resumed, saying which.
   `embedding.query_prefix` is not recorded: it shapes only the query
   vector, which is never stored.
 
-Every search (`recall`, `reminisce`, `remember`, `docs search`) is one
+Every search (recalled context, the `search` command) is one
 store call that names the kinds it searches, and it scans every vector
 of each of those kinds and keeps the top matches; there is no vector
 index. A search that takes in documents runs on a read-only connection
@@ -434,9 +434,10 @@ too few documents and more vectors remain, it scans again through the
 chunks, keeping one chunk a document, so one long document never crowds
 out the rest. A message search reaches each vector through its chunk,
 which drops the messages outside the search's sessions before any is
-ranked; `reminisce` leaves out the current session's messages. What is
+ranked; `search` leaves out the current session's messages that are
+still in the model's context. What is
 kept of each kind is merged by similarity, which one embedding space and
-one stored form make comparable across kinds. `docs search` ranks by
+one stored form make comparable across kinds. `search` ranks by
 keyword as well, as [Search](#search) describes.
 
 One scan of quantised 768-dimension vectors, measured on a Ryzen 7
@@ -473,9 +474,9 @@ document, shown through its best-ranked chunk.
 | Caller                                         | Kinds     | Ranked by          |
 |------------------------------------------------|-----------|--------------------|
 | Recalled context                               | memories, then messages of other sessions | vector, above `embedding.min_similarity` |
-| `remember` search                              | memories  | vector             |
-| `reminisce`, `assistd memory reminisce`        | messages  | vector and keyword |
-| `docs search`, `assistd documents search`      | documents | vector and keyword |
+| `search`                                       | the kinds enabled, or those `--in` names | vector and keyword |
+| `search --session`, `assistd memory reminisce` | messages  | vector and keyword |
+| `assistd documents search`                     | documents | vector and keyword |
 
 Embeddings match meaning and miss exact strings: an identifier, an error
 message, a name, an invoice number. So a search that asks for it ranks
@@ -501,7 +502,7 @@ order is the order of similarity.
 
 A text several messages or documents hold is one hit: the best-ranked
 of them, with the count of the others among the kinds and sessions
-searched. Four copies of a file are one line of `docs search`, not four.
+searched. Four copies of a file are one line of `search`, not four.
 Memories are never folded: two keys saved with one value are two hits.
 
 A chunk needs no vector to be found by its words, so a document or a
@@ -510,9 +511,8 @@ such a hit has no similarity to report. Recalled context holds its hits to a sim
 which a match by words alone does not have, so it ranks by vector only.
 
 The figures below were measured on documents. Messages are fused with
-the same constants, which have not been measured on them, and a
-`remember` search ranks by vector alone: only a memory's value has its
-words indexed, not its key.
+the same constants, which have not been measured on them, and so are
+memories, of which only the value has its words indexed, not the key.
 
 Keywords are matched per chunk, not per page or per document: the chunk
 that matched is then the passage to show, and BM25 compares texts of one

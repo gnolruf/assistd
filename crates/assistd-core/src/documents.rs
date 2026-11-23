@@ -29,10 +29,14 @@ pub use transcribe::{
 /// directory that holds the one it is in.
 const PRIVATE_LIBRARY_DIR: &str = "lib/assistd";
 
-/// What the system prompt says of document search while `documents.enabled`.
-const SEARCH_NOTE: &str = "The user's indexed documents can be searched by meaning and by exact \
-     words with the `run` command `docs search <words>`, and one that a hit names read with \
-     `docs read <path>`.";
+const SEARCH_NOTE_MEMORY: &str = "One `run` command, `search <words>`, searches past sessions \
+     and saved memories together, by meaning and by exact words.";
+const SEARCH_NOTE_DOCUMENTS: &str = "The user's indexed documents can be searched by meaning \
+     and by exact words with the `run` command `search <words>`, and one that a hit names read \
+     with `docs read <path>`.";
+const SEARCH_NOTE_ALL: &str = "One `run` command, `search <words>`, searches past sessions, \
+     saved memories and the user's indexed documents together, by meaning and by exact words; \
+     a document that a hit names is read with `docs read <path>`.";
 
 /// Why no extraction worker runs, so no document is indexed.
 #[derive(Debug, thiserror::Error)]
@@ -55,14 +59,20 @@ pub enum DocumentsUnavailable {
     Exclude(#[source] ignore::Error),
 }
 
-/// `chat.system_prompt` as it is sent: followed, unless it is blank or `documents.enabled`
-/// is off, by a line saying the indexed documents can be searched and read with `docs`.
+/// `chat.system_prompt` as it is sent: followed, unless it is blank, by a line saying
+/// what `search` covers, with `memory.enabled` or `documents.enabled` on.
 pub fn system_prompt(config: &Config) -> String {
     let written = &config.chat.system_prompt;
-    if config.documents.enabled && !written.trim().is_empty() {
-        format!("{written}\n\n{SEARCH_NOTE}")
-    } else {
+    let note = match (config.memory.enabled, config.documents.enabled) {
+        (true, true) => SEARCH_NOTE_ALL,
+        (true, false) => SEARCH_NOTE_MEMORY,
+        (false, true) => SEARCH_NOTE_DOCUMENTS,
+        (false, false) => return written.clone(),
+    };
+    if written.trim().is_empty() {
         written.clone()
+    } else {
+        format!("{written}\n\n{note}")
     }
 }
 

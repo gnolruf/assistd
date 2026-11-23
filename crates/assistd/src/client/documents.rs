@@ -41,7 +41,7 @@ pub(crate) enum DocumentsAction {
         quiet: bool,
     },
     /// Rank the indexed documents by meaning and by the query's exact words, as the
-    /// model's `docs search` does. One tab-separated row per document, best first: path,
+    /// model's `search --in documents` does. One tab-separated row per document, best first: path,
     /// similarity, page, byte range within the page, index date, best-matching passage.
     Search {
         /// Cap on the documents listed; the daemon's `embedding.top_k` when omitted.

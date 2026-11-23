@@ -21,12 +21,13 @@ window-manager bindings), and integrates with the running compositor for context
   `&&`, `||`, `;`, plus `~` and glob expansion. `web` both fetches
   pages as readable text and, with a local SearXNG installed, searches
   the web ([web search](docs/web-search.md)). With folders indexed
-  (`[documents]`), `docs` searches them by meaning and by keyword and
-  reads what it finds: text, HTML, PDFs, office files and e-books. Scanned
+  (`[documents]`), `search` finds them by meaning and by keyword and
+  `docs` reads what it finds: text, HTML, PDFs, office files and e-books. Scanned
   PDF pages are read by an optional OCR model (`[documents.ocr]`) while
   the daemon is drowsy ([document search](docs/documents.md)).
-  Alongside `run`, `remember` saves and looks up facts, and `reminisce`
-  searches transcripts from earlier sessions.
+  That one `search` also covers saved memories and the transcripts of
+  earlier sessions, in one ranking. Alongside `run`, `remember` saves
+  facts.
 - **Voice in/out.** Push-to-talk and hands-free
   [wake-word listening](docs/voice/wake-word.md) via Parakeet speech-to-text,
   with the wake phrase found by a keyword spotter and tested in the chat

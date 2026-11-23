@@ -39,7 +39,7 @@ const SUMMARY_INSTRUCTION_RULES: &str = "Start with where things stand now: what
     request, conclusion, and what each tool call found. Keep every approach that failed and why, \
     and every limit discovered in the tools or environment (commands or flags that are \
     unsupported, hosts that are unreachable, paths that do not exist), so none is retried. If you \
-    have the `reminisce` tool, the summarized messages stay searchable with it, so favour state \
+    have the `search` command, the summarized messages stay searchable with it, so favour state \
     and decisions over verbatim detail. Write with no preamble or commentary.";
 const TOKENS_PER_MESSAGE_OVERHEAD: u32 = 4;
 /// Per-image token weight before calibration; the real cost depends on the
