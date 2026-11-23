@@ -211,56 +211,70 @@ CREATE TABLE page_transcriptions (
 CREATE INDEX idx_page_transcriptions_waiting ON page_transcriptions(document_id, page)
     WHERE state = 0;
 
--- A byte range into the content of the one message or document page that owns it.
--- `hash` is the first 16 bytes of the SHA-256 of the bytes the range covers.
+-- A byte range into the text a chunk is cut from: `kind` is 0 for a message's content,
+-- 1 for a memory's value, 2 for a document page's content, and `source` is the id of
+-- that message, memory or document. `page` is 0 unless the source is a document.
+-- `hash` is the first 16 bytes of the SHA-256 of the bytes the range covers. The id
+-- is also the chunk's rowid in `chunk_words`.
 CREATE TABLE chunks (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id  INTEGER REFERENCES messages(id) ON DELETE CASCADE,
-    document_id INTEGER,
-    page        INTEGER,
-    byte_start  INTEGER NOT NULL,
-    byte_end    INTEGER NOT NULL,
-    hash        BLOB NOT NULL CHECK (length(hash) = 16),
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 2),
+    source     INTEGER NOT NULL,
+    page       INTEGER NOT NULL CHECK (page >= 0),
+    byte_start INTEGER NOT NULL,
+    byte_end   INTEGER NOT NULL,
+    hash       BLOB NOT NULL CHECK (length(hash) = 16),
     CHECK (byte_start >= 0 AND byte_end > byte_start),
-    CHECK ((message_id IS NULL) <> (document_id IS NULL)),
-    CHECK ((document_id IS NULL) = (page IS NULL)),
-    UNIQUE (message_id, byte_start),
-    UNIQUE (document_id, page, byte_start),
-    FOREIGN KEY (document_id, page)
-        REFERENCES document_pages(document_id, page) ON DELETE CASCADE
+    CHECK (kind = 2 OR page = 0),
+    UNIQUE (kind, source, page, byte_start)
 ) STRICT;
 CREATE INDEX idx_chunks_hash ON chunks(hash);
 
--- The words of each document chunk, for keyword search, without its text. A row has
--- its chunk's id; the write that cuts a chunk adds it, and the trigger removes it.
-CREATE VIRTUAL TABLE document_chunk_fts USING fts5(text, content='', contentless_delete=1);
-
-CREATE TRIGGER document_chunk_removed AFTER DELETE ON chunks
-WHEN old.document_id IS NOT NULL
+-- These three stand in for the foreign keys `chunks.source` cannot have.
+CREATE TRIGGER message_removed AFTER DELETE ON messages
 BEGIN
-    DELETE FROM document_chunk_fts WHERE rowid = old.id;
+    DELETE FROM chunks WHERE kind = 0 AND source = old.id;
 END;
 
--- The chunk texts a write removed a chunk of, by `chunks.hash`; `of_document` is 1 for
--- a document chunk's. The write that fills it empties it before it commits.
+CREATE TRIGGER memory_removed AFTER DELETE ON memories
+BEGIN
+    DELETE FROM chunks WHERE kind = 1 AND source = old.id;
+END;
+
+CREATE TRIGGER document_page_removed AFTER DELETE ON document_pages
+BEGIN
+    DELETE FROM chunks WHERE kind = 2 AND source = old.document_id AND page = old.page;
+END;
+
+-- The words of every chunk, for keyword search, without its text. A row has its
+-- chunk's id; the write that cuts a chunk adds it, and the trigger removes it.
+CREATE VIRTUAL TABLE chunk_words USING fts5(text, content='', contentless_delete=1);
+
+-- The chunk texts a write removed a chunk of, by `chunks.kind` and `chunks.hash`.
+-- The write that fills it empties it before it commits.
 CREATE TABLE removed_chunk_texts (
-    of_document INTEGER NOT NULL CHECK (of_document IN (0, 1)),
-    hash        BLOB NOT NULL CHECK (length(hash) = 16),
-    PRIMARY KEY (of_document, hash)
+    kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 2),
+    hash BLOB NOT NULL CHECK (length(hash) = 16),
+    PRIMARY KEY (kind, hash)
 ) STRICT, WITHOUT ROWID;
 
-CREATE TRIGGER chunk_text_removed AFTER DELETE ON chunks
+CREATE TRIGGER chunk_removed AFTER DELETE ON chunks
 BEGIN
-    INSERT INTO removed_chunk_texts (of_document, hash)
-    VALUES (old.document_id IS NOT NULL, old.hash)
+    DELETE FROM chunk_words WHERE rowid = old.id;
+    INSERT INTO removed_chunk_texts (kind, hash)
+    VALUES (old.kind, old.hash)
     ON CONFLICT DO NOTHING;
 END;
 
--- The vector of each distinct text the message chunks hold, by `chunks.hash`, and
--- the same for document chunks. A vector is a little-endian `f32` step, then one
--- `i8` count of steps per dimension. In all three embedding tables a NULL vector
--- marks text the model could not embed, so it is not retried.
+-- The vector of each distinct text the chunks of one kind hold, by `chunks.hash`.
+-- A vector is a little-endian `f32` step, then one `i8` count of steps per
+-- dimension. A NULL vector marks text the model could not embed, so it is not retried.
 CREATE TABLE message_vectors (
+    hash   BLOB NOT NULL UNIQUE CHECK (length(hash) = 16),
+    vector BLOB CHECK (length(vector) > 4)
+) STRICT;
+
+CREATE TABLE memory_vectors (
     hash   BLOB NOT NULL UNIQUE CHECK (length(hash) = 16),
     vector BLOB CHECK (length(vector) > 4)
 ) STRICT;
@@ -269,18 +283,6 @@ CREATE TABLE document_vectors (
     hash   BLOB NOT NULL UNIQUE CHECK (length(hash) = 16),
     vector BLOB CHECK (length(vector) > 4)
 ) STRICT;
-
--- A memory vector is little-endian `f32`s.
-CREATE TABLE memory_embeddings (
-    memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
-    vector    BLOB CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
-) STRICT;
-
-CREATE TRIGGER memory_value_changed AFTER UPDATE OF value ON memories
-WHEN old.value IS NOT new.value
-BEGIN
-    DELETE FROM memory_embeddings WHERE memory_id = new.id;
-END;
 
 -- At most one row: the embedding space every stored vector is in.
 CREATE TABLE embedding_meta (

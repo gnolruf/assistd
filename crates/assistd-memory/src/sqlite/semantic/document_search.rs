@@ -26,9 +26,9 @@ const NEAREST_TEXTS: usize = 10 * CANDIDATES_PER_RANKING;
 
 /// Every document chunk with the vector of its text, grouped by its document.
 const DOCUMENT_CHUNK_VECTORS: &str = "
-    SELECT cc.document_id, cc.id, v.vector
+    SELECT cc.source, cc.id, v.vector
     FROM chunks cc JOIN document_vectors v ON v.hash = cc.hash
-    WHERE cc.document_id IS NOT NULL AND v.vector IS NOT NULL";
+    WHERE cc.kind = 2 AND v.vector IS NOT NULL";
 
 /// Added to a rank before it is inverted into a score. The smaller it is, the more a
 /// top rank in one ranking outweighs middling ranks in both.
@@ -79,16 +79,17 @@ fn match_expression(query: &str) -> Option<String> {
     (!phrases.is_empty()).then(|| phrases.join(" OR "))
 }
 
-/// The documents whose chunks hold words of `query`, by their best chunk's BM25.
+/// The documents whose chunks hold words of `query`, by their best chunk's BM25;
+/// the chunks of messages and memories that hold them are left out.
 fn keyword_ranking(conn: &Connection, query: &str) -> rusqlite::Result<Vec<Candidate>> {
     let Some(expression) = match_expression(query) else {
         return Ok(Vec::new());
     };
     conn.prepare_cached(
-        "SELECT cc.document_id, f.rowid, min(f.rank) AS best
-         FROM document_chunk_fts f JOIN chunks cc ON cc.id = f.rowid
-         WHERE document_chunk_fts MATCH ?1
-         GROUP BY cc.document_id
+        "SELECT cc.source, f.rowid, min(f.rank) AS best
+         FROM chunk_words f JOIN chunks cc ON cc.id = f.rowid
+         WHERE chunk_words MATCH ?1 AND cc.kind = 2
+         GROUP BY cc.source
          ORDER BY best
          LIMIT ?2",
     )?
@@ -106,14 +107,8 @@ fn keyword_ranking(conn: &Connection, query: &str) -> rusqlite::Result<Vec<Candi
 
 /// The documents nearest `query`, by their best chunk's cosine.
 fn vector_ranking(conn: &Connection, query: &[f32]) -> rusqlite::Result<Vec<Candidate>> {
-    let nearest = scan_top_k::<TextHash, TextHash>(
-        conn,
-        DOCUMENT_TEXT_VECTORS,
-        [],
-        query,
-        score_against_quantised,
-        NEAREST_TEXTS,
-    )?;
+    let nearest =
+        scan_top_k::<TextHash, TextHash>(conn, DOCUMENT_TEXT_VECTORS, [], query, NEAREST_TEXTS)?;
     let more_texts_unscanned = nearest.len() == NEAREST_TEXTS;
     let candidates = documents_holding(conn, nearest)?;
     if candidates.len() < CANDIDATES_PER_RANKING && more_texts_unscanned {
@@ -129,8 +124,8 @@ fn documents_holding(
     texts: Vec<(TextHash, f32)>,
 ) -> rusqlite::Result<Vec<Candidate>> {
     let mut holders = conn.prepare_cached(
-        "SELECT document_id, id FROM chunks
-         WHERE hash = ?1 AND document_id IS NOT NULL
+        "SELECT source, id FROM chunks
+         WHERE hash = ?1 AND kind = 2
          ORDER BY id",
     )?;
     let mut candidates: Vec<Candidate> = Vec::new();
@@ -158,10 +153,9 @@ fn ranking_by_chunk(conn: &Connection, query: &[f32]) -> rusqlite::Result<Vec<Ca
         DOCUMENT_CHUNK_VECTORS,
         [],
         query,
-        score_against_quantised,
         CANDIDATES_PER_RANKING,
     )?;
-    let mut owner = conn.prepare_cached("SELECT document_id FROM chunks WHERE id = ?1")?;
+    let mut owner = conn.prepare_cached("SELECT source FROM chunks WHERE id = ?1")?;
     nearest
         .into_iter()
         .map(|(chunk, _)| {

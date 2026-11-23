@@ -1,14 +1,16 @@
-//! SQLite conversions for the typed columns: row ids, seqs, and role and chunker
-//! codes as `INTEGER`, session ids as hyphenated UUID `TEXT`.
+//! SQLite conversions for the typed columns: row ids, seqs, and role, chunker and
+//! chunk kind codes as `INTEGER`, session ids as hyphenated UUID `TEXT`.
 
 use rusqlite::ToSql;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 
 use crate::chunking::Chunker;
 use crate::{
-    BranchId, ChunkId, DocumentId, MemoryId, MessageId, PersistedRole, Seq, SessionId, SkippedRead,
-    TurnId,
+    BranchId, ChunkId, ChunkSource, DocumentId, MemoryId, MessageId, PersistedRole, Seq, SessionId,
+    SkippedRead, TurnId,
 };
+
+use super::chunks::kind_code;
 
 macro_rules! row_id_sql {
     ($($name:ident),+) => {$(
@@ -98,6 +100,12 @@ impl FromSql for SkippedRead {
             8 => Ok(SkippedRead::TimedOut),
             code => Err(FromSqlError::OutOfRange(code)),
         }
+    }
+}
+
+impl ToSql for ChunkSource {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(kind_code(*self)))
     }
 }
 

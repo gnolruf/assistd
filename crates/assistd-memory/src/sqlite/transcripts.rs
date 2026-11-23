@@ -12,14 +12,15 @@ use tracing::warn;
 
 use assistd_ipc::{TaskId, TaskName, TaskRunId, TaskRunSummary};
 
-use crate::chunking::{ChunkingConfig, chunk_ranges, text_hash};
+use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
-    AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, ChunkId, HistoryRow,
-    HistoryScope, MemoryError, MessageId, MessageKind, OpenedTurn, PersistedMessage,
+    AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, ChunkId, ChunkSource,
+    HistoryRow, HistoryScope, MemoryError, MessageId, MessageKind, OpenedTurn, PersistedMessage,
     PersistedRelayStep, PersistedRole, PersistedToolCall, Reasoning, Result, ResumeCandidate, Seq,
     SessionId, ToolOutcome, TranscriptStore, TurnId, TurnStats, UndoOutcome,
 };
 
+use super::chunks::{ChunkOwner, insert_chunk};
 use super::connection::{Erasing, SqliteHandle};
 use super::rows::decodable_rows;
 use super::tasks::run_state_at;
@@ -709,19 +710,10 @@ fn insert_chunks(
     content: &str,
     chunk_bytes: &[Range<usize>],
 ) -> rusqlite::Result<Vec<ChunkId>> {
-    let mut insert = tx.prepare_cached(
-        "INSERT INTO chunks (message_id, byte_start, byte_end, hash)
-         VALUES (?1, ?2, ?3, ?4)
-         RETURNING id",
-    )?;
     chunk_bytes
         .iter()
         .map(|bytes| {
-            let hash = text_hash(&content.as_bytes()[bytes.clone()]);
-            insert.query_row(
-                rusqlite::params![message, bytes.start, bytes.end, hash],
-                |r| r.get(0),
-            )
+            insert_chunk(tx, ChunkOwner::Message(message), content, bytes).map(|(chunk, _)| chunk)
         })
         .collect()
 }
@@ -733,10 +725,14 @@ fn cut_missing_chunks(tx: &Transaction<'_>) -> rusqlite::Result<u64> {
         .prepare(
             "SELECT m.id, m.content FROM messages m
              WHERE m.role IN (?1, ?2) AND m.content != ''
-               AND NOT EXISTS (SELECT 1 FROM chunks cc WHERE cc.message_id = m.id)",
+               AND NOT EXISTS (SELECT 1 FROM chunks cc WHERE cc.kind = ?3 AND cc.source = m.id)",
         )?
         .query_map(
-            rusqlite::params![PersistedRole::User, PersistedRole::Assistant],
+            rusqlite::params![
+                PersistedRole::User,
+                PersistedRole::Assistant,
+                ChunkSource::Message
+            ],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?
         .collect::<rusqlite::Result<_>>()?;

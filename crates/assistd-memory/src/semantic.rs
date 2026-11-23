@@ -1,5 +1,5 @@
-//! Retrieval over transcript and document chunks and saved memories: by vector, and
-//! for documents by their words as well.
+//! Retrieval over the chunks cut from transcripts, saved memories and documents: by
+//! vector, and for documents by their words as well.
 
 use std::fmt;
 use std::fs::Metadata;
@@ -193,6 +193,8 @@ pub enum SessionScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkSource {
     Message,
+    /// A saved memory, whose whole value is one chunk.
+    Memory,
     Document,
 }
 
@@ -205,20 +207,11 @@ pub struct MemoryHit {
     pub similarity: f32,
 }
 
-/// What an embedding is stored for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmbeddingTarget {
-    /// Every chunk cut from this kind of source that holds the embedded text.
-    ChunkText(ChunkSource),
-    /// The memory whose value is the embedded text.
-    Memory(MemoryId),
-}
-
-/// The L2-normalised embedding of `text` for `target`, or no `vector` when the model
-/// cannot embed that text.
+/// The L2-normalised embedding of `text` for every chunk cut from `source` that holds
+/// it, or no `vector` when the model cannot embed that text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Embedding {
-    pub target: EmbeddingTarget,
+    pub source: ChunkSource,
     pub text: String,
     pub vector: Option<Vec<f32>>,
 }
@@ -236,7 +229,7 @@ pub struct EmbeddingSpace {
     pub document_prefix: String,
 }
 
-/// Chunks and memories whose text is neither embedded nor marked unembeddable.
+/// Chunks of each kind whose text is neither embedded nor marked unembeddable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UnindexedRows {
     pub message_chunks: u64,
@@ -393,8 +386,8 @@ pub trait RecallStore: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Option<DocumentText>>;
 }
 
-/// The texts still to embed and the vectors stored for them, all in one embedding space.
-/// A chunk's vector is stored once for its text, whichever chunks of its kind hold it.
+/// The chunk texts still to embed and the vectors stored for them, all in one embedding
+/// space. A vector is stored once for its text, whichever chunks of its kind hold it.
 #[async_trait]
 pub trait EmbeddingQueue: fmt::Debug + Send + Sync + 'static {
     /// Record `space` as the one every stored vector is in. When a different space was
@@ -407,16 +400,8 @@ pub trait EmbeddingQueue: fmt::Debug + Send + Sync + 'static {
     /// leaves none does not signal it.
     fn rows_to_embed(&self) -> Arc<Notify>;
 
-    /// Chunks and memories whose text is neither embedded nor marked unembeddable.
+    /// Chunks of each kind whose text is neither embedded nor marked unembeddable.
     async fn count_missing(&self) -> Result<UnindexedRows>;
-
-    /// Up to `limit` memories after `after` (from the start when `None`) neither
-    /// embedded nor marked unembeddable, in id order, as `(id, value)`.
-    async fn memories_missing_embedding(
-        &self,
-        after: Option<MemoryId>,
-        limit: usize,
-    ) -> Result<Vec<(MemoryId, String)>>;
 
     /// Up to `limit` chunks cut from `source` after `after` (from the start when `None`)
     /// whose text is neither embedded nor marked unembeddable, in id order, as
@@ -428,9 +413,8 @@ pub trait EmbeddingQueue: fmt::Debug + Send + Sync + 'static {
         limit: usize,
     ) -> Result<Vec<(ChunkId, String)>>;
 
-    /// Upsert `embeddings` in one transaction, skipping chunk texts no chunk of their
-    /// kind holds any more, memories deleted since they were embedded and memories
-    /// whose value no longer matches. One with no vector marks its text unembeddable.
+    /// Upsert `embeddings` in one transaction, skipping texts no chunk of their kind
+    /// holds any more. One with no vector marks its text unembeddable.
     async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> Result<()>;
 
     /// Clear every unembeddable mark, returning how many, so those rows are missing again.
@@ -589,13 +573,6 @@ impl EmbeddingQueue for NoSemanticStore {
     }
     async fn count_missing(&self) -> Result<UnindexedRows> {
         Ok(UnindexedRows::default())
-    }
-    async fn memories_missing_embedding(
-        &self,
-        _after: Option<MemoryId>,
-        _limit: usize,
-    ) -> Result<Vec<(MemoryId, String)>> {
-        Ok(Vec::new())
     }
     async fn chunks_missing_embedding(
         &self,

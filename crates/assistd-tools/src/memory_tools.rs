@@ -539,8 +539,8 @@ mod tests {
     use assistd_embed::EmbedError;
     use assistd_memory::{
         AdjacentChunks, BranchId, BranchSummary, ChunkSource, DocumentHit, DocumentText, Embedding,
-        EmbeddingQueue, EmbeddingTarget, MemoryError, MemoryStore, NoSemanticStore,
-        PersistedMessage, Seq, SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore,
+        EmbeddingQueue, MemoryError, MemoryStore, NoSemanticStore, PersistedMessage, Seq,
+        SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -701,7 +701,7 @@ mod tests {
                 .await
                 .unwrap();
             let embedding = Embedding {
-                target: EmbeddingTarget::ChunkText(ChunkSource::Message),
+                source: ChunkSource::Message,
                 text: if embed_reply { reply } else { prompt }.to_owned(),
                 vector: Some(vec![1.0]),
             };

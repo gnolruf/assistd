@@ -101,7 +101,7 @@ fn unit_vec(angle: f32) -> Vec<f32> {
 async fn embed_text(store: &SqliteSemanticStore, source: ChunkSource, text: &str, vector: &[f32]) {
     store
         .store_embeddings(vec![Embedding {
-            target: EmbeddingTarget::ChunkText(source),
+            source,
             text: text.to_string(),
             vector: Some(vector.to_vec()),
         }])
@@ -121,7 +121,7 @@ async fn texts_to_embed(store: &SqliteSemanticStore, source: ChunkSource) -> Vec
     listed.into_iter().map(|(_, text)| text).collect()
 }
 
-/// How many vectors and unembeddable marks `table` holds.
+/// How many rows `table` holds: for a vector table, its vectors and unembeddable marks.
 async fn stored_vectors(handle: &SqliteHandle, table: &'static str) -> u64 {
     let count = move |c: &rusqlite::Connection| {
         c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
@@ -141,22 +141,6 @@ async fn save_memory(handle: &SqliteHandle, key: &str, value: &str) -> MemoryId 
         .await
         .unwrap()
         .id
-}
-
-async fn embed_memory(
-    store: &SqliteSemanticStore,
-    memory_id: MemoryId,
-    value: &str,
-    vector: &[f32],
-) {
-    store
-        .store_embeddings(vec![Embedding {
-            target: EmbeddingTarget::Memory(memory_id),
-            text: value.to_string(),
-            vector: Some(vector.to_vec()),
-        }])
-        .await
-        .unwrap();
 }
 
 #[tokio::test]
@@ -824,7 +808,7 @@ async fn keyword_search_follows_a_document_through_reindexing_and_removal() {
     };
     let indexed_chunks = async || {
         let count = |c: &rusqlite::Connection| {
-            c.query_row("SELECT count(*) FROM document_chunk_fts", [], |r| {
+            c.query_row("SELECT count(*) FROM chunk_words", [], |r| {
                 r.get::<_, u64>(0)
             })
         };
@@ -1039,11 +1023,17 @@ async fn a_query_is_matched_as_words_and_never_read_as_fts5_syntax() {
 }
 
 #[tokio::test]
-async fn upsert_replaces_memory_embedding_in_place() {
+async fn a_text_embedded_again_has_its_vector_replaced() {
     let (handle, store, _temp) = fresh().await;
-    let mem_id = save_memory(&handle, "k", "v").await;
-    embed_memory(&store, mem_id, "v", &unit_vec(0.0)).await;
-    embed_memory(&store, mem_id, "v", &unit_vec(std::f32::consts::FRAC_PI_2)).await;
+    save_memory(&handle, "k", "v").await;
+    embed_text(&store, ChunkSource::Memory, "v", &unit_vec(0.0)).await;
+    embed_text(
+        &store,
+        ChunkSource::Memory,
+        "v",
+        &unit_vec(std::f32::consts::FRAC_PI_2),
+    )
+    .await;
 
     assert_eq!(
         store.count_missing().await.unwrap(),
@@ -1061,31 +1051,89 @@ async fn upsert_replaces_memory_embedding_in_place() {
 }
 
 #[tokio::test]
-async fn overwriting_a_memory_value_drops_its_stale_embedding() {
+async fn saving_a_new_value_under_a_key_queues_it_and_deletes_the_old_values_vector() {
     let (handle, store, _temp) = fresh().await;
     let mem_id = save_memory(&handle, "editor", "vim").await;
-    embed_memory(&store, mem_id, "vim", &unit_vec(0.0)).await;
+    embed_text(&store, ChunkSource::Memory, "vim", &unit_vec(0.0)).await;
+    assert_eq!(stored_vectors(&handle, "memory_vectors").await, 1);
 
     assert_eq!(save_memory(&handle, "editor", "emacs").await, mem_id);
-    embed_memory(&store, mem_id, "vim", &unit_vec(0.0)).await;
+    assert_eq!(stored_vectors(&handle, "memory_vectors").await, 0);
+    embed_text(&store, ChunkSource::Memory, "vim", &unit_vec(0.0)).await;
 
     assert_eq!(
-        store.count_missing().await.unwrap(),
-        UnindexedRows {
-            message_chunks: 0,
-            document_chunks: 0,
-            memories: 1
-        },
-        "neither the trigger nor a late embedding of the old value may leave it indexed"
+        stored_vectors(&handle, "memory_vectors").await,
+        0,
+        "a late embedding of the old value was stored"
     );
     assert_eq!(
         store.nearest_memories(unit_vec(0.0), 5).await.unwrap(),
         Vec::<MemoryHit>::new()
     );
+    assert_eq!(texts_to_embed(&store, ChunkSource::Memory).await, ["emacs"]);
+}
+
+#[tokio::test]
+async fn memories_rank_by_their_values_vectors_and_two_may_hold_one_value() {
+    let (handle, store, _temp) = fresh().await;
+    let near = save_memory(&handle, "editor", "vim").await;
+    let far = save_memory(&handle, "shell", "zsh").await;
+    let also_near = save_memory(&handle, "pager", "vim").await;
+    embed_text(&store, ChunkSource::Memory, "vim", &unit_vec(0.1)).await;
+    embed_text(&store, ChunkSource::Memory, "zsh", &unit_vec(1.0)).await;
+
+    let hits = store.nearest_memories(unit_vec(0.0), 5).await.unwrap();
+
+    let mut nearest = [hits[0].memory_id, hits[1].memory_id];
+    nearest.sort();
+    assert_eq!(nearest, [near, also_near]);
     assert_eq!(
-        store.memories_missing_embedding(None, 100).await.unwrap(),
-        [(mem_id, "emacs".to_string())]
+        hits[2],
+        MemoryHit {
+            memory_id: far,
+            key: "shell".to_string(),
+            value: "zsh".to_string(),
+            similarity: hits[2].similarity,
+        }
     );
+    assert!((hits[0].similarity - 0.1f32.cos()).abs() < 1e-2);
+    assert!((hits[2].similarity - 1.0f32.cos()).abs() < 1e-2);
+    let best = store.nearest_memories(unit_vec(1.0), 1).await.unwrap();
+    assert_eq!(best.len(), 1);
+    assert_eq!(best[0].memory_id, far);
+}
+
+#[tokio::test]
+async fn deleting_a_session_removes_its_chunks_their_words_and_the_vectors_only_they_named() {
+    let (handle, store, _temp) = fresh().await;
+    let deleted = Transcript::new(&handle).await;
+    let kept = Transcript::new(&handle).await;
+    for (transcript, text) in [
+        (&deleted, "said only here"),
+        (&deleted, "said in both"),
+        (&kept, "said in both"),
+    ] {
+        transcript
+            .embedded_chunk(&store, text, &unit_vec(0.0))
+            .await;
+    }
+    let rows = async |table: &'static str| stored_vectors(&handle, table).await;
+    assert_eq!(rows("chunks").await, 3);
+    assert_eq!(rows("chunk_words").await, 3);
+    assert_eq!(rows("message_vectors").await, 2);
+
+    let session = deleted.session;
+    let delete =
+        move |tx: &Transaction<'_>| tx.execute("DELETE FROM sessions WHERE uuid = ?1", [session]);
+    handle.write("delete session", delete).await.unwrap();
+
+    assert_eq!(rows("chunks").await, 1);
+    assert_eq!(rows("chunk_words").await, 1);
+    assert_eq!(rows("message_vectors").await, 1);
+    let hits = store.nearest_chunks(unit_vec(0.0), 5, SessionScope::All);
+    let hits = hits.await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].text, "said in both");
 }
 
 #[tokio::test]
@@ -1136,9 +1184,9 @@ async fn missing_embedding_lists_only_unindexed_rows() {
     let (_, second) = transcript.append("z").await;
     let second_bare = second[0];
 
-    let indexed_mem = save_memory(&handle, "indexed", "v1").await;
-    embed_memory(&store, indexed_mem, "v1", &unit_vec(0.0)).await;
-    let bare_mem = save_memory(&handle, "bare", "v2").await;
+    save_memory(&handle, "indexed", "v1").await;
+    embed_text(&store, ChunkSource::Memory, "v1", &unit_vec(0.0)).await;
+    save_memory(&handle, "bare", "v2").await;
 
     assert_eq!(
         store
@@ -1171,10 +1219,7 @@ async fn missing_embedding_lists_only_unindexed_rows() {
             .unwrap(),
         [(document[0], "draft".to_string())]
     );
-    assert_eq!(
-        store.memories_missing_embedding(None, 100).await.unwrap(),
-        [(bare_mem, "v2".to_string())]
-    );
+    assert_eq!(texts_to_embed(&store, ChunkSource::Memory).await, ["v2"]);
     assert_eq!(
         store.count_missing().await.unwrap(),
         UnindexedRows {
@@ -1184,11 +1229,8 @@ async fn missing_embedding_lists_only_unindexed_rows() {
         }
     );
 
-    embed_memory(&store, bare_mem, "v2", &unit_vec(0.0)).await;
-    assert_eq!(
-        store.memories_missing_embedding(None, 100).await.unwrap(),
-        Vec::<(MemoryId, String)>::new()
-    );
+    embed_text(&store, ChunkSource::Memory, "v2", &unit_vec(0.0)).await;
+    assert!(texts_to_embed(&store, ChunkSource::Memory).await.is_empty());
 }
 
 #[tokio::test]
@@ -1197,15 +1239,15 @@ async fn unembeddable_rows_are_neither_missing_nor_searched_until_cleared_or_cha
     let transcript = Transcript::new(&handle).await;
     let (_, chunks) = transcript.append("y").await;
     let chunk = chunks[0];
-    let cleared_mem = save_memory(&handle, "cleared", "v1").await;
-    let changed_mem = save_memory(&handle, "changed", "v2").await;
+    save_memory(&handle, "cleared", "v1").await;
+    save_memory(&handle, "changed", "v2").await;
     let unembeddable = [
-        (EmbeddingTarget::ChunkText(ChunkSource::Message), "y"),
-        (EmbeddingTarget::Memory(cleared_mem), "v1"),
-        (EmbeddingTarget::Memory(changed_mem), "v2"),
+        (ChunkSource::Message, "y"),
+        (ChunkSource::Memory, "v1"),
+        (ChunkSource::Memory, "v2"),
     ]
-    .map(|(target, text)| Embedding {
-        target,
+    .map(|(source, text)| Embedding {
+        source,
         text: text.to_string(),
         vector: None,
     })
@@ -1232,10 +1274,7 @@ async fn unembeddable_rows_are_neither_missing_nor_searched_until_cleared_or_cha
     );
 
     save_memory(&handle, "changed", "v3").await;
-    assert_eq!(
-        store.memories_missing_embedding(None, 100).await.unwrap(),
-        [(changed_mem, "v3".to_string())]
-    );
+    assert_eq!(texts_to_embed(&store, ChunkSource::Memory).await, ["v3"]);
 
     assert_eq!(store.clear_unembeddable().await.unwrap(), 2);
     assert_eq!(
@@ -1259,7 +1298,7 @@ async fn unembeddable_rows_are_neither_missing_nor_searched_until_cleared_or_cha
 async fn adopting_a_different_embedding_space_drops_every_vector() {
     let (handle, store, _temp) = fresh().await;
     let transcript = Transcript::new(&handle).await;
-    let memory = save_memory(&handle, "k", "v").await;
+    save_memory(&handle, "k", "v").await;
     let space = EmbeddingSpace {
         model: "owner/repo:Q8_0".to_string(),
         dim: 2,
@@ -1270,7 +1309,7 @@ async fn adopting_a_different_embedding_space_drops_every_vector() {
     let chunk = transcript
         .embedded_chunk(&store, "text", &unit_vec(0.0))
         .await;
-    embed_memory(&store, memory, "v", &unit_vec(0.0)).await;
+    embed_text(&store, ChunkSource::Memory, "v", &unit_vec(0.0)).await;
 
     assert_eq!(store.adopt_embedding_space(&space).await.unwrap(), None);
     assert_eq!(
@@ -1351,44 +1390,28 @@ async fn adopting_a_space_that_differs_only_in_its_document_prefix_drops_every_v
 }
 
 #[tokio::test]
-async fn batch_skips_targets_deleted_before_it_lands() {
+async fn a_batch_skips_the_text_of_a_memory_deleted_before_it_lands() {
     let (handle, store, _temp) = fresh().await;
     let kept = save_memory(&handle, "kept", "v").await;
-    let deleted = save_memory(&handle, "deleted", "v").await;
+    save_memory(&handle, "deleted", "gone").await;
     MemoryStore::new(handle.clone())
         .delete("deleted")
         .await
         .unwrap();
 
-    let embeddings = [deleted, kept]
-        .map(|memory_id| Embedding {
-            target: EmbeddingTarget::Memory(memory_id),
-            text: "v".to_string(),
+    let embeddings = ["gone", "v"]
+        .map(|text| Embedding {
+            source: ChunkSource::Memory,
+            text: text.to_string(),
             vector: Some(unit_vec(0.0)),
         })
         .to_vec();
     store.store_embeddings(embeddings).await.unwrap();
 
+    assert_eq!(stored_vectors(&handle, "memory_vectors").await, 1);
     let hits = store.nearest_memories(unit_vec(0.0), 5).await.unwrap();
     let hit_ids: Vec<MemoryId> = hits.iter().map(|hit| hit.memory_id).collect();
     assert_eq!(hit_ids, [kept]);
-}
-
-#[test]
-fn vector_to_blob_round_trips() {
-    let vector = vec![0.5f32, -0.25, 0.125, 1e-6];
-    let blob = vector_to_blob(&vector);
-    let (words, _) = blob.as_chunks::<4>();
-    let decoded: Vec<f32> = words.iter().copied().map(f32::from_le_bytes).collect();
-    assert_eq!(decoded, vector);
-}
-
-#[test]
-fn score_against_rejects_malformed_blobs() {
-    let q = [1.0f32, 2.0];
-    assert_eq!(score_against(&q, &vector_to_blob(&[3.0, 4.0])), Some(11.0));
-    assert_eq!(score_against(&q, &vector_to_blob(&[1.0, 0.0, 0.0])), None);
-    assert_eq!(score_against(&q, &[0u8; 7]), None);
 }
 
 #[test]
@@ -1399,7 +1422,7 @@ fn quantised_score_tracks_the_exact_dot_product() {
     let query: Vec<f32> = (0..768u16)
         .map(|i| (f32::from(i) * 0.11).cos() / 20.0)
         .collect();
-    let exact = score_against(&query, &vector_to_blob(&stored)).unwrap();
+    let exact: f32 = stored.iter().zip(&query).map(|(s, q)| s * q).sum();
     let blob = quantised_blob(&stored);
 
     assert_eq!(blob.len(), 4 + stored.len());
@@ -1443,7 +1466,7 @@ async fn a_write_signals_the_embedding_worker_only_when_it_leaves_a_row_to_embed
     );
     assert!(!signalled(&rows_to_embed), "no message left to cut");
 
-    let memory = memories.save("k", "v".into()).await.unwrap().id;
+    memories.save("k", "v".into()).await.unwrap();
     assert!(signalled(&rows_to_embed), "a new memory");
     memories.save("k", "v".into()).await.unwrap();
     assert!(
@@ -1464,7 +1487,7 @@ async fn a_write_signals_the_embedding_worker_only_when_it_leaves_a_row_to_embed
     assert!(!signalled(&rows_to_embed), "a document stored unchanged");
 
     let refused = Embedding {
-        target: EmbeddingTarget::Memory(memory),
+        source: ChunkSource::Memory,
         text: "changed".to_string(),
         vector: None,
     };

@@ -20,6 +20,7 @@ erDiagram
     messages ||--|{ branch_messages : "appears in"
     branches ||--o| branch_summaries : "compacted by"
     messages ||--o{ chunks : "split into"
+    memories ||--o| chunks : "value held as"
     index_roots ||--o{ documents : "found under"
     index_roots ||--o{ skipped_files : "found under"
     documents ||--o{ document_pages : "made of"
@@ -28,9 +29,9 @@ erDiagram
     messages ||--o{ relay_steps : "relayed by"
     relay_steps ||--o{ relay_entries : "did"
     chunks }o--o| message_vectors : "text embedded as"
+    chunks }o--o| memory_vectors : "text embedded as"
     chunks }o--o| document_vectors : "text embedded as"
-    chunks ||--o| document_chunk_fts : "words indexed in"
-    memories ||--o| memory_embeddings : "embedded as"
+    chunks ||--|| chunk_words : "words indexed in"
     tasks ||--o{ task_runs : "ran as"
     task_runs ||--o| sessions : "recorded in"
     sessions ||--o| active_session : "pointed at by"
@@ -158,10 +159,10 @@ erDiagram
         int state "0 waiting, 1 read, 2 failed"
     }
     chunks {
-        int id PK
-        int message_id FK "set for a message chunk"
-        int document_id FK "set for a document chunk"
-        int page FK "the document's page it is cut from"
+        int id PK "also its rowid in chunk_words"
+        int kind "0 message, 1 memory, 2 document"
+        int source "the message, memory or document it is cut from"
+        int page "the document's page it is cut from, else 0"
         int byte_start
         int byte_end
         blob hash "first 16 bytes of the SHA-256 of its text"
@@ -170,21 +171,21 @@ erDiagram
         blob hash UK "the hash of the message chunks that hold the text"
         blob vector "quantised; NULL when the model cannot embed the text"
     }
+    memory_vectors {
+        blob hash UK "the hash of the memory chunks that hold the text"
+        blob vector "quantised; NULL when the model cannot embed the text"
+    }
     document_vectors {
         blob hash UK "the hash of the document chunks that hold the text"
         blob vector "quantised; NULL when the model cannot embed the text"
     }
     removed_chunk_texts {
-        int of_document PK "1 for a document chunk's text"
+        int kind PK "the kind of the removed chunk"
         blob hash PK "a text the open write removed a chunk of"
     }
-    document_chunk_fts {
-        int rowid PK, FK "the chunk's id"
+    chunk_words {
+        int rowid PK "the chunk's id"
         text text "indexed for keyword search, not stored"
-    }
-    memory_embeddings {
-        int memory_id PK, FK
-        blob vector "NULL when the model cannot embed the row"
     }
     embedding_meta {
         int id PK "always 0"
@@ -230,7 +231,10 @@ Every table is `STRICT`, and every timestamp is Unix milliseconds.
 Branches, turns, and messages carry their `session_id` and reference
 each other through composite `(session_id, id)` keys, so nothing can
 point across sessions. Deleting a session, branch, message, or memory
-cascades to the rows that hang off it.
+cascades to the rows that hang off it. `chunks.source` names a row of
+one of three tables, which no foreign key can say, so triggers on
+`messages`, `memories` and `document_pages` delete a deleted row's
+chunks.
 
 ## Transcripts
 
@@ -282,9 +286,10 @@ cascades to the rows that hang off it.
 
 **`memories`** holds the facts saved by the `remember` tool and
 `assistd memory`, one row per unique `key`. Saving an existing key
-overwrites `value` in place and bumps `updated_at`. A trigger deletes
-the memory's embedding whenever its value changes, so a stale vector
-never outlives the text it was computed from.
+overwrites `value` in place and bumps `updated_at`. A memory has one
+chunk over its whole value, written with it; a save that changes the
+value replaces the chunk in the same transaction, which deletes the old
+value's vector unless another memory holds that value.
 
 ## Tasks
 
@@ -301,10 +306,13 @@ resumed, saying which.
 
 ## Embeddings
 
-- **`chunks`**: each chunk belongs to exactly one message or one page
-  of a document, and is a byte range into `messages.content` or that
-  page's `document_pages.content`, so the text itself is never stored
-  twice. User and assistant messages are cut into overlapping windows of
+- **`chunks`**: each chunk belongs to exactly one message, one memory
+  or one page of a document, and is a byte range into
+  `messages.content`, `memories.value` or that page's
+  `document_pages.content`, so the text itself is never stored
+  twice. `kind` says which of the three and `source` is that row's id,
+  so a new kind of text needs a code and a vector table, not columns.
+  A memory is one chunk over its whole value. User and assistant messages are cut into overlapping windows of
   512 characters (64 shared) in the same transaction that saves the
   message; tool results are not chunked. A document is cut page by
   page, so no chunk spans two pages, and within a page where its text
@@ -364,12 +372,13 @@ resumed, saying which.
   extracted, which drops the transcribed text with its chunks, and
   starts every empty page waiting again. A daemon start sets the failed
   rows back to waiting.
-- **`message_vectors`** / **`document_vectors`**: one vector for each
+- **`message_vectors`** / **`memory_vectors`** / **`document_vectors`**:
+  one vector for each
   distinct text the chunks of that kind hold, under the text's
   `chunks.hash`. No chunk id appears in them, so a text that sits in
   many places is embedded and stored once, and a vector follows its
-  text to any page of any file. Two tables keep a message search from
-  reading document vectors. A chunk whose hash has no row is pending,
+  text to any page of any file. A table per kind keeps a search of one
+  kind from reading the vectors of another. A chunk whose hash has no row is pending,
   and the background embedding worker is given the first chunk holding
   each pending text. A vector is stored only while a chunk of its kind
   holds its text.
@@ -382,28 +391,27 @@ resumed, saying which.
   worker does not retry it; `assistd memory reindex` clears those marks
   and wakes the worker.
 - **`removed_chunk_texts`**: empty between writes. A trigger on `chunks`
-  records the hash of every chunk a write deletes, however the chunk
-  goes: with its message on undo, with its session, with its page or
-  its document. Before the write commits it deletes the vector of each
+  records the kind and hash of every chunk a write deletes, however the
+  chunk goes: with its message on undo, with its session, with its
+  memory or that memory's old value, with its page or its document. Before the write commits it deletes the vector of each
   recorded text that no chunk of that kind holds any more, and empties
   the table. The check runs after the write's inserts, so a document
   stored again, whose chunks are removed and added, keeps the vectors
   of the text it still has, and a vector is erased in the same
   transaction as the last text it was made from.
-- **`memory_embeddings`**: at most one vector per memory, a BLOB of
-  little-endian `f32`s. A memory with no row is pending; its vector is
-  only stored if its value hasn't changed since it was read for
-  embedding, and a `NULL` vector marks it as the chunk tables do.
-- **`document_chunk_fts`**: an FTS5 index of the words of every document
-  chunk, for the keyword half of a document search. It is contentless:
+- **`chunk_words`**: an FTS5 index of the words of every chunk of every
+  kind. It is contentless:
   a row carries its chunk's id and the index entries for the chunk's
-  text, and the text itself stays in `document_pages` alone. The write
+  text, and the text itself stays in the row the chunk is cut from. The write
   that cuts a chunk adds its row, and a trigger on `chunks` removes the
   row with the chunk however the chunk goes. FTS5 marks a removed row deleted and drops its entries as
-  it merges the index. Words are split at every character that is not a
+  it merges the index, so the words of a deleted message or memory,
+  though no query finds them, stay in the file until then. Words are split at every character that is not a
   letter or a digit and compared without case or accents, so
   `read_regular_file` is indexed as `read`, `regular`, `file` in a row.
-  Message chunks are not indexed. On the index measured below it takes
+  Only a document search reads it so far, held to document chunks;
+  messages and memories are ranked by vector alone. On the document
+  index measured below it takes
   25 MB beside 62 MB of page text and 124 MB of vectors.
 - **`embedding_meta`**: the one row naming what produced every stored
   vector: `embedding.model`, the vector dimension the server reported,
@@ -415,9 +423,9 @@ resumed, saying which.
   `embedding.query_prefix` is not recorded: it shapes only the query
   vector, which is never stored.
 
-Search (`recall`, `reminisce`, `docs search`) scans every vector of one source kind,
-messages or documents, on that kind's own read-only connection and keeps
-the top matches; there is no vector index. A document search scans
+Search (`recall`, `reminisce`, `remember`, `docs search`) scans every vector of one source kind,
+messages, memories or documents, and keeps
+the top matches, document scans on a read-only connection of their own; there is no vector index. A document search scans
 `document_vectors` alone, keeps the 300 nearest texts and finds the
 chunks that hold each by its hash, so a text several documents hold
 counts for each of them. When those texts sit in fewer than 30
@@ -460,7 +468,7 @@ twice and fuses the two rankings.
 
 - **By vector**: each document by its chunk nearest the query vector.
 - **By keyword**: each document by its chunk with the best BM25 score in
-  `document_chunk_fts`, among the chunks that hold any word of the query.
+  `chunk_words`, among the document chunks that hold any word of the query.
   Each whitespace-separated word of the query is matched as a phrase of
   its own tokens, so `INV-2024-0113` finds only that number and no
   character of a query is read as FTS5 syntax.
