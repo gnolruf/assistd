@@ -34,6 +34,12 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 /// Suffixes SQLite appends to the database path for its sidecar files.
 const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
+/// For each kind of chunk, its vector table and the `chunks` column set on its chunks.
+const VECTORS_BY_CHUNK_KIND: [(&str, &str); 2] = [
+    ("message_vectors", "message_id"),
+    ("document_vectors", "document_id"),
+];
+
 /// Cheaply cloneable handle shared by every store: document searches, other vector
 /// scans and other reads each go to their own read-only connection and writes
 /// to the only writable one, each run in submission order on its connection's own thread.
@@ -219,8 +225,32 @@ fn in_transaction<T>(
 ) -> rusqlite::Result<T> {
     let tx = c.transaction()?;
     let value = statements(&tx)?;
+    delete_vectors_of_removed_texts(&tx)?;
     tx.commit()?;
     Ok(value)
+}
+
+/// Delete the vector of each text the transaction removed a chunk of, unless a chunk
+/// of that kind still holds the text, and forget the removals.
+fn delete_vectors_of_removed_texts(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let removed_any: bool = tx
+        .prepare_cached("SELECT EXISTS (SELECT 1 FROM removed_chunk_texts)")?
+        .query_row([], |r| r.get(0))?;
+    if !removed_any {
+        return Ok(());
+    }
+    for (of_document, (vectors, owner)) in VECTORS_BY_CHUNK_KIND.iter().enumerate() {
+        tx.prepare_cached(&format!(
+            "DELETE FROM {vectors}
+             WHERE hash IN (SELECT hash FROM removed_chunk_texts WHERE of_document = ?1)
+               AND NOT EXISTS (SELECT 1 FROM chunks cc
+                               WHERE cc.hash = {vectors}.hash AND cc.{owner} IS NOT NULL)"
+        ))?
+        .execute([of_document])?;
+    }
+    tx.prepare_cached("DELETE FROM removed_chunk_texts")?
+        .execute([])?;
+    Ok(())
 }
 
 /// The writable connection: applies pragmas, migrates, and refreshes planner statistics.

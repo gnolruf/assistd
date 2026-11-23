@@ -8,16 +8,27 @@ use std::path::PathBuf;
 
 use rusqlite::{Connection, Row};
 
+use crate::chunking::TextHash;
 use crate::sqlite::timestamp::timestamp_at;
 use crate::{ChunkId, DocumentHit, DocumentId};
 
 use super::{
-    DOCUMENT_CHUNK_COLUMNS, DOCUMENT_CHUNK_OWNERS, DOCUMENT_CHUNK_VECTORS, json_id_array,
-    scan_best, score_against_quantised,
+    DOCUMENT_CHUNK_COLUMNS, DOCUMENT_CHUNK_OWNERS, DOCUMENT_TEXT_VECTORS, json_id_array,
+    scan_top_k, score_against_quantised,
 };
 
 /// Documents each ranking brings to the fusion.
 const CANDIDATES_PER_RANKING: usize = 30;
+
+/// Texts the vector ranking takes from a scan of the vectors alone to find its
+/// documents among. When that many sit in too few documents, it scans by chunk.
+const NEAREST_TEXTS: usize = 10 * CANDIDATES_PER_RANKING;
+
+/// Every document chunk with the vector of its text, grouped by its document.
+const DOCUMENT_CHUNK_VECTORS: &str = "
+    SELECT cc.document_id, cc.id, v.vector
+    FROM chunks cc JOIN document_vectors v ON v.hash = cc.hash
+    WHERE cc.document_id IS NOT NULL AND v.vector IS NOT NULL";
 
 /// Added to a rank before it is inverted into a score. The smaller it is, the more a
 /// top rank in one ranking outweighs middling ranks in both.
@@ -95,7 +106,54 @@ fn keyword_ranking(conn: &Connection, query: &str) -> rusqlite::Result<Vec<Candi
 
 /// The documents nearest `query`, by their best chunk's cosine.
 fn vector_ranking(conn: &Connection, query: &[f32]) -> rusqlite::Result<Vec<Candidate>> {
-    let nearest = scan_best::<DocumentId, ChunkId>(
+    let nearest = scan_top_k::<TextHash, TextHash>(
+        conn,
+        DOCUMENT_TEXT_VECTORS,
+        [],
+        query,
+        score_against_quantised,
+        NEAREST_TEXTS,
+    )?;
+    let more_texts_unscanned = nearest.len() == NEAREST_TEXTS;
+    let candidates = documents_holding(conn, nearest)?;
+    if candidates.len() < CANDIDATES_PER_RANKING && more_texts_unscanned {
+        return ranking_by_chunk(conn, query);
+    }
+    Ok(candidates)
+}
+
+/// The first [`CANDIDATES_PER_RANKING`] documents holding `texts`, in the order of
+/// the texts, a text several documents hold counting for each in chunk order.
+fn documents_holding(
+    conn: &Connection,
+    texts: Vec<(TextHash, f32)>,
+) -> rusqlite::Result<Vec<Candidate>> {
+    let mut holders = conn.prepare_cached(
+        "SELECT document_id, id FROM chunks
+         WHERE hash = ?1 AND document_id IS NOT NULL
+         ORDER BY id",
+    )?;
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for (text, _) in texts {
+        let mut rows = holders.query(rusqlite::params![text])?;
+        while let Some(row) = rows.next()? {
+            if candidates.len() == CANDIDATES_PER_RANKING {
+                return Ok(candidates);
+            }
+            let document = row.get(0)?;
+            if candidates.iter().all(|placed| placed.document != document) {
+                let chunk = row.get(1)?;
+                candidates.push(Candidate { document, chunk });
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+/// The documents nearest `query` from a scan of every chunk's vector, which keeps
+/// one chunk a document however many near texts one document holds.
+fn ranking_by_chunk(conn: &Connection, query: &[f32]) -> rusqlite::Result<Vec<Candidate>> {
+    let nearest = scan_top_k::<DocumentId, ChunkId>(
         conn,
         DOCUMENT_CHUNK_VECTORS,
         [],
@@ -103,14 +161,14 @@ fn vector_ranking(conn: &Connection, query: &[f32]) -> rusqlite::Result<Vec<Cand
         score_against_quantised,
         CANDIDATES_PER_RANKING,
     )?;
-    Ok(nearest
-        .into_best_first()
+    let mut owner = conn.prepare_cached("SELECT document_id FROM chunks WHERE id = ?1")?;
+    nearest
         .into_iter()
-        .map(|ranked| Candidate {
-            document: ranked.group,
-            chunk: ranked.id,
+        .map(|(chunk, _)| {
+            let document = owner.query_row(rusqlite::params![chunk], |row| row.get(0))?;
+            Ok(Candidate { document, chunk })
         })
-        .collect())
+        .collect()
 }
 
 /// One chunk per document in `rankings`, best first by the sum of the document's
@@ -146,7 +204,7 @@ fn fuse(rankings: [&[Candidate]; 2]) -> Vec<ChunkId> {
 }
 
 /// A hit for each of `chunks`, in their order, with its similarity to `query` when
-/// it has a vector; chunks deleted since they were ranked are skipped.
+/// its text has a vector; chunks deleted since they were ranked are skipped.
 fn document_hits(
     conn: &Connection,
     query: &[f32],
@@ -156,9 +214,9 @@ fn document_hits(
         return Ok(Vec::new());
     }
     let select = format!(
-        "SELECT {DOCUMENT_CHUNK_COLUMNS}, e.vector
+        "SELECT {DOCUMENT_CHUNK_COLUMNS}, v.vector
          FROM chunks cc {DOCUMENT_CHUNK_OWNERS}
-         LEFT JOIN document_chunk_embeddings e ON e.chunk_id = cc.id
+         LEFT JOIN document_vectors v ON v.hash = cc.hash
          WHERE cc.id IN (SELECT value FROM json_each(?1))"
     );
     let mut found = conn

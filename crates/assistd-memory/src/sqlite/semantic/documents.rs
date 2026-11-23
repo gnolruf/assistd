@@ -1,7 +1,6 @@
 //! Writes to the document index: passes over index roots, each document's pages,
 //! chunks and keyword index, and the pages that wait for transcription.
 
-use std::collections::HashMap;
 use std::ffi::OsString;
 use std::ops::Range;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -10,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 
-use crate::chunking::{ChunkingConfig, chunk_ranges};
+use crate::chunking::{ChunkingConfig, chunk_ranges, text_hash};
 use crate::sqlite::timestamp::now_millis;
 use crate::{
     ChunkId, DocumentId, EmptyPages, FileStamp, IndexPass, PageReading, SkippedRead,
@@ -106,113 +105,9 @@ struct PageCut {
 }
 
 impl PageCut {
-    /// The text this cut covers in `pages`; `None` when they have no such text.
-    fn text_in<'t>(&self, pages: &'t [String]) -> Option<&'t str> {
-        pages.get(self.page)?.get(self.bytes.clone())
-    }
-}
-
-/// The pages and chunks stored for a document before it is indexed again; empty for
-/// a document not stored yet.
-struct StoredPages {
-    pages: Vec<String>,
-    chunks: Vec<(ChunkId, PageCut)>,
-}
-
-impl StoredPages {
-    fn load(tx: &Transaction<'_>, document: DocumentId) -> rusqlite::Result<Self> {
-        let pages = tx
-            .prepare_cached(
-                "SELECT content FROM document_pages WHERE document_id = ?1 ORDER BY page",
-            )?
-            .query_map(rusqlite::params![document], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        let chunks = tx
-            .prepare_cached(
-                "SELECT id, page, byte_start, byte_end FROM chunks
-                 WHERE document_id = ?1
-                 ORDER BY page, byte_start",
-            )?
-            .query_map(rusqlite::params![document], |r| {
-                let cut = PageCut {
-                    page: r.get(1)?,
-                    bytes: r.get(2)?..r.get(3)?,
-                };
-                Ok((r.get(0)?, cut))
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(Self { pages, chunks })
-    }
-
-    /// Match the stored chunks to `cuts` of the new `pages` by the text each covers,
-    /// whatever page it is on. Chunks with the same text are matched in order of
-    /// position.
-    fn recut<'c>(&self, pages: &[String], cuts: &'c [PageCut]) -> Recut<'c> {
-        let mut recut = Recut::default();
-        let mut stored_by_text: HashMap<&str, Vec<ChunkId>> = HashMap::new();
-        for (chunk, cut) in self.chunks.iter().rev() {
-            match cut.text_in(&self.pages) {
-                Some(text) => stored_by_text.entry(text).or_default().push(*chunk),
-                None => recut.dropped.push(*chunk),
-            }
-        }
-        for cut in cuts {
-            let same_text = cut
-                .text_in(pages)
-                .and_then(|text| stored_by_text.get_mut(text))
-                .and_then(Vec::pop);
-            match same_text {
-                Some(chunk) => recut.kept.push((chunk, cut)),
-                None => recut.added.push(cut),
-            }
-        }
-        recut.dropped.extend(stored_by_text.into_values().flatten());
-        recut
-    }
-}
-
-/// What becomes of a stored document's chunks when its new pages are cut.
-#[derive(Default)]
-struct Recut<'c> {
-    /// Stored chunks whose text is unchanged, each with where that text now sits.
-    kept: Vec<(ChunkId, &'c PageCut)>,
-    /// Stored chunks whose text is gone.
-    dropped: Vec<ChunkId>,
-    /// Cuts whose text no stored chunk covered.
-    added: Vec<&'c PageCut>,
-}
-
-impl Recut<'_> {
-    /// Delete the dropped chunks of `document` and move the kept ones to their cuts,
-    /// whose pages must be stored. Each is first shifted up by `clearance`, at least
-    /// any old or new page's length, so none lands on a start another has yet to leave.
-    fn apply(
-        &self,
-        tx: &Transaction<'_>,
-        document: DocumentId,
-        clearance: usize,
-    ) -> rusqlite::Result<()> {
-        let mut delete = tx.prepare_cached("DELETE FROM chunks WHERE id = ?1")?;
-        for chunk in &self.dropped {
-            delete.execute(rusqlite::params![chunk])?;
-        }
-        tx.prepare_cached(
-            "UPDATE chunks SET byte_start = byte_start + ?2, byte_end = byte_end + ?2
-             WHERE document_id = ?1",
-        )?
-        .execute(rusqlite::params![document, clearance])?;
-        let mut place = tx.prepare_cached(
-            "UPDATE chunks SET page = ?2, byte_start = ?3, byte_end = ?4 WHERE id = ?1",
-        )?;
-        for (chunk, cut) in &self.kept {
-            place.execute(rusqlite::params![
-                chunk,
-                cut.page,
-                cut.bytes.start,
-                cut.bytes.end
-            ])?;
-        }
-        Ok(())
+    /// The text this cut covers in `pages`, the pages it was cut from.
+    fn text_in<'t>(&self, pages: &'t [String]) -> &'t str {
+        &pages[self.page][self.bytes.clone()]
     }
 }
 
@@ -326,8 +221,8 @@ pub(super) fn forget_skipped(conn: &Connection) -> rusqlite::Result<u64> {
 /// What storing a document left for the workers that follow it.
 #[derive(Default)]
 pub(super) struct StoredDocument {
-    /// The chunks added, which have no vector.
-    pub added: Vec<ChunkId>,
+    /// Its chunks whose text has no vector.
+    pub unembedded: Vec<ChunkId>,
     /// Whether any of its pages now waits for transcription.
     pub pages_wait: bool,
 }
@@ -356,15 +251,15 @@ pub(super) fn store_document(
         return Ok(StoredDocument::default());
     }
     let id = document.upsert(tx)?;
-    let stored = StoredPages::load(tx, id)?;
+    replace_pages(tx, id, pages)?;
+    let pages_wait = empty_pages == EmptyPages::AwaitTranscription
+        && await_transcription_of_empty_pages(tx, id, pages)?;
     let cuts = page_cuts(pages, document.chunking);
-    let recut = stored.recut(pages, &cuts);
-    write_changed_pages(tx, id, &stored.pages, pages)?;
-    recut.apply(tx, id, longest_page(&stored.pages).max(longest_page(pages)))?;
-    remove_pages_from(tx, id, pages.len())?;
-    let pages_wait = reset_transcriptions(tx, id, pages, empty_pages)?;
-    let added = add_chunks(tx, id, pages, &recut.added)?;
-    Ok(StoredDocument { added, pages_wait })
+    let unembedded = add_chunks(tx, id, pages, &cuts)?;
+    Ok(StoredDocument {
+        unembedded,
+        pages_wait,
+    })
 }
 
 /// The first page waiting for transcription, by document and then position.
@@ -390,8 +285,8 @@ pub(super) fn next_waiting_page(conn: &Connection) -> rusqlite::Result<Option<Wa
 }
 
 /// Record `reading` of `waiting` when it still waits and its document still has its
-/// stamp, and cut the document's pages again once none of them waits. Returns the
-/// chunks added.
+/// stamp, and cut the document's uncut pages once none of them waits. Returns the
+/// chunks added whose text has no vector.
 pub(super) fn store_page_reading(
     tx: &Transaction<'_>,
     waiting: &WaitingPage,
@@ -432,7 +327,7 @@ pub(super) fn store_page_reading(
     if has_waiting_page(tx, *document_id)? {
         return Ok(Vec::new());
     }
-    cut_stored_pages(tx, *document_id)
+    cut_uncut_pages(tx, *document_id)
 }
 
 pub(super) fn count_transcriptions(conn: &Connection) -> rusqlite::Result<TranscriptionCounts> {
@@ -526,19 +421,13 @@ pub(super) fn retry_failed_transcriptions(conn: &Connection) -> rusqlite::Result
     Ok(u64::try_from(waiting).unwrap_or(u64::MAX))
 }
 
-/// Forget what was transcribed of `document` and, when its empty pages are to be
-/// transcribed, record each of `pages` without text as waiting. Returns whether any waits.
-fn reset_transcriptions(
+/// Record each of `pages` without text, the stored pages of `document`, as waiting
+/// for transcription. Returns whether any waits.
+fn await_transcription_of_empty_pages(
     tx: &Transaction<'_>,
     document: DocumentId,
     pages: &[String],
-    empty_pages: EmptyPages,
 ) -> rusqlite::Result<bool> {
-    tx.prepare_cached("DELETE FROM page_transcriptions WHERE document_id = ?1")?
-        .execute(rusqlite::params![document])?;
-    if empty_pages == EmptyPages::Final {
-        return Ok(false);
-    }
     let mut wait =
         tx.prepare_cached("INSERT INTO page_transcriptions (document_id, page) VALUES (?1, ?2)")?;
     let empty = pages
@@ -561,17 +450,25 @@ fn has_waiting_page(tx: &Transaction<'_>, document: DocumentId) -> rusqlite::Res
     .query_row(rusqlite::params![document, WAITING], |r| r.get(0))
 }
 
-/// Cut the pages stored for `document` into chunks again, keeping each chunk whose
-/// text is unchanged, and record the pages' hash. Returns the chunks added.
-fn cut_stored_pages(tx: &Transaction<'_>, document: DocumentId) -> rusqlite::Result<Vec<ChunkId>> {
-    let stored = StoredPages::load(tx, document)?;
-    let pages = &stored.pages;
-    let cuts = page_cuts(pages, ChunkingConfig::DOCUMENTS);
-    let recut = stored.recut(pages, &cuts);
-    recut.apply(tx, document, longest_page(pages))?;
+/// Cut the pages stored for `document` that have no chunk and record the hash of all
+/// its pages. Returns the chunks added whose text has no vector.
+fn cut_uncut_pages(tx: &Transaction<'_>, document: DocumentId) -> rusqlite::Result<Vec<ChunkId>> {
+    let (pages, uncut): (Vec<String>, Vec<bool>) = tx
+        .prepare_cached(
+            "SELECT p.content,
+                    NOT EXISTS (SELECT 1 FROM chunks cc
+                                WHERE cc.document_id = p.document_id AND cc.page = p.page)
+             FROM document_pages p WHERE p.document_id = ?1 ORDER BY p.page",
+        )?
+        .query_map(rusqlite::params![document], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<(String, bool)>>>()?
+        .into_iter()
+        .unzip();
     tx.prepare_cached("UPDATE documents SET content_hash = ?2 WHERE id = ?1")?
-        .execute(rusqlite::params![document, pages_hash(pages)])?;
-    add_chunks(tx, document, pages, &recut.added)
+        .execute(rusqlite::params![document, pages_hash(&pages)])?;
+    let mut cuts = page_cuts(&pages, ChunkingConfig::DOCUMENTS);
+    cuts.retain(|cut| uncut[cut.page]);
+    add_chunks(tx, document, &pages, &cuts)
 }
 
 /// The chunks each of `pages` is cut into under `chunking`, in page order.
@@ -598,66 +495,53 @@ fn pages_hash(pages: &[String]) -> [u8; 32] {
     hash.finalize().into()
 }
 
-fn longest_page(pages: &[String]) -> usize {
-    pages.iter().map(String::len).max().unwrap_or_default()
-}
-
-/// Store `pages` as the first pages of `document`, writing only those that differ
-/// from the page `stored` holds at the same position.
-fn write_changed_pages(
+/// Store `pages` as the pages of `document` in place of those it has, whose chunks
+/// and transcriptions go with them.
+fn replace_pages(
     tx: &Transaction<'_>,
     document: DocumentId,
-    stored: &[String],
     pages: &[String],
 ) -> rusqlite::Result<()> {
+    tx.prepare_cached("DELETE FROM document_pages WHERE document_id = ?1")?
+        .execute(rusqlite::params![document])?;
     let mut write = tx.prepare_cached(
-        "INSERT INTO document_pages (document_id, page, content) VALUES (?1, ?2, ?3)
-         ON CONFLICT(document_id, page) DO UPDATE SET content = excluded.content",
+        "INSERT INTO document_pages (document_id, page, content) VALUES (?1, ?2, ?3)",
     )?;
-    let changed = pages
-        .iter()
-        .enumerate()
-        .filter(|(page, content)| stored.get(*page) != Some(*content));
-    for (page, content) in changed {
+    for (page, content) in pages.iter().enumerate() {
         write.execute(rusqlite::params![document, page, content])?;
     }
     Ok(())
 }
 
 /// Store a chunk of `document` for each of `cuts` of its stored `pages`, with the
-/// words of its text for keyword search, returning the chunks.
+/// words of its text for keyword search, returning those whose text has no vector.
 fn add_chunks(
     tx: &Transaction<'_>,
     document: DocumentId,
     pages: &[String],
-    cuts: &[&PageCut],
+    cuts: &[PageCut],
 ) -> rusqlite::Result<Vec<ChunkId>> {
     let mut insert = tx.prepare_cached(
-        "INSERT INTO chunks (document_id, page, byte_start, byte_end)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO chunks (document_id, page, byte_start, byte_end, hash)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          RETURNING id",
     )?;
     let mut index_words =
         tx.prepare_cached("INSERT INTO document_chunk_fts (rowid, text) VALUES (?1, ?2)")?;
-    cuts.iter()
-        .map(|cut| {
-            let chunk: ChunkId = insert.query_row(
-                rusqlite::params![document, cut.page, cut.bytes.start, cut.bytes.end],
-                |r| r.get(0),
-            )?;
-            index_words.execute(rusqlite::params![chunk, cut.text_in(pages)])?;
-            Ok(chunk)
-        })
-        .collect()
-}
-
-/// Remove the pages of `document` at position `first` and after, with their chunks.
-fn remove_pages_from(
-    tx: &Transaction<'_>,
-    document: DocumentId,
-    first: usize,
-) -> rusqlite::Result<()> {
-    tx.prepare_cached("DELETE FROM document_pages WHERE document_id = ?1 AND page >= ?2")?
-        .execute(rusqlite::params![document, first])?;
-    Ok(())
+    let mut has_vector =
+        tx.prepare_cached("SELECT EXISTS (SELECT 1 FROM document_vectors WHERE hash = ?1)")?;
+    let mut unembedded = Vec::new();
+    for cut in cuts {
+        let text = cut.text_in(pages);
+        let hash = text_hash(text.as_bytes());
+        let chunk: ChunkId = insert.query_row(
+            rusqlite::params![document, cut.page, cut.bytes.start, cut.bytes.end, hash],
+            |r| r.get(0),
+        )?;
+        index_words.execute(rusqlite::params![chunk, text])?;
+        if !has_vector.query_row(rusqlite::params![hash], |r| r.get::<_, bool>(0))? {
+            unembedded.push(chunk);
+        }
+    }
+    Ok(unembedded)
 }

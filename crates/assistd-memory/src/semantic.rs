@@ -205,24 +205,17 @@ pub struct MemoryHit {
     pub similarity: f32,
 }
 
-/// The row an embedding belongs to.
+/// What an embedding is stored for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingTarget {
-    Chunk(ChunkId),
+    /// Every chunk cut from this kind of source that holds the embedded text.
+    ChunkText(ChunkSource),
+    /// The memory whose value is the embedded text.
     Memory(MemoryId),
 }
 
-impl fmt::Display for EmbeddingTarget {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Chunk(id) => write!(f, "chunk {id}"),
-            Self::Memory(id) => write!(f, "memory {id}"),
-        }
-    }
-}
-
-/// The L2-normalised embedding of `text`, the content of `target` when it was embedded,
-/// or no `vector` when the model cannot embed that text.
+/// The L2-normalised embedding of `text` for `target`, or no `vector` when the model
+/// cannot embed that text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Embedding {
     pub target: EmbeddingTarget,
@@ -243,7 +236,7 @@ pub struct EmbeddingSpace {
     pub document_prefix: String,
 }
 
-/// Rows neither embedded nor marked unembeddable, by what they hold.
+/// Chunks and memories whose text is neither embedded nor marked unembeddable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UnindexedRows {
     pub message_chunks: u64,
@@ -258,7 +251,7 @@ pub struct IndexRootCounts {
     pub documents: u64,
     /// Chunks its documents are cut into.
     pub chunks: u64,
-    /// Those of its chunks neither embedded nor marked unembeddable.
+    /// Those of its chunks whose text is neither embedded nor marked unembeddable.
     pub unembedded_chunks: u64,
 }
 
@@ -400,7 +393,8 @@ pub trait RecallStore: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Option<DocumentText>>;
 }
 
-/// The rows still to embed and the vectors stored for them, all in one embedding space.
+/// The texts still to embed and the vectors stored for them, all in one embedding space.
+/// A chunk's vector is stored once for its text, whichever chunks of its kind hold it.
 #[async_trait]
 pub trait EmbeddingQueue: fmt::Debug + Send + Sync + 'static {
     /// Record `space` as the one every stored vector is in. When a different space was
@@ -413,7 +407,7 @@ pub trait EmbeddingQueue: fmt::Debug + Send + Sync + 'static {
     /// leaves none does not signal it.
     fn rows_to_embed(&self) -> Arc<Notify>;
 
-    /// Rows neither embedded nor marked unembeddable.
+    /// Chunks and memories whose text is neither embedded nor marked unembeddable.
     async fn count_missing(&self) -> Result<UnindexedRows>;
 
     /// Up to `limit` memories after `after` (from the start when `None`) neither
@@ -425,7 +419,8 @@ pub trait EmbeddingQueue: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Vec<(MemoryId, String)>>;
 
     /// Up to `limit` chunks cut from `source` after `after` (from the start when `None`)
-    /// neither embedded nor marked unembeddable, in id order, as `(id, chunk text)`.
+    /// whose text is neither embedded nor marked unembeddable, in id order, as
+    /// `(id, chunk text)`: of the chunks holding one text, only the first.
     async fn chunks_missing_embedding(
         &self,
         source: ChunkSource,
@@ -433,9 +428,9 @@ pub trait EmbeddingQueue: fmt::Debug + Send + Sync + 'static {
         limit: usize,
     ) -> Result<Vec<(ChunkId, String)>>;
 
-    /// Upsert `embeddings` in one transaction, skipping targets deleted since they
-    /// were embedded and memories whose value no longer matches. One with no vector
-    /// marks its target unembeddable.
+    /// Upsert `embeddings` in one transaction, skipping chunk texts no chunk of their
+    /// kind holds any more, memories deleted since they were embedded and memories
+    /// whose value no longer matches. One with no vector marks its text unembeddable.
     async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> Result<()>;
 
     /// Clear every unembeddable mark, returning how many, so those rows are missing again.
@@ -472,10 +467,9 @@ pub trait DocumentStore: fmt::Debug + Send + Sync + 'static {
     /// Forget every skipped file, returning how many, so the next pass reads each again.
     async fn forget_skipped_files(&self) -> Result<u64>;
 
-    /// Store `pages`, in file order, as the document at `path`, seen by `pass`, dropping
-    /// what was transcribed of it before and any skip recorded for it. No chunk spans two
-    /// pages, and one whose text is unchanged keeps its vector wherever it sits; returns
-    /// the new chunks, which have none.
+    /// Store `pages`, in file order, as the document at `path`, seen by `pass`, replacing
+    /// its chunks and dropping what was transcribed of it before and any skip recorded
+    /// for it. No chunk spans two pages. Returns the chunks whose text has no vector.
     async fn index_document(
         &self,
         pass: IndexPass,
@@ -495,7 +489,8 @@ pub trait DocumentStore: fmt::Debug + Send + Sync + 'static {
 
     /// Record `reading` of `page` with its text as the page's; ignored when the page
     /// no longer waits or its file was indexed again. Once no page of the document
-    /// waits, its pages are cut again, and the new chunks, without vectors, returned.
+    /// waits, its pages that have no chunk are cut, and the new chunks whose text has
+    /// no vector returned.
     async fn store_page_reading(
         &self,
         page: WaitingPage,
@@ -516,8 +511,8 @@ pub trait DocumentStore: fmt::Debug + Send + Sync + 'static {
     /// that walked only those parts of its root.
     async fn finish_index_pass_under(&self, pass: IndexPass, paths: Vec<PathBuf>) -> Result<u64>;
 
-    /// Remove the document at `path` with its chunks and vectors; `false` when
-    /// none was indexed.
+    /// Remove the document at `path` with its chunks, and the vectors of the texts
+    /// only they held; `false` when none was indexed.
     async fn remove_document(&self, path: &Path) -> Result<bool>;
 
     /// Every registered index root.
