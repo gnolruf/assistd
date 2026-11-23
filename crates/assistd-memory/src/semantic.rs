@@ -1,5 +1,5 @@
-//! Retrieval over the chunks cut from transcripts, saved memories and documents: by
-//! vector, and for documents by their words as well.
+//! Retrieval over the chunks cut from transcripts, saved memories and documents: one
+//! search of whichever kinds are asked for, by vector and by their words.
 
 use std::fmt;
 use std::fs::Metadata;
@@ -16,30 +16,44 @@ use crate::{ChunkId, DocumentId, MemoryId, MessageId, PersistedRole, Result, Ses
 
 const POINTER_DATE_FORMAT: &str = "%Y-%m-%d";
 
-/// One matched chunk: its text, its cosine similarity to the query, and where it came from.
+/// What one search ranks and how.
 #[derive(Debug, Clone, PartialEq)]
-pub struct EmbeddingHit {
+pub struct ChunkSearch {
+    /// The query as typed; only a keyword ranking reads it.
+    pub query: String,
+    /// The query's L2-normalised vector; when empty, nothing is ranked by vector.
+    pub query_vector: Vec<f32>,
+    /// The kinds of source to search.
+    pub kinds: Vec<ChunkSource>,
+    /// Which sessions' messages are searched; other kinds ignore it.
+    pub sessions: SessionScope,
+    /// Hits to return at most.
+    pub top_k: usize,
+    pub ranking: SearchRanking,
+}
+
+/// What orders a search's hits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchRanking {
+    /// Cosine similarity to the query vector.
+    Vector,
+    /// The ranking by vector and the ranking by BM25 against the query's words,
+    /// fused by reciprocal rank.
+    VectorAndKeyword,
+}
+
+/// One source a search found, a message, a memory or a document, shown through its
+/// best-ranked chunk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
     pub chunk_id: ChunkId,
     pub locator: ChunkLocator,
     pub text: String,
-    pub similarity: f32,
-}
-
-/// One document a search found, shown through its best-ranked chunk.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DocumentHit {
-    pub chunk_id: ChunkId,
-    pub document_id: DocumentId,
-    pub path: PathBuf,
-    /// The page the chunk is on, counted from zero.
-    pub page: usize,
-    pub page_count: usize,
-    /// The bytes of the page's text the chunk covers.
-    pub bytes: Range<usize>,
-    pub indexed_at: DateTime<Utc>,
-    pub text: String,
-    /// The chunk's cosine similarity to the query; `None` while it has no vector.
+    /// The chunk's cosine similarity to the query; `None` while its text has no vector.
     pub similarity: Option<f32>,
+    /// How many other messages and documents among those searched hold this same
+    /// text; always zero for a memory.
+    pub held_elsewhere: usize,
 }
 
 /// The source a matched chunk was cut from.
@@ -54,6 +68,8 @@ pub enum ChunkLocator {
         /// The session's title, or its first user message cut short when untitled.
         session_label: String,
     },
+    /// A saved memory, whose value is the chunk's text.
+    Memory { memory_id: MemoryId, key: String },
     /// A byte range of one page of an indexed local document's text.
     Document {
         document_id: DocumentId,
@@ -69,7 +85,8 @@ pub enum ChunkLocator {
 }
 
 impl ChunkLocator {
-    /// Whether both chunks were cut from the same source: one session, or one document.
+    /// Whether both chunks were cut from the same source: one session, one memory, or
+    /// one document.
     pub fn same_source(&self, other: &Self) -> bool {
         match (self, other) {
             (
@@ -78,6 +95,12 @@ impl ChunkLocator {
                     session_id: other, ..
                 },
             ) => session_id == other,
+            (
+                Self::Memory { memory_id, .. },
+                Self::Memory {
+                    memory_id: other, ..
+                },
+            ) => memory_id == other,
             (
                 Self::Document { document_id, .. },
                 Self::Document {
@@ -90,7 +113,8 @@ impl ChunkLocator {
 }
 
 /// A source matched by one or more chunks, listed once so it can be read on
-/// demand instead of quoted. Displays as kind, short id, label, date and match count.
+/// demand instead of quoted. Displays as kind, short id, label, date and match count;
+/// a memory as its key.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourcePointer {
     /// Where the source's best-ranked match sits.
@@ -100,7 +124,7 @@ pub struct SourcePointer {
 
 impl SourcePointer {
     /// One pointer per source among `hits`, in order of each source's first hit.
-    pub fn group<'a>(hits: impl IntoIterator<Item = &'a EmbeddingHit>) -> Vec<Self> {
+    pub fn group<'a>(hits: impl IntoIterator<Item = &'a SearchHit>) -> Vec<Self> {
         let mut pointers: Vec<Self> = Vec::new();
         for hit in hits {
             match pointers
@@ -135,6 +159,7 @@ impl fmt::Display for SourcePointer {
                 timestamp.format(POINTER_DATE_FORMAT),
                 self.matches,
             ),
+            ChunkLocator::Memory { key, .. } => write!(f, "memory \"{key}\""),
             ChunkLocator::Document {
                 path, indexed_at, ..
             } => write!(
@@ -196,15 +221,6 @@ pub enum ChunkSource {
     /// A saved memory, whose whole value is one chunk.
     Memory,
     Document,
-}
-
-/// One saved-memory hit, ranked by cosine similarity to the query.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MemoryHit {
-    pub memory_id: MemoryId,
-    pub key: String,
-    pub value: String,
-    pub similarity: f32,
 }
 
 /// The L2-normalised embedding of `text` for every chunk cut from `source` that holds
@@ -339,41 +355,20 @@ pub struct IndexPass {
     pub(crate) pass: i64,
 }
 
-/// Top-K retrieval over embedded chunks, memories and documents, and reads of the
-/// text around a hit.
+/// The one search over chunks of every kind, and reads of the text around a hit.
 #[async_trait]
 pub trait RecallStore: fmt::Debug + Send + Sync + 'static {
-    /// Top-K messages in `scope` by their best chunk's cosine to the L2-normalised
-    /// `query_vector`, each hit carrying that chunk's text. Messages outside `scope`
-    /// are dropped before ranking, so never count toward `top_k`.
-    async fn nearest_chunks(
-        &self,
-        query_vector: Vec<f32>,
-        top_k: usize,
-        scope: SessionScope,
-    ) -> Result<Vec<EmbeddingHit>>;
-
-    /// Top-K documents for `query`, best first: their ranking by best chunk's cosine
-    /// to the L2-normalised `query_vector` and their ranking by best chunk's BM25
-    /// against the words of `query`, fused by reciprocal rank.
-    async fn search_documents(
-        &self,
-        query: String,
-        query_vector: Vec<f32>,
-        top_k: usize,
-    ) -> Result<Vec<DocumentHit>>;
+    /// The `top_k` best sources of `search`'s kinds, best first, each through its
+    /// best-ranked chunk. Messages outside its sessions are dropped before ranking. A
+    /// text several messages or documents hold is one hit, at the best-ranked of
+    /// them; every memory is a hit of its own.
+    async fn search(&self, search: ChunkSearch) -> Result<Vec<SearchHit>>;
 
     /// The chunks around `locator` in its source: for a message, the last chunk of
     /// the previous user or assistant message in its session and the first of the next;
-    /// for a document, those starting just before and after it, on any of its pages.
+    /// for a document, those starting just before and after it, on any of its pages;
+    /// for a memory, none.
     async fn adjacent_chunks(&self, locator: &ChunkLocator) -> Result<AdjacentChunks>;
-
-    /// Top-K saved memories by cosine to the L2-normalised `query_vector`.
-    async fn nearest_memories(
-        &self,
-        query_vector: Vec<f32>,
-        top_k: usize,
-    ) -> Result<Vec<MemoryHit>>;
 
     /// The stored text of page `page`, counted from zero, of the document indexed at
     /// `path`, within `bytes` of that page: narrowed to whole characters, and empty
@@ -524,31 +519,11 @@ pub struct NoSemanticStore;
 
 #[async_trait]
 impl RecallStore for NoSemanticStore {
-    async fn nearest_chunks(
-        &self,
-        _query_vector: Vec<f32>,
-        _top_k: usize,
-        _scope: SessionScope,
-    ) -> Result<Vec<EmbeddingHit>> {
-        Ok(Vec::new())
-    }
-    async fn search_documents(
-        &self,
-        _query: String,
-        _query_vector: Vec<f32>,
-        _top_k: usize,
-    ) -> Result<Vec<DocumentHit>> {
+    async fn search(&self, _search: ChunkSearch) -> Result<Vec<SearchHit>> {
         Ok(Vec::new())
     }
     async fn adjacent_chunks(&self, _locator: &ChunkLocator) -> Result<AdjacentChunks> {
         Ok(AdjacentChunks::default())
-    }
-    async fn nearest_memories(
-        &self,
-        _query_vector: Vec<f32>,
-        _top_k: usize,
-    ) -> Result<Vec<MemoryHit>> {
-        Ok(Vec::new())
     }
     async fn document_text(
         &self,

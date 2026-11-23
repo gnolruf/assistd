@@ -3,26 +3,26 @@
 
 use std::iter;
 
-use assistd_memory::{AdjacentChunks, ChunkId, ChunkLocator, ContextChunk, EmbeddingHit};
+use assistd_memory::{AdjacentChunks, ChunkId, ChunkLocator, ContextChunk, SearchHit};
 
-use super::{locator_tag, one_line};
+use super::{hit_score, locator_tag, one_line};
 
-/// One printed chunk; `similarity` is set when the chunk was itself a hit.
+/// One printed chunk; `score` is set when the chunk was itself a hit.
 #[derive(Debug, Clone)]
 struct ExchangeLine {
     chunk_id: ChunkId,
     locator: ChunkLocator,
     text: String,
-    similarity: Option<f32>,
+    score: Option<String>,
 }
 
 impl ExchangeLine {
-    fn hit(hit: &EmbeddingHit) -> Self {
+    fn hit(hit: &SearchHit) -> Self {
         Self {
             chunk_id: hit.chunk_id,
             locator: hit.locator.clone(),
             text: hit.text.clone(),
-            similarity: Some(hit.similarity),
+            score: Some(hit_score(hit)),
         }
     }
 
@@ -31,14 +31,15 @@ impl ExchangeLine {
             chunk_id: chunk.chunk_id,
             locator: chunk.locator,
             text: chunk.text,
-            similarity: None,
+            score: None,
         }
     }
 
     fn render(&self) -> String {
         let score = self
-            .similarity
-            .map_or_default(|similarity| format!(" sim={:.0}%", similarity * 100.0));
+            .score
+            .as_ref()
+            .map_or_default(|score| format!(" {score}"));
         format!(
             "{}{score}] {}",
             locator_tag(&self.locator),
@@ -57,7 +58,7 @@ pub(super) struct Exchanges {
 impl Exchanges {
     /// Add `hit` between its neighbours, folding every run it shares a chunk with
     /// into one run at the position of the earliest of them.
-    pub(super) fn add(&mut self, hit: &EmbeddingHit, adjacent: AdjacentChunks) {
+    pub(super) fn add(&mut self, hit: &SearchHit, adjacent: AdjacentChunks) {
         let mut run: Vec<ExchangeLine> = adjacent
             .before
             .map(ExchangeLine::context)
@@ -108,7 +109,7 @@ fn merge_runs(first: Vec<ExchangeLine>, second: Vec<ExchangeLine>) -> Vec<Exchan
             .iter_mut()
             .find(|kept| kept.chunk_id == line.chunk_id)
         {
-            Some(kept) => kept.similarity = kept.similarity.or(line.similarity),
+            Some(kept) => kept.score = kept.score.take().or(line.score),
             None => merged.push(line),
         }
     }

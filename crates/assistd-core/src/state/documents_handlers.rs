@@ -17,7 +17,8 @@ use assistd_ipc::{
     SkippedFiles,
 };
 use assistd_memory::{
-    DocumentHit, DocumentStore, EmbeddingQueue, IndexRootCounts, MemoryError, RecallStore,
+    ChunkLocator, ChunkSearch, ChunkSource, DocumentStore, EmbeddingQueue, IndexRootCounts,
+    MemoryError, RecallStore, SearchHit, SearchRanking, SessionScope,
 };
 use assistd_tools::policy::on_blocking_pool;
 use assistd_utils::readiness::NotReady;
@@ -288,13 +289,21 @@ impl DocumentsService {
             limit => limit,
         };
         let query_vector = embedder.embed_query(&query).await.context("embed failed")?;
+        let documents = ChunkSearch {
+            query,
+            query_vector,
+            kinds: vec![ChunkSource::Document],
+            sessions: SessionScope::All,
+            top_k: limit as usize,
+            ranking: SearchRanking::VectorAndKeyword,
+        };
         let hits = self
             .recall
-            .search_documents(query, query_vector, limit as usize)
+            .search(documents)
             .await
             .context("document search failed")?;
-        for hit in hits {
-            let _ = tx.send(Event::new(id.clone(), wire_hit(hit))).await;
+        for hit in hits.into_iter().filter_map(wire_hit) {
+            let _ = tx.send(Event::new(id.clone(), hit)).await;
         }
         Ok(())
     }
@@ -376,15 +385,28 @@ fn wire_skip_reason(cause: SkipCause) -> DocumentSkipReason {
     }
 }
 
-fn wire_hit(hit: DocumentHit) -> EventBody {
-    EventBody::DocumentHit {
-        path: wire_path(&hit.path),
-        page: hit.page as u64 + 1,
-        page_count: hit.page_count as u64,
-        byte_start: hit.bytes.start as u64,
-        byte_end: hit.bytes.end as u64,
-        indexed_at: hit.indexed_at,
+/// A hit on a document as its wire event.
+fn wire_hit(hit: SearchHit) -> Option<EventBody> {
+    let ChunkLocator::Document {
+        path,
+        page,
+        page_count,
+        bytes,
+        indexed_at,
+        ..
+    } = hit.locator
+    else {
+        return None;
+    };
+    Some(EventBody::DocumentHit {
+        path: wire_path(&path),
+        page: page as u64 + 1,
+        page_count: page_count as u64,
+        byte_start: bytes.start as u64,
+        byte_end: bytes.end as u64,
+        indexed_at,
         content: hit.text,
         similarity: hit.similarity,
-    }
+        held_elsewhere: hit.held_elsewhere as u64,
+    })
 }

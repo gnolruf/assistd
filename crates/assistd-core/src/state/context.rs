@@ -4,7 +4,9 @@
 use tracing::debug;
 
 use assistd_ipc::PermissionMode;
-use assistd_memory::{MemoryHit, SessionScope, SourcePointer};
+use assistd_memory::{
+    ChunkLocator, ChunkSearch, ChunkSource, SearchHit, SearchRanking, SessionScope, SourcePointer,
+};
 use assistd_wm::FocusedWindowContext;
 
 use super::DispatchError;
@@ -78,7 +80,7 @@ impl TurnService {
         let mut block = String::new();
         if !memories.is_empty() {
             block.push_str(SAVED_MEMORIES_HEADER);
-            block.extend(memories.iter().map(format_memory_line));
+            block.extend(memories.iter().filter_map(format_memory_line));
         }
         if !sessions.is_empty() {
             block.push_str(PAST_SESSIONS_HEADER);
@@ -91,13 +93,32 @@ impl TurnService {
     async fn recall_saved_memories(
         &self,
         embedding: Vec<f32>,
-    ) -> Result<Vec<MemoryHit>, DispatchError> {
-        let top_k = self.deps.embedding_cfg.top_k.get() as usize;
+    ) -> Result<Vec<SearchHit>, DispatchError> {
+        self.recall_nearest(ChunkSource::Memory, SessionScope::All, embedding)
+            .await
+    }
+
+    /// The `top_k` sources of `kind` nearest `embedding`, those at or above the
+    /// similarity floor, messages held to `sessions`.
+    async fn recall_nearest(
+        &self,
+        kind: ChunkSource,
+        sessions: SessionScope,
+        embedding: Vec<f32>,
+    ) -> Result<Vec<SearchHit>, DispatchError> {
         let floor = self.deps.embedding_cfg.min_similarity.get();
-        let hits = self.deps.recall.nearest_memories(embedding, top_k).await?;
+        let nearest = ChunkSearch {
+            query: String::new(),
+            query_vector: embedding,
+            kinds: vec![kind],
+            sessions,
+            top_k: self.deps.embedding_cfg.top_k.get() as usize,
+            ranking: SearchRanking::Vector,
+        };
+        let hits = self.deps.recall.search(nearest).await?;
         Ok(hits
             .into_iter()
-            .filter(|hit| hit.similarity >= floor)
+            .filter(|hit| hit.similarity.is_some_and(|similarity| similarity >= floor))
             .collect())
     }
 
@@ -108,16 +129,11 @@ impl TurnService {
         embedding: Vec<f32>,
     ) -> Result<Vec<SourcePointer>, DispatchError> {
         let (session, _branch) = self.deps.session_ctx.current().await;
-        let top_k = self.deps.embedding_cfg.top_k.get() as usize;
-        let floor = self.deps.embedding_cfg.min_similarity.get();
+        let others = SessionScope::AllExcept(session);
         let hits = self
-            .deps
-            .recall
-            .nearest_chunks(embedding, top_k, SessionScope::AllExcept(session))
+            .recall_nearest(ChunkSource::Message, others, embedding)
             .await?;
-        Ok(SourcePointer::group(
-            hits.iter().filter(|hit| hit.similarity >= floor),
-        ))
+        Ok(SourcePointer::group(&hits))
     }
 
     /// How to phrase a reply that is read aloud, and where its unspeakable detail goes: a
@@ -166,14 +182,16 @@ pub(super) fn voice_approvals_note(origin: &TurnOrigin, mode: PermissionMode) ->
         .then(|| format!("{VOICE_APPROVALS_HEADLESS}{edits_unasked}{VOICE_APPROVALS_ASKED_ALOUD}"))
 }
 
-/// One saved memory as a single-line `key: value` bullet, its value cut to
+/// A hit on a saved memory as a single-line `key: value` bullet, its value cut to
 /// [`MAX_MEMORY_VALUE_CHARS`].
-pub(super) fn format_memory_line(hit: &MemoryHit) -> String {
-    format!(
-        "- {}: {}\n",
-        hit.key,
-        truncate_for_context(&flatten_line_breaks(&hit.value), MAX_MEMORY_VALUE_CHARS)
-    )
+pub(super) fn format_memory_line(hit: &SearchHit) -> Option<String> {
+    let ChunkLocator::Memory { key, .. } = &hit.locator else {
+        return None;
+    };
+    Some(format!(
+        "- {key}: {}\n",
+        truncate_for_context(&flatten_line_breaks(&hit.text), MAX_MEMORY_VALUE_CHARS)
+    ))
 }
 
 /// `None` when every field is empty after sanitising.

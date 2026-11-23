@@ -478,9 +478,10 @@ fn memory_event_cases() -> Vec<(Event, &'static str)> {
                 timestamp: "2026-04-28T00:00:00Z".into(),
                 role: Role::User,
                 content: "the rust embeddings daemon".into(),
-                similarity: 0.5,
+                similarity: Some(0.5),
+                held_elsewhere: 0,
             }),
-            r#"{"id":"r","type":"semantic_hit","message_id":42,"chunk_id":7,"session_id":"s","timestamp":"2026-04-28T00:00:00Z","role":"user","content":"the rust embeddings daemon","similarity":0.5}"#,
+            r#"{"id":"r","type":"semantic_hit","message_id":42,"chunk_id":7,"session_id":"s","timestamp":"2026-04-28T00:00:00Z","role":"user","content":"the rust embeddings daemon","similarity":0.5,"held_elsewhere":0}"#,
         ),
         (
             event(EventBody::MemoryValue {
@@ -1193,8 +1194,9 @@ fn document_pass_and_search_event_cases() -> Vec<(Event, &'static str)> {
                 indexed_at: DateTime::from_timestamp(1_793_887_200, 0).unwrap(),
                 content: "renewal terms".into(),
                 similarity: Some(0.5),
+                held_elsewhere: 3,
             }),
-            r#"{"id":"r","type":"document_hit","path":"/home/u/notes/lease.pdf","page":2,"page_count":9,"byte_start":0,"byte_end":640,"indexed_at":"2026-11-05T14:00:00Z","content":"renewal terms","similarity":0.5}"#,
+            r#"{"id":"r","type":"document_hit","path":"/home/u/notes/lease.pdf","page":2,"page_count":9,"byte_start":0,"byte_end":640,"indexed_at":"2026-11-05T14:00:00Z","content":"renewal terms","similarity":0.5,"held_elsewhere":3}"#,
         ),
     ]
 }

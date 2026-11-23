@@ -7,8 +7,10 @@ use std::time::Instant;
 
 use assistd_embed::{Embedder, EmbedderHandle};
 use assistd_memory::{
-    ChunkLocator, EmbeddingHit, MemoryHit, RecallStore, SessionId, SessionScope, TranscriptStore,
+    ChunkLocator, ChunkSearch, ChunkSource, RecallStore, SearchHit, SearchRanking, SessionId,
+    SessionScope, TranscriptStore,
 };
+use assistd_utils::text::similarity_percent;
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
@@ -110,12 +112,19 @@ impl RememberTool {
         &self,
         embedder: &dyn Embedder,
         query: String,
-    ) -> Result<Vec<MemoryHit>, ToolError> {
+    ) -> Result<Vec<SearchHit>, ToolError> {
         match embedder.embed_query(&query).await {
-            Ok(query_vec) => Ok(self
-                .semantic
-                .nearest_memories(query_vec, SEARCH_LIMIT)
-                .await?),
+            Ok(query_vector) => {
+                let memories = ChunkSearch {
+                    query,
+                    query_vector,
+                    kinds: vec![ChunkSource::Memory],
+                    sessions: SessionScope::All,
+                    top_k: SEARCH_LIMIT,
+                    ranking: SearchRanking::Vector,
+                };
+                Ok(self.semantic.search(memories).await?)
+            }
             Err(e) => {
                 tracing::debug!(
                     target: "assistd::embed",
@@ -281,8 +290,8 @@ impl ReminisceTool {
             Ok(embedder) => embedder,
             Err(e) => return Ok(format!("(past conversations cannot be searched: {e})")),
         };
-        let query_vec = match embedder.embed_query(&request.query).await {
-            Ok(query_vec) => query_vec,
+        let query_vector = match embedder.embed_query(&request.query).await {
+            Ok(query_vector) => query_vector,
             Err(e) => {
                 tracing::debug!(
                     target: "assistd::embed",
@@ -292,10 +301,15 @@ impl ReminisceTool {
                 return Ok("(embedding unavailable)".to_string());
             }
         };
-        let hits = self
-            .semantic
-            .nearest_chunks(query_vec, request.limit, scope)
-            .await?;
+        let messages = ChunkSearch {
+            query: request.query,
+            query_vector,
+            kinds: vec![ChunkSource::Message],
+            sessions: scope,
+            top_k: request.limit,
+            ranking: SearchRanking::VectorAndKeyword,
+        };
+        let hits = self.semantic.search(messages).await?;
         tracing::info!(
             target: "assistd::embed",
             returned = hits.len(),
@@ -313,7 +327,7 @@ impl ReminisceTool {
     /// `hits` from one session, each between its neighbouring chunks and merged
     /// with hits it overlaps, under a header naming the session; hits whose
     /// addition would overflow the output budget are dropped with the rest.
-    async fn format_exchanges(&self, hits: &[EmbeddingHit]) -> Result<String, ToolError> {
+    async fn format_exchanges(&self, hits: &[SearchHit]) -> Result<String, ToolError> {
         let Some(first) = hits.first() else {
             return Ok("(no matches in that session)".to_string());
         };
@@ -346,17 +360,21 @@ impl Tool for ReminisceTool {
 
     fn description(&self) -> Cow<'_, str> {
         "Search *earlier* conversations, and the part of this one replaced \
-         by its summary, for passages similar in meaning to a query. Complement to `remember`: its search looks \
+         by its summary, for passages similar in meaning to a query or \
+         holding its words. Complement to `remember`: its search looks \
          up *saved memories* (key/value), `reminisce` searches *past \
          dialogue text*; use it when the user references something they \
          'discussed before' or 'worked on last month'. Robust to \
          paraphrase: a query like \"that rust project we discussed\" will \
-         match a past passage about \"the assistd embedding daemon in Rust\". \
+         match a past passage about \"the assistd embedding daemon in Rust\", \
+         and an exact string such as an error message, a path or a name is \
+         found as written; `sim=n/a` marks a passage found by its words alone. \
          Use it in two steps. First search broadly with `session` null: \
          each of up to `limit` ranked snippets names its session's short id \
          and title, then its timestamp, role and the matching excerpt; hits \
          marked `earlier in this chat` come from this conversation's \
-         summarized part. Then, \
+         summarized part, and a passage said more than once is listed once, \
+         with how many other messages hold it. Then, \
          to read a chat you found, search again with `session` set to that \
          id: hits come only from that chat, each shown with the message \
          before and after it so you see the exchange."
@@ -370,9 +388,10 @@ impl Tool for ReminisceTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Natural-language query. The model embeds \
-                                    this and finds the top-`limit` past passages \
-                                    by cosine similarity."
+                    "description": "Natural-language query, or an exact \
+                                    string to find. Past passages are ranked \
+                                    by similarity of meaning and by the \
+                                    query's words, and the top `limit` returned."
                 },
                 "limit": {
                     "type": "integer",
@@ -403,14 +422,20 @@ impl Tool for ReminisceTool {
     }
 }
 
-fn format_memories(hits: &[MemoryHit]) -> String {
-    if hits.is_empty() {
+fn format_memories(hits: &[SearchHit]) -> String {
+    let lines: Vec<String> = hits.iter().filter_map(memory_line).collect();
+    if lines.is_empty() {
         return "(no memories)".to_string();
     }
-    hits.iter()
-        .map(|hit| format!("{}: {}", hit.key, hit.value))
-        .collect::<Vec<_>>()
-        .join("\n")
+    lines.join("\n")
+}
+
+/// A hit on a memory as `key: value`.
+fn memory_line(hit: &SearchHit) -> Option<String> {
+    let ChunkLocator::Memory { key, .. } = &hit.locator else {
+        return None;
+    };
+    Some(format!("{key}: {}", hit.text))
 }
 
 fn reminisce_limit(args: &Value) -> Result<usize, ToolError> {
@@ -426,7 +451,7 @@ fn reminisce_limit(args: &Value) -> Result<usize, ToolError> {
 
 /// Ranked one-line hits within the output budget; those from `current` are
 /// marked as coming from earlier in this chat.
-fn format_chunks(hits: &[EmbeddingHit], current: Option<SessionId>) -> String {
+fn format_chunks(hits: &[SearchHit], current: Option<SessionId>) -> String {
     if hits.is_empty() {
         return "(no matches)".to_string();
     }
@@ -450,13 +475,23 @@ fn push_omitted_note(lines: &mut Vec<String>, omitted: usize) {
     }
 }
 
-fn format_chunk(hit: &EmbeddingHit, current: Option<SessionId>) -> String {
+fn format_chunk(hit: &SearchHit, current: Option<SessionId>) -> String {
     format!(
-        "[{} sim={:.0}%] {}",
+        "[{} {}] {}",
         hit_source(&hit.locator, current),
-        hit.similarity * 100.0,
+        hit_score(hit),
         one_line(&hit.text)
     )
+}
+
+/// A hit's similarity, and how many other messages hold its text when any does.
+fn hit_score(hit: &SearchHit) -> String {
+    let similarity = similarity_percent(hit.similarity);
+    match hit.held_elsewhere {
+        0 => format!("sim={similarity}"),
+        1 => format!("sim={similarity}, also in 1 other message"),
+        others => format!("sim={similarity}, also in {others} other messages"),
+    }
 }
 
 /// Where a hit came from, with its time and role for a message.
@@ -480,6 +515,7 @@ fn hit_source(locator: &ChunkLocator, current: Option<SessionId>) -> String {
                 role.as_wire()
             )
         }
+        ChunkLocator::Memory { key, .. } => format!("memory \"{key}\""),
         ChunkLocator::Document { path, .. } => format!("document \"{}\"", path.display()),
     }
 }
@@ -491,17 +527,19 @@ fn source_header(locator: &ChunkLocator) -> String {
             session_label,
             ..
         } => format!("session {} \"{session_label}\":", session_id.short()),
+        ChunkLocator::Memory { key, .. } => format!("memory \"{key}\":"),
         ChunkLocator::Document { path, .. } => format!("document \"{}\":", path.display()),
     }
 }
 
 /// The unclosed tag that opens a line in a source-scoped result: `[timestamp role`
-/// for a message, `[page P bytes start..end` for a document.
+/// for a message, `[memory` for a memory, `[page P bytes start..end` for a document.
 fn locator_tag(locator: &ChunkLocator) -> String {
     match locator {
         ChunkLocator::Message {
             timestamp, role, ..
         } => format!("[{} {}", timestamp.format(TIMESTAMP_FORMAT), role.as_wire()),
+        ChunkLocator::Memory { .. } => "[memory".to_string(),
         ChunkLocator::Document { page, bytes, .. } => {
             format!("[page {} bytes {}..{}", page + 1, bytes.start, bytes.end)
         }
@@ -538,9 +576,9 @@ mod tests {
 
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        AdjacentChunks, BranchId, BranchSummary, ChunkSource, DocumentHit, DocumentText, Embedding,
-        EmbeddingQueue, MemoryError, MemoryStore, NoSemanticStore, PersistedMessage, Seq,
-        SqliteHandle, SqliteSemanticStore, SqliteTranscriptStore,
+        AdjacentChunks, BranchId, BranchSummary, DocumentText, Embedding, EmbeddingQueue,
+        MemoryError, MemoryStore, NoSemanticStore, PersistedMessage, Seq, SqliteHandle,
+        SqliteSemanticStore, SqliteTranscriptStore,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -588,21 +626,8 @@ mod tests {
 
     #[async_trait]
     impl RecallStore for ScopeSpy {
-        async fn nearest_chunks(
-            &self,
-            _q: Vec<f32>,
-            _k: usize,
-            scope: SessionScope,
-        ) -> Result<Vec<EmbeddingHit>, MemoryError> {
-            *self.scope.lock() = Some(scope);
-            Ok(Vec::new())
-        }
-        async fn search_documents(
-            &self,
-            _query: String,
-            _q: Vec<f32>,
-            _k: usize,
-        ) -> Result<Vec<DocumentHit>, MemoryError> {
+        async fn search(&self, search: ChunkSearch) -> Result<Vec<SearchHit>, MemoryError> {
+            *self.scope.lock() = Some(search.sessions);
             Ok(Vec::new())
         }
         async fn adjacent_chunks(
@@ -610,13 +635,6 @@ mod tests {
             _locator: &ChunkLocator,
         ) -> Result<AdjacentChunks, MemoryError> {
             Ok(AdjacentChunks::default())
-        }
-        async fn nearest_memories(
-            &self,
-            _q: Vec<f32>,
-            _k: usize,
-        ) -> Result<Vec<MemoryHit>, MemoryError> {
-            Ok(Vec::new())
         }
         async fn document_text(
             &self,

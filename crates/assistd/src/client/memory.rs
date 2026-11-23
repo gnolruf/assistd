@@ -88,13 +88,18 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
     let mut reindex_reported = false;
     run_one_shot(req, |event| {
         match &event.body {
-            EventBody::SemanticHit { message_id, session_id, timestamp, role, content, similarity, .. } => {
+            EventBody::SemanticHit { message_id, session_id, timestamp, role, content, similarity, held_elsewhere, .. } => {
                 let session_short = session_id.chars().take(8).collect::<String>();
                 let flattened = content.replace('\n', " ");
                 let single_line = escape_controls_single_line(&flattened);
+                let also_in = match held_elsewhere {
+                    0 => String::new(),
+                    others => format!("  also_in={others}"),
+                };
                 writeln!(
                     io::stdout(),
-                    "{timestamp}  {role:9}  msg={message_id:<6}  sess={session_short}  sim={similarity:.2}  {single_line}"
+                    "{timestamp}  {role:9}  msg={message_id:<6}  sess={session_short}  sim={}{also_in}  {single_line}",
+                    similarity.map_or_else(|| "n/a".to_string(), |similarity| format!("{similarity:.2}")),
                 )?;
             }
             EventBody::MemoryValue { key, value } => match value {
