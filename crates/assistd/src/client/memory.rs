@@ -133,9 +133,11 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
                 message_chunks,
                 document_chunks,
                 memories,
+                accesses,
             } if !reindex_quiet => {
                 reindex_reported = true;
-                print_reindex_progress(*message_chunks, *document_chunks, *memories);
+                let waiting = [*message_chunks, *document_chunks, *memories, *accesses];
+                print_reindex_progress(waiting);
             }
             EventBody::Done if reindex_reported => {
                 writeln!(io::stderr())?;
@@ -147,13 +149,14 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
     .await
 }
 
-/// Overwrite the stderr progress line in place with the rows still waiting.
-fn print_reindex_progress(message_chunks: u64, document_chunks: u64, memories: u64) {
+/// Overwrite the stderr progress line in place with the rows still waiting: message
+/// chunks, document chunks, memories and accesses.
+fn print_reindex_progress([message_chunks, document_chunks, memories, accesses]: [u64; 4]) {
     let mut err = io::stderr();
     let _ = write!(
         err,
         "\rreindex: {message_chunks} message chunks, {document_chunks} document chunks, \
-         {memories} memories waiting\x1b[K"
+         {memories} memories, {accesses} accesses waiting\x1b[K"
     );
     let _ = err.flush();
 }

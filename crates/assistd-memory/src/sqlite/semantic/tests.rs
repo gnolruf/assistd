@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::pin;
 
+use assistd_ipc::Access;
 use assistd_utils::backlog::{Pass, Signals};
 use tokio::sync::watch;
 
@@ -8,7 +9,7 @@ use super::*;
 use crate::sqlite::{MessageChunker, SqliteTranscriptStore};
 use crate::{
     BranchId, FileHash, MemoryId, MemoryStore, PersistedMessage, PersistedRole, SearchRanking,
-    SessionId, SessionScope, TranscriptStore,
+    SessionId, SessionScope, ToolOutcome, ToolTrace, TranscriptStore,
 };
 
 /// The stamp of a file no test has touched since it was indexed.
@@ -70,6 +71,28 @@ impl Transcript {
             .store
             .begin_turn(self.branch, PersistedMessage::user(text));
         opened.await.unwrap().message.id
+    }
+
+    /// Append a turn whose one tool call touched `accesses`, and cut its chunks.
+    async fn touch(&self, accesses: Vec<Access>) {
+        let opened = self
+            .store
+            .begin_turn(self.branch, PersistedMessage::user("look it up"));
+        let turn = opened.await.unwrap().turn;
+        let outcome = ToolOutcome {
+            exit_code: 0,
+            duration_ms: 1,
+        };
+        let result = PersistedMessage::tool_result("done", "c-1", "run", outcome, true);
+        let trace = ToolTrace {
+            accesses,
+            relay_steps: Vec::new(),
+        };
+        self.store
+            .append_tool_result(self.branch, turn, result, trace)
+            .await
+            .unwrap();
+        chunk_saved_messages(&self.handle).await;
     }
 
     /// Append user message `text`, short enough to be one chunk, and embed its text.
@@ -399,6 +422,7 @@ async fn one_search_ranks_every_kind_asked_for_together_and_no_other() {
             ChunkLocator::Message { .. } => ChunkSource::Message,
             ChunkLocator::Memory { .. } => ChunkSource::Memory,
             ChunkLocator::Document { .. } => ChunkSource::Document,
+            ChunkLocator::Access { .. } => ChunkSource::Access,
         };
         hits.await
             .unwrap()
@@ -406,7 +430,7 @@ async fn one_search_ranks_every_kind_asked_for_together_and_no_other() {
             .map(kind)
             .collect::<Vec<_>>()
     };
-    let [message, memory, document] = CHUNK_SOURCES;
+    let [message, memory, document, _] = CHUNK_SOURCES;
 
     assert_eq!(
         found(&CHUNK_SOURCES, "").await,
@@ -512,7 +536,8 @@ async fn documents_and_messages_rank_apart_and_reindexing_replaces_document_chun
         UnindexedRows {
             message_chunks: 0,
             document_chunks: 1,
-            memories: 0
+            memories: 0,
+            accesses: 0,
         }
     );
 }
@@ -885,6 +910,83 @@ async fn a_document_with_hundreds_of_near_texts_does_not_crowd_out_the_next_near
     let hits = hits.await.unwrap();
     let found: Vec<&Path> = hits.iter().map(|hit| in_document(hit).0).collect();
     assert_eq!(found, ["/notes/manual.md", "/notes/note.md"].map(Path::new));
+}
+
+/// The session and action of an access hit.
+fn access_of(hit: &SearchHit) -> (SessionId, AccessAction) {
+    match &hit.locator {
+        ChunkLocator::Access {
+            session_id, action, ..
+        } => (*session_id, *action),
+        other => panic!("expected an access hit, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_touched_file_or_page_is_one_hit_found_by_its_words_until_its_turns_are_undone() {
+    const PAGE: &str = "Understanding lifetimes\nhttps://example.com/book/ch10";
+    let (handle, store, _temp) = fresh().await;
+    let first = Transcript::new(&handle).await;
+    let second = Transcript::new(&handle).await;
+    let page = Access::fetched(
+        "https://example.com/book/ch10",
+        Some("Understanding lifetimes"),
+    );
+    let lease = Access::Read(PathBuf::from("/home/u/contracts/lease.pdf"));
+    let unsearched = Access::Saved("lease.landlord".into());
+    first.touch(vec![lease, page.clone(), unsearched]).await;
+    second.touch(vec![page.clone(), page]).await;
+    let accesses = [ChunkSource::Access];
+    let found = async |query: &str| {
+        search_kinds(&store, &accesses, query.into(), Vec::new(), 5)
+            .await
+            .unwrap()
+    };
+
+    let by_path = found("lease").await;
+    assert_eq!(
+        by_path.len(),
+        1,
+        "a saved memory's key is no hit: {by_path:?}"
+    );
+    assert_eq!(by_path[0].text, "/home/u/contracts/lease.pdf");
+    assert_eq!(access_of(&by_path[0]), (first.session, AccessAction::Read));
+    assert_eq!(by_path[0].held_elsewhere, 0);
+
+    let by_title = found("lifetimes").await;
+    assert_eq!(by_title.len(), 1, "{by_title:?}");
+    assert_eq!(by_title[0].text, PAGE);
+    assert_eq!(
+        access_of(&by_title[0]),
+        (first.session, AccessAction::Fetched)
+    );
+    assert_eq!(by_title[0].held_elsewhere, 1, "sessions, not accesses");
+
+    embed_text(&store, ChunkSource::Access, PAGE, &unit_vec(0.0)).await;
+    let nearest = search_kinds(&store, &accesses, String::new(), unit_vec(0.0), 5);
+    let nearest = nearest.await.unwrap();
+    assert_eq!(nearest.len(), 1, "{nearest:?}");
+    assert_eq!(
+        (nearest[0].text.as_str(), nearest[0].held_elsewhere),
+        (PAGE, 1)
+    );
+    let everything = search_kinds(&store, &CHUNK_SOURCES, "lifetimes".into(), unit_vec(0.0), 5);
+    assert_eq!(everything.await.unwrap()[0].text, PAGE);
+
+    first.store.undo_last_turn(first.branch).await.unwrap();
+    assert!(found("lease").await.is_empty());
+    let by_title = found("lifetimes").await;
+    assert_eq!(by_title.len(), 1, "{by_title:?}");
+    assert_eq!(
+        access_of(&by_title[0]),
+        (second.session, AccessAction::Fetched)
+    );
+    assert_eq!(by_title[0].held_elsewhere, 0);
+    assert_eq!(stored_vectors(&handle, "access_vectors").await, 1);
+
+    second.store.undo_last_turn(second.branch).await.unwrap();
+    assert!(found("lifetimes").await.is_empty());
+    assert_eq!(stored_vectors(&handle, "access_vectors").await, 0);
 }
 
 #[tokio::test]
@@ -1674,7 +1776,8 @@ async fn missing_embedding_lists_only_unindexed_rows() {
         UnindexedRows {
             message_chunks: 2,
             document_chunks: 1,
-            memories: 1
+            memories: 1,
+            accesses: 0,
         }
     );
 
@@ -1736,7 +1839,8 @@ async fn unembeddable_rows_are_neither_missing_nor_searched_until_cleared_or_cha
         UnindexedRows {
             message_chunks: 1,
             document_chunks: 0,
-            memories: 2
+            memories: 2,
+            accesses: 0,
         }
     );
 }
@@ -1777,7 +1881,8 @@ async fn adopting_a_different_embedding_space_drops_every_vector() {
         UnindexedRows {
             message_chunks: 1,
             document_chunks: 0,
-            memories: 1
+            memories: 1,
+            accesses: 0,
         }
     );
     let all_messages = SessionScope::All;
@@ -1830,7 +1935,8 @@ async fn adopting_a_space_that_differs_only_in_its_document_prefix_drops_every_v
         UnindexedRows {
             message_chunks: 1,
             document_chunks: 0,
-            memories: 0
+            memories: 0,
+            accesses: 0,
         }
     );
 }

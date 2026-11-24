@@ -123,6 +123,7 @@ impl MemoryStack {
                     message_chunks: waiting.message_chunks,
                     document_chunks: waiting.document_chunks,
                     memories: waiting.memories,
+                    accesses: waiting.accesses,
                 };
                 if tx.send(Event::new(id.clone(), body)).await.is_err() {
                     return Ok(());

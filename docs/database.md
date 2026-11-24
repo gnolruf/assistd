@@ -198,8 +198,8 @@ erDiagram
     }
     chunks {
         int id PK "also its rowid in chunk_words"
-        int kind "0 message, 1 memory, 2 document"
-        int source "the message, memory or document it is cut from"
+        int kind "0 message, 1 memory, 2 document, 3 access"
+        int source "the message, memory, document or access it is cut from"
         int page "the document's page it is cut from, else 0"
         int byte_start
         int byte_end
@@ -215,6 +215,10 @@ erDiagram
     }
     document_vectors {
         blob hash UK "the hash of the document chunks that hold the text"
+        blob vector "quantised; NULL when the model cannot embed the text"
+    }
+    access_vectors {
+        blob hash UK "the hash of the access chunks that hold the text"
         blob vector "quantised; NULL when the model cannot embed the text"
     }
     removed_chunk_texts {
@@ -274,12 +278,12 @@ cascades to the rows that hang off it in its own file.
 `index.db` holds `chunked_source`, `index_roots`, `documents`,
 `skipped_files`, `document_pages`, `page_transcriptions`, `chunks`,
 `chunk_words`, `removed_chunk_texts` and `removed_file_hashes`;
-`vectors.db` holds the three vector tables, `embedding_meta`,
+`vectors.db` holds the four vector tables, `embedding_meta`,
 `page_readings` and `page_reader`; every other table is in `memory.db`.
-`chunks.source` names a row of one of three tables, which no foreign key
+`chunks.source` names a row of one of four tables, which no foreign key
 can say. A trigger on `document_pages`, in the same file, deletes a
-deleted page's chunks. A message or a memory is in another file, and so
-is a chunk's vector; [Three files](#three-files) says what holds them
+deleted page's chunks. A message, a memory or an access is in another
+file, and so is a chunk's vector; [Three files](#three-files) says what holds them
 together.
 
 ## Three files
@@ -292,14 +296,16 @@ level.
 
 - **Identity.** `database_identity` holds 16 random bytes written when
   `memory.db` is created. `chunked_source` records the identity
-  `index.db` cut its message and memory chunks from. When the two differ
+  `index.db` cut its message, memory and access chunks from. When the two differ
   at start, those chunks are dropped and cut again, so the ids of a new
   `memory.db` never meet another database's chunks. Document chunks
   stay: they name no row of `memory.db`.
 - **Messages.** A message is saved without chunks.
   `chunked_source.chunked_through` is the highest message id whose
   chunks are cut, and the message chunker cuts every user and assistant
-  message above it, at start and each time one is saved. It is a backlog
+  message above it, at start and each time one is saved. A tool result
+  above the mark has a chunk cut for each file or page among its
+  `accesses`, by the same pass. It is a backlog
   ([architecture](architecture.md#backlogs)) and the only code that cuts
   a message. Message ids never recycle, so a stale chunk cannot come to
   name another message. With `embedding.enabled = false` the chunker
@@ -310,7 +316,7 @@ level.
   with the value now stored, by hash, and cut again when they differ. A
   start compares every memory the same way.
 - **Deletes.** A delete commits in `memory.db`, and then the chunks whose
-  message or memory is gone are removed from `index.db` and its WAL
+  message, memory or access is gone are removed from `index.db` and its WAL
   truncated. A start removes them too. Until then a search skips them.
 
 A step on `index.db` that fails after its `memory.db` write committed is
@@ -412,8 +418,13 @@ migrations: a change to its schema takes the next version number.
   key. It can name a file that was never indexed and outlives a rebuilt
   index. `label` is a fetched page's title, flattened to one line of at
   most 200 characters. A URL and a title are the page's own choice, so
-  both are untrusted text. The list may miss things, and nothing reads
-  it back yet.
+  both are untrusted text. The list may miss things. A file read or
+  written and a page fetched each have one chunk in `index.db`, whose
+  text is the label on a line of its own, when there is one, then the
+  target, so `search` finds a page by the words of its title and
+  address and a file by the words of its path. A target that is not
+  UTF-8 has none, and neither has a session looked into or a memory
+  saved.
 - **`relay_steps`** / **`relay_entries`**: what the sub-agents behind a
   `relay` tool result did, hung off that result's `messages` row so
   forks share it and undo deletes it with the message. Each planned
@@ -539,8 +550,8 @@ resumed, saying which.
   gives another hash. Before the write commits it deletes from
   `vectors.db` the readings under each recorded hash that no document
   has any more, and empties the table.
-- **`message_vectors`** / **`memory_vectors`** / **`document_vectors`**,
-  in `vectors.db`: one vector for each
+- **`message_vectors`** / **`memory_vectors`** / **`document_vectors`** /
+  **`access_vectors`**, in `vectors.db`: one vector for each
   distinct text the chunks of that kind hold, under the text's
   `chunks.hash`. No chunk id appears in them, so a text that sits in
   many places is embedded and stored once, and a vector follows its
@@ -584,7 +595,7 @@ resumed, saying which.
 - **`embedding_meta`**, in `vectors.db`: the one row naming what
   produced every stored vector: `embedding.model`, the vector dimension the server reported,
   `embedding.custom_args` and `embedding.document_prefix`. When the
-  embedder comes up and any of the four differs from the row, the three
+  embedder comes up and any of the four differs from the row, the four
   vector tables are emptied before anything can
   search or write, so vectors from two embedding spaces are never
   compared, and the worker embeds everything again.
@@ -603,7 +614,9 @@ chunks, keeping one chunk a document, so one long document never crowds
 out the rest. A message search reaches each vector through its chunk,
 which drops the messages outside the search's sessions before any is
 ranked; `search` leaves out the current session's messages that are
-still in the model's context. What is
+still in the model's context. A search of accesses scans
+`access_vectors` alone and places each text at the first access holding
+it in the search's sessions, since one file is read many times over. What is
 kept of each kind is merged by similarity, which one embedding space and
 one stored form make comparable across kinds. `search` ranks by
 keyword as well, as [Search](#search) describes.
@@ -634,10 +647,11 @@ chunks have no ceiling.
 ## Search
 
 The store has one search. A caller gives it the query's text and vector,
-the kinds to search (messages, memories, documents), which sessions'
-messages count, how many hits it wants, and whether to rank by keyword
-as well as by vector. A hit is a source, one message, memory or
-document, shown through its best-ranked chunk.
+the kinds to search (messages, memories, documents, accesses), which
+sessions' messages and accesses count, how many hits it wants, and
+whether to rank by keyword as well as by vector. A hit is a source, one
+message, memory or document, or one file or page however many accesses
+touched it, shown through its best-ranked chunk.
 
 | Caller                                         | Kinds     | Ranked by          |
 |------------------------------------------------|-----------|--------------------|
@@ -674,6 +688,10 @@ A text several messages or documents hold is one hit: the best-ranked
 of them, with the count of the others among the kinds and sessions
 searched. Four copies of a file are one line of `search`, not four.
 Memories are never folded: two keys saved with one value are two hits.
+A file or a page is one hit however often it was touched, shown at the
+first access to it among the sessions searched, with the count of the
+other sessions that touched it; reading one file five times in a session
+adds nothing to that count.
 
 A chunk needs no vector to be found by its words, so a document or a
 message can be searched for an exact string as soon as it is stored;

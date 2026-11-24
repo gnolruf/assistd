@@ -1,6 +1,6 @@
 //! SQLite-backed [`SemanticStore`](crate::SemanticStore) over the chunks cut from messages,
-//! memories and documents: one keyword index of them all in `index.db`, and one
-//! vector table for the texts of each kind in `vectors.db`.
+//! memories, documents and accesses: one keyword index of them all in `index.db`, and
+//! one vector table for the texts of each kind in `vectors.db`.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -10,9 +10,10 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use assistd_ipc::AccessAction;
 use async_trait::async_trait;
 use num_traits::ToPrimitive;
-use rusqlite::types::FromSql;
+use rusqlite::types::{FromSql, FromSqlError};
 use rusqlite::{OptionalExtension, Params, Row, Transaction};
 use tokio::sync::Notify;
 
@@ -25,7 +26,7 @@ use crate::{
 
 use crate::chunking::text_hash;
 
-use super::chunks::{CHUNK_SOURCES, kind_code, vector_table};
+use super::chunks::{ACCESS_TEXT, CHUNK_SOURCES, kind_code, vector_table};
 use super::connection::{Erasing, SqliteHandle};
 use super::page_readings;
 use super::timestamp::timestamp_at;
@@ -64,6 +65,13 @@ const DOCUMENT_CHUNK_COLUMNS: &str = "
     cc.byte_start, cc.byte_end, d.indexed_at,
     CAST(substr(CAST(p.content AS BLOB), cc.byte_start + 1,
                 cc.byte_end - cc.byte_start) AS TEXT)";
+
+/// Joins an access chunk `cc` to its access `src`, the tool result `m` it is stored
+/// with and that message's session `s`.
+const ACCESS_CHUNK_OWNERS: &str = "
+    JOIN accesses src ON src.id = cc.source
+    JOIN messages m ON m.id = src.message_id
+    JOIN sessions s ON s.id = m.session_id";
 
 /// Joins a document chunk `cc` to its document `d` and its page `p`.
 const DOCUMENT_CHUNK_OWNERS: &str = "
@@ -208,6 +216,7 @@ impl EmbeddingQueue for SqliteSemanticStore {
                     message_chunks: count_chunks(ChunkSource::Message)?,
                     document_chunks: count_chunks(ChunkSource::Document)?,
                     memories: count_chunks(ChunkSource::Memory)?,
+                    accesses: count_chunks(ChunkSource::Access)?,
                 })
             })
             .await
@@ -221,12 +230,12 @@ impl EmbeddingQueue for SqliteSemanticStore {
     ) -> Result<Vec<(ChunkId, String)>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let kind = ChunkKind::of(source);
-        let (missing, text) = (kind.missing_embedding(), kind.text_column);
+        let (missing, text) = (kind.missing_embedding(), kind.text);
         self.handle
             .read("chunks_missing_embedding", move |c| {
                 c.prepare_cached(&format!(
                     "SELECT cc.id,
-                            CAST(substr(CAST(src.{text} AS BLOB),
+                            CAST(substr(CAST({text} AS BLOB),
                                         cc.byte_start + 1, cc.byte_end - cc.byte_start) AS TEXT)
                      {missing} AND cc.id > ifnull(?1, 0)
                        AND NOT EXISTS (SELECT 1 FROM chunks earlier
@@ -520,26 +529,27 @@ struct ChunkKind {
     code: i64,
     /// Joins a chunk `cc` to `src`, the row holding the text it is a range of.
     owner_join: &'static str,
-    /// The column of `src` holding that text.
-    text_column: &'static str,
+    /// The expression over `src` giving that text.
+    text: &'static str,
     /// The table holding the vector of each text chunks of this kind hold.
     vectors: &'static str,
 }
 
 impl ChunkKind {
     const fn of(source: ChunkSource) -> Self {
-        let (owner_join, text_column) = match source {
-            ChunkSource::Message => ("JOIN messages src ON src.id = cc.source", "content"),
-            ChunkSource::Memory => ("JOIN memories src ON src.id = cc.source", "value"),
+        let (owner_join, text) = match source {
+            ChunkSource::Message => ("JOIN messages src ON src.id = cc.source", "src.content"),
+            ChunkSource::Memory => ("JOIN memories src ON src.id = cc.source", "src.value"),
             ChunkSource::Document => (
                 "JOIN document_pages src ON src.document_id = cc.source AND src.page = cc.page",
-                "content",
+                "src.content",
             ),
+            ChunkSource::Access => ("JOIN accesses src ON src.id = cc.source", ACCESS_TEXT),
         };
         Self {
             code: kind_code(source),
             owner_join,
-            text_column,
+            text,
             vectors: vector_table(source),
         }
     }
@@ -663,7 +673,7 @@ fn adjacent_chunk(
 ) -> rusqlite::Result<Option<ContextChunk>> {
     match locator {
         ChunkLocator::Message { message_id, .. } => adjacent_message_chunk(conn, *message_id, side),
-        ChunkLocator::Memory { .. } => Ok(None),
+        ChunkLocator::Memory { .. } | ChunkLocator::Access { .. } => Ok(None),
         ChunkLocator::Document {
             document_id,
             page,
@@ -769,6 +779,42 @@ fn document_context_chunk(row: &Row<'_>) -> rusqlite::Result<ContextChunk> {
         },
         text: row.get(8)?,
     })
+}
+
+/// An access chunk row's columns, read by [`access_context_chunk`]: chunk id, message
+/// id, session uuid, message time, action, session title, the session's opening user
+/// text, chunk text.
+fn access_chunk_columns() -> String {
+    format!(
+        "cc.id, m.id, s.uuid, m.created_at, src.action, s.title,
+         (SELECT substr(f.content, 1, 256) FROM messages f
+          WHERE f.session_id = s.id AND f.role = 0 ORDER BY f.id LIMIT 1),
+         {ACCESS_TEXT}"
+    )
+}
+
+fn access_context_chunk(row: &Row<'_>) -> rusqlite::Result<ContextChunk> {
+    Ok(ContextChunk {
+        chunk_id: row.get(0)?,
+        locator: ChunkLocator::Access {
+            message_id: row.get(1)?,
+            session_id: row.get(2)?,
+            timestamp: timestamp_at(row, 3)?,
+            action: access_action(row.get(4)?)?,
+            session_label: session_label(row.get(5)?, row.get::<_, Option<String>>(6)?.as_deref()),
+        },
+        text: row.get(7)?,
+    })
+}
+
+/// The action an `accesses.action` code of a chunked access stands for.
+fn access_action(code: i64) -> rusqlite::Result<AccessAction> {
+    match code {
+        0 => Ok(AccessAction::Read),
+        1 => Ok(AccessAction::Wrote),
+        2 => Ok(AccessAction::Fetched),
+        code => Err(FromSqlError::OutOfRange(code).into()),
+    }
 }
 
 /// `title`, or else the first line of `opening` cut to [`SESSION_LABEL_CHARS`].

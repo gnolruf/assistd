@@ -6,14 +6,23 @@ use std::ops::Range;
 use rusqlite::{Connection, Transaction};
 
 use crate::chunking::{TextHash, text_hash};
-use crate::{ChunkId, ChunkSource, DocumentId, MemoryId, MessageId};
+use crate::{AccessId, ChunkId, ChunkSource, DocumentId, MemoryId, MessageId};
 
 /// Every kind of chunk, in the order of their `chunks.kind` codes.
-pub(super) const CHUNK_SOURCES: [ChunkSource; 3] = [
+pub(super) const CHUNK_SOURCES: [ChunkSource; 4] = [
     ChunkSource::Message,
     ChunkSource::Memory,
     ChunkSource::Document,
+    ChunkSource::Access,
 ];
+
+/// The text an access `src` is found by: its label on a line of its own, when it has
+/// one, then its target.
+pub(super) const ACCESS_TEXT: &str =
+    "ifnull(src.label || char(10), '') || CAST(src.target AS TEXT)";
+
+/// Holds for an access `src` to a file or a page: one read, written or fetched.
+pub(super) const TOUCHED_FILE_OR_PAGE: &str = "src.action IN (0, 1, 2)";
 
 /// The text a chunk is a byte range of.
 #[derive(Debug, Clone, Copy)]
@@ -24,6 +33,8 @@ pub(super) enum ChunkOwner {
     Memory(MemoryId),
     /// The content of one page of a document, by the page's position from zero.
     Page(DocumentId, usize),
+    /// The label and target of an access, as [`ACCESS_TEXT`] joins them.
+    Access(AccessId),
 }
 
 impl ChunkOwner {
@@ -32,6 +43,7 @@ impl ChunkOwner {
             Self::Message(_) => ChunkSource::Message,
             Self::Memory(_) => ChunkSource::Memory,
             Self::Page(..) => ChunkSource::Document,
+            Self::Access(_) => ChunkSource::Access,
         }
     }
 
@@ -41,6 +53,7 @@ impl ChunkOwner {
             Self::Message(message) => (message.0, 0),
             Self::Memory(memory) => (memory.0, 0),
             Self::Page(document, page) => (document.0, page),
+            Self::Access(access) => (access.0, 0),
         }
     }
 }
@@ -51,6 +64,7 @@ pub(super) const fn kind_code(source: ChunkSource) -> i64 {
         ChunkSource::Message => 0,
         ChunkSource::Memory => 1,
         ChunkSource::Document => 2,
+        ChunkSource::Access => 3,
     }
 }
 
@@ -60,6 +74,7 @@ pub(super) const fn vector_table(source: ChunkSource) -> &'static str {
         ChunkSource::Message => "message_vectors",
         ChunkSource::Memory => "memory_vectors",
         ChunkSource::Document => "document_vectors",
+        ChunkSource::Access => "access_vectors",
     }
 }
 

@@ -1,18 +1,21 @@
-//! What ties the message and memory chunks of `index.db` to the rows of `memory.db`
+//! What ties the message, memory and access chunks of `index.db` to the rows of `memory.db`
 //! they are cut from, which no key or trigger reaches across the two files. Every
 //! statement runs on the index writer, which has `memory.db` attached to read.
 
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::chunking::{ChunkingConfig, TextHash, chunk_ranges, text_hash};
-use crate::{ChunkSource, MemoryId, MessageId, PersistedRole};
+use crate::{AccessId, ChunkSource, MemoryId, MessageId, PersistedRole};
 
-use super::chunks::{ChunkOwner, delete_unheld_vectors, insert_chunk};
+use super::chunks::{
+    ACCESS_TEXT, ChunkOwner, TOUCHED_FILE_OR_PAGE, delete_unheld_vectors, insert_chunk,
+};
 
 /// The kinds of chunk cut from a table of `memory.db`, each with that table.
-const MEMORY_DATABASE_SOURCES: [(ChunkSource, &str); 2] = [
+const MEMORY_DATABASE_SOURCES: [(ChunkSource, &str); 3] = [
     (ChunkSource::Message, "messages"),
     (ChunkSource::Memory, "memories"),
+    (ChunkSource::Access, "accesses"),
 ];
 
 /// The random value a `memory.db` is told from every other by.
@@ -23,7 +26,7 @@ type DatabaseIdentity = [u8; 16];
 pub(super) struct Reconciled {
     /// Whether the chunks were cut from another `memory.db` and dropped for it.
     pub built_from_another: bool,
-    /// Chunks removed because their message or memory is gone.
+    /// Chunks removed because their message, memory or access is gone.
     pub orphans_removed: usize,
     pub memories: RecutMemories,
     /// Memory vectors removed because no memory's chunk holds their text.
@@ -49,7 +52,7 @@ pub(super) struct RecutMemories {
     pub cut: usize,
 }
 
-/// Bring the message and memory chunks in line with the attached `memory.db`: drop
+/// Bring the message, memory and access chunks in line with the attached `memory.db`: drop
 /// them all when they were cut from another, remove those whose source is gone, and
 /// cut again each memory's chunk that does not cover its value. Every memory then
 /// has its chunk, so the memory vectors none of them holds are removed.
@@ -67,8 +70,8 @@ pub(super) fn reconcile(tx: &Transaction<'_>) -> rusqlite::Result<Reconciled> {
     })
 }
 
-/// Remove the chunks whose message or memory `memory.db` no longer holds, returning
-/// how many.
+/// Remove the chunks whose message, memory or access `memory.db` no longer holds,
+/// returning how many.
 pub(super) fn remove_orphaned_chunks(conn: &Connection) -> rusqlite::Result<usize> {
     MEMORY_DATABASE_SOURCES
         .iter()
@@ -116,20 +119,23 @@ pub(super) fn recut_changed_memories(
     Ok(recut)
 }
 
-/// Up to `limit` user and assistant messages saved after both `after` and the highest
-/// message chunked, in id order, each with its content.
+/// Up to `limit` messages saved after both `after` and the highest message chunked
+/// that have chunks to cut, in id order: a user or assistant message with its content,
+/// and a tool result stored with an access to a file or a page with none.
 pub(super) fn unchunked_messages(
     conn: &Connection,
     after: Option<MessageId>,
     limit: usize,
-) -> rusqlite::Result<Vec<(MessageId, String)>> {
-    conn.prepare_cached(
-        "SELECT m.id, m.content FROM messages m
+) -> rusqlite::Result<Vec<(MessageId, Option<String>)>> {
+    conn.prepare_cached(&format!(
+        "SELECT m.id, CASE WHEN m.role IN (?2, ?3) THEN m.content END FROM messages m
          WHERE m.id > max(ifnull(?1, 0), (SELECT chunked_through FROM chunked_source))
-           AND m.role IN (?2, ?3)
+           AND (m.role IN (?2, ?3)
+                OR EXISTS (SELECT 1 FROM accesses src
+                           WHERE src.message_id = m.id AND {TOUCHED_FILE_OR_PAGE}))
          ORDER BY m.id
-         LIMIT ?4",
-    )?
+         LIMIT ?4"
+    ))?
     .query_map(
         rusqlite::params![
             after,
@@ -142,12 +148,13 @@ pub(super) fn unchunked_messages(
     .collect()
 }
 
-/// Cut the chunks of each of `messages`, listed in id order with their content, that
-/// is still stored and above the highest message chunked, then record the last of
-/// them as that highest. Returns how many chunks were added.
+/// Cut the chunks of each of `messages`, listed in id order with the content of those
+/// that have any to cut, and of the accesses stored with it, when it is still stored
+/// and above the highest message chunked; then record the last of them as that
+/// highest. Returns how many chunks were added.
 pub(super) fn chunk_messages(
     tx: &Transaction<'_>,
-    messages: &[(MessageId, String)],
+    messages: &[(MessageId, Option<String>)],
 ) -> rusqlite::Result<u64> {
     let Some((last, _)) = messages.last() else {
         return Ok(0);
@@ -162,27 +169,57 @@ pub(super) fn chunk_messages(
         if !stored_and_unchunked.query_row([message], |row| row.get::<_, bool>(0))? {
             continue;
         }
-        for bytes in chunk_ranges(content, ChunkingConfig::MESSAGES) {
-            insert_chunk(tx, ChunkOwner::Message(*message), content, &bytes)?;
-            added += 1;
+        if let Some(content) = content {
+            for bytes in chunk_ranges(content, ChunkingConfig::MESSAGES) {
+                insert_chunk(tx, ChunkOwner::Message(*message), content, &bytes)?;
+                added += 1;
+            }
         }
+        added += chunk_accesses(tx, *message)?;
     }
     tx.prepare_cached("UPDATE chunked_source SET chunked_through = max(chunked_through, ?1)")?
         .execute([last])?;
     Ok(added)
 }
 
-/// Remove the message vectors whose text no message chunk holds, returning how many;
-/// `None`, removing nothing, while a saved message waits to be chunked.
-pub(super) fn remove_unheld_message_vectors(conn: &Connection) -> rusqlite::Result<Option<usize>> {
+/// Remove the message and access vectors whose text no chunk of their kind holds,
+/// returning how many; `None`, removing nothing, while a saved message waits to be
+/// chunked.
+pub(super) fn remove_unheld_transcript_vectors(
+    conn: &Connection,
+) -> rusqlite::Result<Option<usize>> {
     if !unchunked_messages(conn, None, 1)?.is_empty() {
         return Ok(None);
     }
-    delete_unheld_vectors(conn, ChunkSource::Message).map(Some)
+    let removed = delete_unheld_vectors(conn, ChunkSource::Message)?
+        + delete_unheld_vectors(conn, ChunkSource::Access)?;
+    Ok(Some(removed))
 }
 
-/// Record the attached `memory.db` as the one whose messages and memories are chunked
-/// here. When another was recorded, drop every chunk cut from its rows and have every
+/// Cut one chunk for each access to a file or a page stored with `message`, over its
+/// whole text, returning how many. An access whose target is not UTF-8 gets none.
+fn chunk_accesses(tx: &Transaction<'_>, message: MessageId) -> rusqlite::Result<u64> {
+    let accesses: Vec<(AccessId, Vec<u8>)> = tx
+        .prepare_cached(&format!(
+            "SELECT src.id, CAST({ACCESS_TEXT} AS BLOB) FROM accesses src
+             WHERE src.message_id = ?1 AND {TOUCHED_FILE_OR_PAGE}
+             ORDER BY src.id"
+        ))?
+        .query_map([message], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut added = 0u64;
+    for (access, text) in accesses {
+        let Ok(text) = String::from_utf8(text) else {
+            continue;
+        };
+        insert_chunk(tx, ChunkOwner::Access(access), &text, &(0..text.len()))?;
+        added += 1;
+    }
+    Ok(added)
+}
+
+/// Record the attached `memory.db` as the one whose messages, memories and accesses are
+/// chunked here. When another was recorded, drop every chunk cut from its rows and have every
 /// message chunked again; returns whether one was.
 fn adopt_memory_database(tx: &Transaction<'_>) -> rusqlite::Result<bool> {
     let attached: DatabaseIdentity =
@@ -198,8 +235,8 @@ fn adopt_memory_database(tx: &Transaction<'_>) -> rusqlite::Result<bool> {
         return Ok(false);
     }
     tx.execute(
-        "DELETE FROM chunks WHERE kind IN (?1, ?2)",
-        [ChunkSource::Message, ChunkSource::Memory],
+        "DELETE FROM chunks WHERE kind IN (?1, ?2, ?3)",
+        MEMORY_DATABASE_SOURCES.map(|(source, _)| source),
     )?;
     tx.execute(
         "INSERT INTO chunked_source (id, memory_identity, chunked_through) VALUES (0, ?1, 0)

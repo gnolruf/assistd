@@ -1,5 +1,5 @@
-//! `search`: rank past sessions, saved memories and indexed documents through the
-//! daemon, and print the hits as the model's `search` command lists them.
+//! `search`: rank past sessions, saved memories, indexed documents and the files and
+//! pages sessions touched through the daemon, and print the hits as the model's `search` command lists them.
 
 use std::io::{self, Write};
 
@@ -18,8 +18,9 @@ pub(crate) struct SearchArgs {
     /// Cap on the hits listed; the daemon's `embedding.top_k` when omitted.
     #[arg(short = 'n', long, value_parser = hit_count())]
     limit: Option<u32>,
-    /// Only these kinds, separated by commas: sessions, memories, documents. Every
-    /// kind turned on in the config file when omitted.
+    /// Only these kinds, separated by commas: sessions, memories, documents, accesses
+    /// (the files and pages sessions touched). Every kind turned on in the config file
+    /// when omitted.
     #[arg(long = "in", value_name = "KINDS", value_delimiter = ',', value_parser = parse_kind)]
     kinds: Vec<SearchKind>,
     /// The words of the query; they are joined, so quoting is not needed.
@@ -81,7 +82,7 @@ pub(crate) fn hit_count() -> RangedI64ValueParser<u32> {
 
 fn parse_kind(name: &str) -> Result<SearchKind, String> {
     SearchKind::named(name)
-        .ok_or_else(|| format!("'{name}' is not one of sessions, memories, documents"))
+        .ok_or_else(|| format!("'{name}' is not one of sessions, memories, documents, accesses"))
 }
 
 /// The tab-separated fields of `line`, each made safe to print on a terminal.

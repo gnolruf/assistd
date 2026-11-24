@@ -65,7 +65,7 @@ flowchart TB
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
 | `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, admission (the queue that grants every model lane, and the permits for background work), presence machine with the policy task that drives it from idle time and GPU contention, listen dispatcher, socket server, document index passes and the watches between them, page transcription while drowsy, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-documents` | Document text extraction (text, HTML, PDF, office files, e-books) and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
-| `assistd-embed`  | Embedding HTTP client + the worker that drains the semantic store's rows without a vector, as three backlogs; launch spec for its llama-server. | `config`, `memory`, `utils`                                                      |
+| `assistd-embed`  | Embedding HTTP client + the worker that drains the semantic store's rows without a vector, as four backlogs; launch spec for its llama-server. | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; `Access`, what a tool call reports it touched; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec and presets file + control plane + `PageTranscriber` for the OCR model. | `config`, `ipc`, `utils`                                                         |
 | `assistd-mcp`    | Stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools.  | `config`, `ipc`, `tools`, `utils`                                                |
@@ -249,16 +249,18 @@ stored work. Its contract has four parts.
 
 | Backlog          | A row is                                             | Page | Permit              | Cannot be done                    | Wake                   | Retry               |
 |------------------|------------------------------------------------------|------|---------------------|-----------------------------------|------------------------|---------------------|
-| Saved messages   | a user or assistant message above the highest one chunked | 64 | none             | never: a page always cuts its rows | `messages_to_chunk`   | 1 s, doubling to 60 |
+| Saved messages   | a user or assistant message, or a tool result that touched a file or page, above the highest one chunked | 64 | none | never: a page always cuts its rows | `messages_to_chunk`   | 1 s, doubling to 60 |
 | Message chunks   | a message chunk whose text has no vector             | 32   | none                | marked refused (a `NULL` vector)  | `rows_to_embed`        | the same            |
 | Memory chunks    | a memory's chunk whose text has no vector            | 32   | none                | marked refused                    | `rows_to_embed`        | the same            |
+| Access chunks    | an access's chunk whose text has no vector           | 32   | none                | marked refused                    | `rows_to_embed`        | the same            |
 | Document chunks  | a document chunk whose text has no vector            | 32   | `DocumentEmbedding` | marked refused                    | `rows_to_embed`        | the same            |
 | Waiting pages    | a PDF page without text, recorded as waiting         | 1    | `PageTranscription` | recorded as failed                | `pages_to_transcribe`  | 5 minutes           |
 
 The message chunker (`MessageChunker` in `assistd-memory`) cuts saved
-messages into chunks and runs whenever embedding is enabled, with or
+messages into chunks, and the files and pages their tool calls touched
+into one chunk each, and runs whenever embedding is enabled, with or
 without the embedding server; the chunks it adds wake the embedding
-worker. The embedding worker drains its three backlogs in that order in one
+worker. The embedding worker drains its four backlogs in that order in one
 pass, so a wake in the middle of the document chunks sends it back to
 the messages first. Page transcription drains inside a loan of the
 drowsy server and lists again after a wake without giving the loan up.
@@ -476,7 +478,8 @@ a chain's commands, and a relay those of its sub-agents, a read of a mounted
 input named by the input's own path. A `bash` script, an MCP tool, `ls`, `wm`,
 `screenshot` and the searches report nothing: a script's reads are not known,
 and a list of results is not a visit. The list is saved with the tool result
-in `accesses` (see [database.md](database.md)). It is not the record of
+in `accesses` (see [database.md](database.md)), and `search` finds the files
+and pages in it ([how](database.md#search)). It is not the record of
 whether a history has read this machine, which must err towards yes while
 this list may miss things; neither is derived from the other.
 
@@ -1068,8 +1071,8 @@ llama-server answers an input over the count with a server error, as it
 would a fault of its own, so the client tells that refusal by its
 message and the row is marked and skipped like any other the server
 rejects; a document chunk marked so is still found by its words. The `search` command embeds its query and ranks saved memories, transcript chunks from
-earlier sessions and document chunks together, by cosine similarity and by the query's words. Messages, memories and
-indexed local documents own chunks in one table, but each kind's vectors
+earlier sessions, the files and pages those sessions touched and document chunks together, by cosine similarity and by the query's words. Messages, memories,
+accesses and indexed local documents own chunks in one table, but each kind's vectors
 are kept in a table of their own, so message recall never reads or ranks
 document chunks.
 Every vector is quantised to a byte per dimension. Every chunk also has its
@@ -1082,9 +1085,9 @@ embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
 meantime stays pending and is embedded by a later pass.
 
-The worker is three backlogs drained in one pass: message chunks,
-memory chunks, then document chunks. The first two are few and feed recall, so
-every pass embeds them first and at once. Document chunks can number in the
+The worker is four backlogs drained in one pass: message chunks,
+memory chunks, access chunks, then document chunks. The first two feed recall
+and all three are few, so every pass embeds them first and at once. Document chunks can number in the
 hundreds of thousands and the embedding server takes every CPU thread it is
 given, so each batch of them waits for the `DocumentEmbedding` permit
 ([activity and permits](#activity-and-permits)). The permit is read between
@@ -1264,7 +1267,7 @@ none ever starts while `documents.ocr.model` is unset or
 forgets the skipped files, asks for a round of passes and streams the progress of the round that answers
 it, which is the next one when a round is already under way; it is refused
 when no worker will run, and is not held to the dispatch timeout.
-`assistd search <query>` (`Search`) ranks sessions, memories and documents as
+`assistd search <query>` (`Search`) ranks sessions, memories, documents and accesses as
 the model's `search` does, without a turn, and prints each `SearchHit` as the
 line `search` lists it on; unlike a turn's search it has no context to leave
 out, so it also ranks the messages of the session in progress.
@@ -1326,11 +1329,12 @@ The model reaches the index through two commands that `build_tools()`
 registers behind `run`: `search`, with `documents.enabled` or
 `memory.enabled`, and `docs`, only with `documents.enabled`; the system prompt
 then gains one line saying what `search` covers. `search [-n N] [--in <kinds>]
-<query>` embeds the query and ranks past sessions, saved memories and
-documents in one list, both by vector and by the query's words, fusing the two
+<query>` embeds the query and ranks past sessions, saved memories,
+documents and the files and pages past sessions read, wrote or fetched in one list, both by vector and by the query's words, fusing the two
 rankings ([how](database.md#search)), so an identifier, an error message, a
 name or a number is found as written. `--in` holds it to the kinds named,
-`sessions`, `memories` or `documents`; a kind whose setting is off is left out
+`sessions`, `memories`, `documents` or `accesses` (searched with
+`memory.enabled`); a kind whose setting is off is left out
 of the default, and naming it is an error that names the setting. It prints
 one line per hit for the `embedding.top_k` best (or `-n`, at most 20): the
 kind, where the passage is, cosine similarity (`n/a` for a chunk found by its
@@ -1338,7 +1342,12 @@ words before it was embedded), how many other places hold the same text, and
 the chunk. Where the passage is carries what the next command takes: a
 session's short id and title with the message's time and role, a memory's key,
 or a document's path, the page of the chunk as `page 12 of 212`, the chunk's
-byte range within that page and the date the document was indexed. A message
+byte range within that page and the date the document was indexed, or, for an
+access, the short id and title of the session that touched the file or page
+with the call's time and `read`, `wrote` or `fetched`, the passage being the
+path, or the page's title and URL. A file or a page is one line however often
+it was touched, counting the other sessions that touched it. Recalled context
+never ranks accesses. A message
 of the session in progress is found only once its summary has replaced it.
 `search --session <id> <query>` ranks the messages of one past session alone
 and prints each hit between the messages before and after it, hits that share
@@ -1761,7 +1770,7 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
    whose text has no vector, and page transcription for a waiting page.
 
 5. **Embed permit** ([`crates/assistd-core/src/admission/activity.rs`](../crates/assistd-core/src/admission/activity.rs)).
-   The embedding worker embeds pending message and memory chunks
+   The embedding worker embeds pending message, memory and access chunks
    first, then document chunks a batch at a time, each batch waiting on
    the permit admission publishes. The permit is closed while the
    user's interaction is open, a task run holds a model lane, or the

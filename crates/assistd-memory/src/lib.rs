@@ -17,8 +17,8 @@ mod vectors_schema;
 
 pub use error::{BackendError, MemoryError, Result};
 pub use ids::{
-    BranchId, ChunkId, DocumentId, MemoryId, MessageId, SHORT_SESSION_ID_CHARS, Seq, SessionId,
-    TurnId,
+    AccessId, BranchId, ChunkId, DocumentId, MemoryId, MessageId, SHORT_SESSION_ID_CHARS, Seq,
+    SessionId, TurnId,
 };
 pub use memories::{MemoryRecord, SavedMemory};
 pub use relay_traces::{

@@ -492,8 +492,9 @@ fn memory_event_cases() -> Vec<(Event, &'static str)> {
                 message_chunks: 3,
                 document_chunks: 10,
                 memories: 1,
+                accesses: 2,
             }),
-            r#"{"id":"r","type":"reindex_progress","message_chunks":3,"document_chunks":10,"memories":1}"#,
+            r#"{"id":"r","type":"reindex_progress","message_chunks":3,"document_chunks":10,"memories":1,"accesses":2}"#,
         ),
     ]
 }
@@ -1121,6 +1122,20 @@ fn search_event_cases() -> Vec<(Event, &'static str)> {
                 held_elsewhere: 3,
             }),
             r#"{"id":"r","type":"search_hit","place":{"kind":"document","path":"/home/u/notes/lease.pdf","page":2,"page_count":9,"byte_start":0,"byte_end":640,"indexed_at":"2026-11-05T14:00:00Z"},"content":"renewal terms","similarity":0.5,"held_elsewhere":3}"#,
+        ),
+        (
+            event(EventBody::SearchHit {
+                place: SearchPlace::Access {
+                    session_id: "0f3c9a1e-5b7d-4c2a-9e1f-6a8b7c5d4e3f".into(),
+                    title: "Daemon tuning".into(),
+                    timestamp: at,
+                    action: AccessAction::Fetched,
+                },
+                content: "Tenancy law\nhttps://example.com/tenancy".into(),
+                similarity: Some(0.5),
+                held_elsewhere: 1,
+            }),
+            r#"{"id":"r","type":"search_hit","place":{"kind":"access","session_id":"0f3c9a1e-5b7d-4c2a-9e1f-6a8b7c5d4e3f","title":"Daemon tuning","timestamp":"2026-11-05T14:00:00Z","action":"fetched"},"content":"Tenancy law\nhttps://example.com/tenancy","similarity":0.5,"held_elsewhere":1}"#,
         ),
     ]
 }

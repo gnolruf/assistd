@@ -224,6 +224,7 @@ pub enum EventBody {
         message_chunks: u64,
         document_chunks: u64,
         memories: u64,
+        accesses: u64,
     },
     /// The document index as a whole, sent first in answer to `DocumentsStatus`.
     DocumentIndex {
@@ -249,9 +250,10 @@ pub enum EventBody {
     },
     /// The pass a `DocumentsReindex` follows over `root` ended.
     DocumentPassEnded { root: String, pass: DocumentPass },
-    /// One `Search` hit: a message, memory or document and its best-matching passage.
-    /// `similarity`, in `[0.0, 1.0]`, is absent for a passage that has no vector yet, and
-    /// `held_elsewhere` counts the other places holding the same passage.
+    /// One `Search` hit: a message, memory, document or access and its best-matching
+    /// passage. `similarity`, in `[0.0, 1.0]`, is absent for a passage that has no vector
+    /// yet, and `held_elsewhere` counts the other places holding the same passage: for
+    /// an access, the other sessions that touched the same file or page.
     SearchHit {
         place: SearchPlace,
         content: String,

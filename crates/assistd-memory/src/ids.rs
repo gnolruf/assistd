@@ -48,6 +48,10 @@ row_id!(
     MemoryId
 );
 row_id!(
+    /// Row id in `accesses`.
+    AccessId
+);
+row_id!(
     /// A message's position on its branch, counting up from 0.
     Seq
 );

@@ -34,7 +34,7 @@ impl RecallStore for FixedHits {
                     && search.sessions != SessionScope::AllExcept(session_id)
             }
             ChunkLocator::Memory { .. } => search.kinds.contains(&ChunkSource::Memory),
-            ChunkLocator::Document { .. } => false,
+            ChunkLocator::Document { .. } | ChunkLocator::Access { .. } => false,
         };
         let hits = self.hits.iter().filter(searched);
         Ok(hits.take(search.top_k).cloned().collect())

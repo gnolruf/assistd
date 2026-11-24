@@ -259,8 +259,8 @@ docs read --page 3 --offset 512 "/home/me/Documents/notes/lease.pdf"
 ```
 
 `search` is one search over everything stored: indexed documents and,
-with `[memory]` enabled, saved memories and past sessions, ranked
-together. `search --in documents <words>` holds it to documents. It
+with `[memory]` enabled, saved memories, past sessions and the files and
+pages those sessions touched, ranked together. `search --in documents <words>` holds it to documents. It
 prints one line per hit, best first, for `embedding.top_k` hits (or
 `-n`, at most 20). A document's line gives `document`, then the quoted
 path with the page of the best passage, that passage's byte range

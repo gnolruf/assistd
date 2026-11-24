@@ -29,14 +29,16 @@ pub use transcribe::{
 /// directory that holds the one it is in.
 const PRIVATE_LIBRARY_DIR: &str = "lib/assistd";
 
-const SEARCH_NOTE_MEMORY: &str = "One `run` command, `search <words>`, searches past sessions \
-     and saved memories together, by meaning and by exact words.";
+const SEARCH_NOTE_MEMORY: &str = "One `run` command, `search <words>`, searches past sessions, \
+     the files and web pages they touched and saved memories together, by meaning and by exact \
+     words.";
 const SEARCH_NOTE_DOCUMENTS: &str = "The user's indexed documents can be searched by meaning \
      and by exact words with the `run` command `search <words>`, and one that a hit names read \
      with `docs read <path>`.";
 const SEARCH_NOTE_ALL: &str = "One `run` command, `search <words>`, searches past sessions, \
-     saved memories and the user's indexed documents together, by meaning and by exact words; \
-     a document that a hit names is read with `docs read <path>`.";
+     the files and web pages they touched, saved memories and the user's indexed documents \
+     together, by meaning and by exact words; a document that a hit names is read with \
+     `docs read <path>`.";
 
 /// Why no extraction worker runs, so no document is indexed.
 #[derive(Debug, thiserror::Error)]

@@ -7,8 +7,8 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRe
 
 use crate::chunking::Chunker;
 use crate::{
-    BranchId, ChunkId, ChunkSource, DocumentId, FileHash, MemoryId, MessageId, PersistedRole, Seq,
-    SessionId, SkippedRead, TurnId,
+    AccessId, BranchId, ChunkId, ChunkSource, DocumentId, FileHash, MemoryId, MessageId,
+    PersistedRole, Seq, SessionId, SkippedRead, TurnId,
 };
 
 use super::chunks::kind_code;
@@ -30,7 +30,7 @@ macro_rules! row_id_sql {
 }
 
 row_id_sql!(
-    TurnId, BranchId, MessageId, ChunkId, DocumentId, MemoryId, Seq
+    TurnId, BranchId, MessageId, ChunkId, DocumentId, MemoryId, AccessId, Seq
 );
 
 impl ToSql for SessionId {

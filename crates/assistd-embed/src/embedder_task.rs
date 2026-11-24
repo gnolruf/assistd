@@ -1,6 +1,6 @@
 //! Background worker that embeds the chunks the semantic store lists as missing an
-//! embedding, a batch at a time, each time it is woken: message and memory chunks
-//! at once, document chunks only while a gate is open. A chunk's vector is stored for
+//! embedding, a batch at a time, each time it is woken: message, memory and access
+//! chunks at once, document chunks only while a gate is open. A chunk's vector is stored for
 //! its text, so the store lists one chunk for each text.
 
 use std::collections::HashMap;
@@ -123,7 +123,7 @@ impl Backlog for EmbeddingBacklog<'_> {
 
 /// Message chunks, memory chunks, then document chunks, each drained in turn.
 struct EmbeddingPass<'a> {
-    backlogs: [EmbeddingBacklog<'a>; 3],
+    backlogs: [EmbeddingBacklog<'a>; 4],
 }
 
 impl Pass for EmbeddingPass<'_> {
@@ -220,6 +220,7 @@ pub fn spawn_embedder_task(
         let backlogs = [
             (ChunkSource::Message, None),
             (ChunkSource::Memory, None),
+            (ChunkSource::Access, None),
             (ChunkSource::Document, Some(documents_gate)),
         ]
         .map(|(source, permit)| EmbeddingBacklog {
@@ -384,6 +385,7 @@ mod tests {
         missing_chunks: Mutex<BTreeMap<ChunkId, String>>,
         missing_document_chunks: Mutex<BTreeMap<ChunkId, String>>,
         missing_memory_chunks: Mutex<BTreeMap<ChunkId, String>>,
+        missing_access_chunks: Mutex<BTreeMap<ChunkId, String>>,
         stored: Mutex<Vec<Embedding>>,
         rows_to_embed: Arc<Notify>,
     }
@@ -415,6 +417,7 @@ mod tests {
                 ChunkSource::Message => &self.missing_chunks,
                 ChunkSource::Memory => &self.missing_memory_chunks,
                 ChunkSource::Document => &self.missing_document_chunks,
+                ChunkSource::Access => &self.missing_access_chunks,
             }
         }
     }

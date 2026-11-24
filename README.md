@@ -190,7 +190,7 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | `assistd listen-toggle`  | Toggle [wake-word listening](docs/voice/wake-word.md).        |
 | `assistd voice-toggle`   | Toggle TTS playback.                                          |
 | `assistd voice-skip`     | Abort the current spoken response.                            |
-| `assistd search …`       | Search past sessions, saved memories and indexed documents at once; `--in` names the kinds. |
+| `assistd search …`       | Search past sessions, the files and pages they touched, saved memories and indexed documents at once; `--in` names the kinds. |
 | `assistd memory …`       | Inspect or mutate persistent memory; see `memory --help`.     |
 | `assistd documents …`    | [Document search](docs/documents.md): show what is indexed (`status`), walk the indexed folders now (`reindex`), or `search` them. |
 | `assistd tray`           | System tray icon and desktop notifications.                   |
