@@ -46,11 +46,11 @@ pub use socket::socket_path;
 pub use status::{Component, StatusKind, StatusSeverity};
 pub use task::{
     ActionOutlook, AnticipatedAction, DEFAULT_EVENT_COOLDOWN_SECS, DEFAULT_PATH_DEBOUNCE_SECS,
-    FinishOutcome, HostName, InteractionHold, KeptRuns, LaneHolder, MAX_KEPT_RUNS, MAX_LISTED_RUNS,
-    MissedFire, ModeRecommendation, PausedPrompt, Plan, PlanId, PlanStep, PlannedAction, QueueItem,
-    SuspendReason, TaskEvent, TaskId, TaskName, TaskPrompt, TaskQueueOp, TaskQueueSnapshot,
-    TaskRequest, TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary, TaskSpec, TaskSpecError,
-    TaskTrigger,
+    DefinitionHash, FinishOutcome, HostName, InteractionHold, KeptRuns, LaneHolder, MAX_KEPT_RUNS,
+    MAX_LISTED_RUNS, MissedFire, ModeRecommendation, PausedPrompt, Plan, PlanId, PlanStep,
+    PlannedAction, QueueItem, SuspendReason, TaskEvent, TaskId, TaskName, TaskPrompt, TaskQueueOp,
+    TaskQueueSnapshot, TaskRequest, TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary,
+    TaskSpec, TaskSpecError, TaskTrigger,
 };
 pub use tool_report::{ToolAttachment, ToolReport, ToolStreams};
 pub use voice::{ListenPhase, VoiceCaptureState};

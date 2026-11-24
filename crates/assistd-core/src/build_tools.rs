@@ -17,8 +17,9 @@ use assistd_search::{SearchError, SearxngClient};
 use assistd_tools::{
     APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ActionCheck,
     Allowlist, AllowlistError, ApprovalGate, Approvals, CommandRegistry, ConfirmationGate,
-    MemoryOps, OutputCap, PresentSpec, Protected, RememberTool, RunTool, SandboxError, SandboxInfo,
-    SandboxRequest, SharedDirs, StandingApprovals, ToolRegistry, ToolSandbox, VisionGate,
+    MemoryOps, OutputCap, PinnedApprovalGate, PinnedApprovals, PresentSpec, Protected,
+    RememberTool, RunTool, SandboxError, SandboxInfo, SandboxRequest, SharedDirs,
+    StandingApprovals, ToolRegistry, ToolSandbox, VisionGate,
     commands::{
         BashCommand, BashPolicyCfg, DocsCommand, SavedSessions, ScreenshotCommand,
         ScreenshotPolicyCfg, SearchCommand, Searched, SeeCommand, WebCommand, WmCommand,
@@ -108,7 +109,7 @@ pub struct BuildToolsDeps<'a> {
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
     pub relay: RelayDeps,
     /// The MCP tools approved with "always allow", which a plan's actions are checked against.
-    pub mcp_approvals: ApprovalGate,
+    pub mcp_approvals: PinnedApprovalGate,
 }
 
 /// The registries [`build_tools`] assembles.
@@ -145,9 +146,11 @@ pub fn probe_tool_sandbox(
 
 /// The MCP tools approved with "always allow", kept beside the config file. Errors when
 /// the config directory cannot be resolved or the approvals file cannot be read.
-pub fn mcp_tool_approvals(config_path: &Path) -> Result<Approvals, BuildToolsError> {
+pub fn mcp_tool_approvals(config_path: &Path) -> Result<PinnedApprovals, BuildToolsError> {
     let config_dir = canonical_config_dir(config_path)?;
-    Ok(Approvals::load(config_dir.join(APPROVED_MCP_TOOLS_FILE))?)
+    Ok(PinnedApprovals::load(
+        config_dir.join(APPROVED_MCP_TOOLS_FILE),
+    )?)
 }
 
 /// Assemble the tool registry: the built-in commands behind `run`, `docs` among them only
@@ -298,7 +301,7 @@ fn action_checks(
     sandbox: &SandboxInfo,
     bash_cfg: &BashPolicyCfg,
     hosts: &ApprovalGate,
-    mcp_tools: ApprovalGate,
+    mcp_tools: PinnedApprovalGate,
 ) -> Result<(Arc<Approvals>, ActionCheck), BuildToolsError> {
     let apps = Arc::new(Approvals::load(config_dir.join(APPROVED_APPS_FILE))?);
     let standing = StandingApprovals {

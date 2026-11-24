@@ -8,12 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_mcp::{
-    Connector, LaunchTarget, McpClient, McpError, McpServer, StdioConfig, adapt_client_as_tools,
-    launch,
+    Connector, Definition, LaunchTarget, McpClient, McpError, McpServer, StdioConfig,
+    adapt_client_as_tools, launch,
 };
-use assistd_tools::test_support::AlwaysAllowGate;
+use assistd_tools::test_support::{AlwaysAllowGate, DenyAllGate};
 use assistd_tools::{
-    ApprovalGate, Approvals, Tool, ToolCatalog, ToolRegistry, TurnContext, VisionGate,
+    PinnedApprovalGate, PinnedApprovals, Tool, ToolCatalog, ToolRegistry, TurnContext, VisionGate,
 };
 use assistd_utils::backoff::MIN_HEALTHY_SECONDS;
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -38,7 +38,10 @@ async fn start_fake() -> Arc<McpServer> {
 
 /// [`adapt_client_as_tools`] with every call allowed.
 async fn adapt_allowing(server: &Arc<McpServer>) -> Vec<Box<dyn Tool>> {
-    let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
+    let approvals = PinnedApprovalGate::new(
+        Arc::new(AlwaysAllowGate),
+        Arc::new(PinnedApprovals::unsaved()),
+    );
     adapt_client_as_tools(
         server.clone(),
         &"fake".parse().unwrap(),
@@ -208,7 +211,7 @@ async fn unanswered_call_times_out_and_the_server_keeps_answering() {
         .expect("server should start");
 
     let err = server
-        .invoke("never_answers", json!({}))
+        .invoke("never_answers", json!({}), Definition::AsListed)
         .await
         .expect_err("an unanswered call must time out");
     assert!(
@@ -216,7 +219,7 @@ async fn unanswered_call_times_out_and_the_server_keeps_answering() {
         "{err}"
     );
     let after = server
-        .invoke("echo", json!({"msg": "after"}))
+        .invoke("echo", json!({"msg": "after"}), Definition::AsListed)
         .await
         .unwrap();
     assert_eq!(first_text(&after), Some("echo:after"), "{after:?}");
@@ -266,11 +269,15 @@ async fn shutdown_abandons_a_restart_stuck_in_its_handshake() {
     let server = McpServer::start("fake".into(), Connector::Stdio(cfg))
         .await
         .expect("server should start");
-    let _ = server.invoke("crash_me", json!({})).await;
+    let _ = server
+        .invoke("crash_me", json!({}), Definition::AsListed)
+        .await;
 
     let calls_until_one_restarts = async {
         while !pid_file.metadata().is_ok_and(|file| file.len() > 0) {
-            let _ = server.invoke("echo", json!({"msg": "x"})).await;
+            let _ = server
+                .invoke("echo", json!({"msg": "x"}), Definition::AsListed)
+                .await;
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     };
@@ -287,6 +294,74 @@ async fn shutdown_abandons_a_restart_stuck_in_its_handshake() {
         wait_until_process_is_gone(restarted).await,
         "half-started server {restarted} must be killed by the shutdown"
     );
+}
+
+#[tokio::test]
+async fn tool_redefined_across_a_restart_asks_despite_its_approval() {
+    let marker_dir = tempfile::tempdir().expect("tempdir");
+    let mut cfg = make_stdio_config("fake");
+    cfg.env.insert(
+        "FAKE_MCP_REDEFINE_ECHO_MARKER".into(),
+        marker_dir
+            .path()
+            .join("listed")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let server = Arc::new(
+        McpServer::start("fake".into(), Connector::Stdio(cfg))
+            .await
+            .expect("server should start"),
+    );
+    let approvals = Arc::new(PinnedApprovals::unsaved());
+    let tools = adapt_client_as_tools(
+        server.clone(),
+        &"fake".parse().unwrap(),
+        &PinnedApprovalGate::new(Arc::new(DenyAllGate), Arc::clone(&approvals)),
+        &VisionGate::new(true),
+    )
+    .await
+    .expect("discovery should succeed");
+    for tool in &tools {
+        let listed = tool.definition().expect("MCP tools have a definition");
+        approvals.approve(tool.name(), &listed).await.unwrap();
+    }
+    let echo = find(&tools, "mcp__fake__echo");
+    let turn = TurnContext::default();
+    let call_echo = || echo.invoke(&turn, json!({"msg": "x"}));
+    assert_eq!(call_echo().await.unwrap().output, "echo:x");
+
+    let _ = find(&tools, "mcp__fake__crash_me")
+        .invoke(&TurnContext::default(), json!({}))
+        .await;
+    let asked_after_restart = tokio::time::timeout(Duration::from_secs(10), async {
+        while !call_echo()
+            .await
+            .unwrap()
+            .output
+            .contains("cancelled by user")
+        {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await;
+    assert!(
+        asked_after_restart.is_ok(),
+        "a redefined tool must ask before it is called"
+    );
+    let unchanged = find(&tools, "mcp__fake__env_names")
+        .invoke(&TurnContext::default(), json!({}))
+        .await
+        .unwrap();
+    assert_eq!(unchanged.exit_code, 0, "{unchanged:?}");
+    assert!(matches!(
+        server
+            .invoke("echo", json!({"msg": "x"}), Definition::AsListed)
+            .await,
+        Err(McpError::ToolRedefined)
+    ));
+
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -363,7 +438,10 @@ async fn server_refused_at_first_start_offers_its_tools_after_a_retry() {
     );
     let target = LaunchTarget {
         catalog: Arc::new(ToolCatalog::new(Arc::new(ToolRegistry::new()))),
-        approvals: ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved())),
+        approvals: PinnedApprovalGate::new(
+            Arc::new(AlwaysAllowGate),
+            Arc::new(PinnedApprovals::unsaved()),
+        ),
         vision: VisionGate::new(true),
     };
     let mut retries = Vec::new();
@@ -406,7 +484,10 @@ async fn server_sees_only_inherited_and_configured_environment() {
         .await
         .expect("server should start");
 
-    let result = server.invoke("env_names", json!({})).await.unwrap();
+    let result = server
+        .invoke("env_names", json!({}), Definition::AsListed)
+        .await
+        .unwrap();
     let listing = first_text(&result).expect("a text listing");
     let names: Vec<&str> = listing.lines().collect();
     assert!(names.contains(&"PATH"), "{names:?}");

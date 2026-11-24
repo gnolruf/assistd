@@ -30,6 +30,7 @@ use allowlist::ProgramApproval;
 pub use allowlist::{APPROVALS_FILE, Allowlist, AllowlistError, SearchPath};
 pub use approvals::{
     APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ApprovalGate, Approvals,
+    PinnedApprovalGate, PinnedApprovals, Standing,
 };
 pub use confirm::{
     Answer, Approval, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate, ConfirmationRequest,

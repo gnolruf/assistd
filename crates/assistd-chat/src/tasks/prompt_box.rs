@@ -235,7 +235,7 @@ fn action_label(action: &PlannedAction) -> String {
             None => format!("run {program}"),
         },
         PlannedAction::WebHost { host } => format!("reach {host}"),
-        PlannedAction::McpTool { name } => format!("call {name}"),
+        PlannedAction::McpTool { name, .. } => format!("call {name}"),
         PlannedAction::App { desktop_entry } => format!("launch {desktop_entry}"),
         PlannedAction::Write { under } => format!("write under {}", under.display()),
     }

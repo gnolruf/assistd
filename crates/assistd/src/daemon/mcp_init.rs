@@ -15,7 +15,7 @@ use assistd_mcp::{
     Connector, HttpAuth, HttpConfig, LaunchTarget, McpError, McpServer, OAuthConfig, Revocation,
     StdioConfig, TokenStore, begin_login, launch, sign_out, withdraw_tools,
 };
-use assistd_tools::{ApprovalGate, VisionGate};
+use assistd_tools::{PinnedApprovalGate, VisionGate};
 use async_trait::async_trait;
 use futures_util::future::join_all;
 use parking_lot::Mutex;
@@ -28,7 +28,7 @@ use tracing::info;
 #[derive(Debug)]
 pub(super) struct McpFleet {
     servers: Vec<Arc<ManagedServer>>,
-    approvals: ApprovalGate,
+    approvals: PinnedApprovalGate,
     vision: Arc<VisionGate>,
     /// Where `auth = "oauth"` servers keep their tokens; `None` without a state directory.
     tokens: Option<TokenStore>,
@@ -243,11 +243,11 @@ impl Start {
 }
 
 /// A status per configured server and the fleet that starts and signs them in, whose tools ask
-/// before each call unless `approvals` holds them and whose image results follow `vision`.
+/// before each call unless `approvals` holds their definitions and whose image results follow `vision`.
 /// No fleet when MCP is disabled.
 pub(super) fn prepare(
     config: &Config,
-    approvals: ApprovalGate,
+    approvals: PinnedApprovalGate,
     vision: Arc<VisionGate>,
 ) -> (Vec<McpServerStatus>, Option<Arc<McpFleet>>) {
     if !config.mcp.enabled {

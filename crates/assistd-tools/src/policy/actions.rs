@@ -9,7 +9,7 @@ use assistd_utils::path::canonical_existing;
 use assistd_utils::program::find_program;
 
 use super::allowlist::{Allowlist, ApprovalScope, SearchPath, Verdict};
-use super::approvals::{ApprovalGate, Approvals};
+use super::approvals::{ApprovalGate, Approvals, PinnedApprovalGate, Standing};
 use crate::commands::wm::unlaunchable_app;
 use crate::{MCP_TOOL_NAME_PREFIX, ToolRegistry};
 
@@ -19,7 +19,7 @@ pub struct StandingApprovals {
     pub programs: Arc<Allowlist>,
     pub hosts: ApprovalGate,
     pub apps: Arc<Approvals>,
-    pub mcp_tools: ApprovalGate,
+    pub mcp_tools: PinnedApprovalGate,
     /// Canonical directories below which `AcceptEdits` and `Auto` approve an edit.
     pub edit_scope: Vec<PathBuf>,
 }
@@ -50,7 +50,7 @@ impl ActionCheck {
             PlannedAction::WebHost { host } => HostName::try_from(host.clone())
                 .is_err()
                 .then(|| format!("`{host}` is not a host name")),
-            PlannedAction::McpTool { name } => (!name.starts_with(MCP_TOOL_NAME_PREFIX)
+            PlannedAction::McpTool { name, .. } => (!name.starts_with(MCP_TOOL_NAME_PREFIX)
                 || tools.get(name).is_none())
             .then(|| format!("no connected MCP server offers `{name}`")),
             PlannedAction::App { desktop_entry } => unlaunchable_app(desktop_entry),
@@ -115,7 +115,9 @@ impl StandingApprovals {
                 self.programs.verdict(program, Some(&scope)) == Verdict::Approved
             }
             PlannedAction::WebHost { host } => self.hosts.contains(host),
-            PlannedAction::McpTool { name } => self.mcp_tools.contains(name),
+            PlannedAction::McpTool { name, definition } => definition
+                .as_ref()
+                .is_some_and(|hash| self.mcp_tools.standing(name, hash) == Standing::Approved),
             PlannedAction::App { desktop_entry } => self.apps.contains(desktop_entry),
             PlannedAction::Write { under } => {
                 mode != PermissionMode::Manual

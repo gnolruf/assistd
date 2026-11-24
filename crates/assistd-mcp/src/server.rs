@@ -1,6 +1,7 @@
 //! One configured MCP server: started with the daemon, killed once it stops answering,
 //! restarted by the first call after it dies, and stopped on shutdown.
 
+use std::collections::HashSet;
 use std::mem;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -16,9 +17,10 @@ use tracing::{error, info, warn};
 
 use assistd_utils::backoff::{MIN_HEALTHY_SECONDS, RestartDecision, RestartPolicy};
 
-use crate::McpClient;
+use crate::definition::definition_hash;
 use crate::error::McpError;
 use crate::session::{Connector, Lifeline, McpPeer};
+use crate::{Definition, McpClient};
 
 /// How long a stopping server gets to exit after SIGTERM.
 const TERM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -49,6 +51,27 @@ struct ServerState {
     policy: RestartPolicy,
     /// The first tool listing, which the registry offers for good.
     advertised: Option<Vec<Tool>>,
+    relisted: Relisted,
+}
+
+/// How the live session's tools stand against the advertised ones.
+#[derive(Debug)]
+enum Relisted {
+    AsAdvertised,
+    /// These tools hash differently now.
+    Redefined(HashSet<String>),
+    /// The restarted server did not list its tools, so any of them may have changed.
+    Unverified,
+}
+
+impl Relisted {
+    fn redefines(&self, tool: &str) -> bool {
+        match self {
+            Self::AsAdvertised => false,
+            Self::Redefined(tools) => tools.contains(tool),
+            Self::Unverified => true,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -95,6 +118,7 @@ impl McpServer {
             lifecycle: Lifecycle::Live(session),
             policy: RestartPolicy::default(),
             advertised: None,
+            relisted: Relisted::AsAdvertised,
         };
         Ok(Self {
             name,
@@ -195,33 +219,41 @@ impl McpServer {
     /// Open a session in place of the one that ended, unless a concurrent call just has.
     /// A shutdown abandons the attempt, which then fails with [`McpError::ServerDown`].
     async fn reopen(&self) -> Result<Arc<McpPeer>, McpError> {
-        let client = {
-            let _reopening = self.reopening.lock().await;
-            if let Some(client) = self.current_client()? {
-                return Ok(client);
-            }
-            let opened = tokio::select! {
-                biased;
-                () = self.stopping.cancelled() => return Err(McpError::ServerDown),
-                opened = Session::open(&self.connector) => opened,
-            };
-            self.settle_reopen(opened)?
-        };
-        let advertised = self.state.lock().advertised.clone();
-        if let Some(advertised) = advertised {
-            self.warn_if_tools_changed(&advertised, &client).await;
+        let _reopening = self.reopening.lock().await;
+        if let Some(client) = self.current_client()? {
+            return Ok(client);
         }
-        Ok(client)
+        let opened = tokio::select! {
+            biased;
+            () = self.stopping.cancelled() => return Err(McpError::ServerDown),
+            opened = self.open_relisted() => opened,
+        };
+        self.settle_reopen(opened)
+    }
+
+    /// A new session and how its tools stand against the advertised ones.
+    async fn open_relisted(&self) -> Result<(Session, Relisted), McpError> {
+        let session = Session::open(&self.connector).await?;
+        let advertised = self.state.lock().advertised.clone();
+        let relisted = match advertised {
+            Some(advertised) => self.relist(&advertised, &session.client).await,
+            None => Relisted::AsAdvertised,
+        };
+        Ok((session, relisted))
     }
 
     /// Make an `opened` session the live one, or back off again if opening it failed.
-    fn settle_reopen(&self, opened: Result<Session, McpError>) -> Result<Arc<McpPeer>, McpError> {
+    fn settle_reopen(
+        &self,
+        opened: Result<(Session, Relisted), McpError>,
+    ) -> Result<Arc<McpPeer>, McpError> {
         let mut state = self.state.lock();
         match opened {
-            Ok(session) => {
+            Ok((session, relisted)) => {
                 info!(target: "assistd::mcp", server = %self.name, "MCP server restarted");
                 let client = session.client.clone();
                 state.lifecycle = Lifecycle::Live(session);
+                state.relisted = relisted;
                 Ok(client)
             }
             Err(McpError::NeedsAuthorization { scopes }) => {
@@ -284,9 +316,9 @@ impl McpServer {
         }
     }
 
-    /// Re-list a restarted server's tools and warn when they differ from
-    /// the `advertised` ones the registry still offers.
-    async fn warn_if_tools_changed(&self, advertised: &[Tool], client: &McpPeer) {
+    /// Re-list a restarted server's tools and say how they stand against the `advertised`
+    /// ones the registry still offers, warning when they differ.
+    async fn relist(&self, advertised: &[Tool], client: &McpPeer) -> Relisted {
         let listed = match client.list_tools().await {
             Ok(listed) => listed,
             Err(e) => {
@@ -294,14 +326,14 @@ impl McpServer {
                     target: "assistd::mcp",
                     server = %self.name,
                     error = %e,
-                    "could not re-list MCP tools after a restart",
+                    "could not re-list MCP tools after a restart; every call to them asks first",
                 );
-                return;
+                return Relisted::Unverified;
             }
         };
         let changes = ToolChanges::between(advertised, &listed);
         if changes.is_empty() {
-            return;
+            return Relisted::AsAdvertised;
         }
         warn!(
             target: "assistd::mcp",
@@ -309,9 +341,10 @@ impl McpServer {
             added = ?changes.added,
             removed = ?changes.removed,
             changed = ?changes.changed,
-            "MCP server's tools changed across a restart; the registry still offers the old ones \
-             until the daemon restarts",
+            "MCP server's tools changed across a restart; until the daemon restarts the registry \
+             still offers the old ones and every call to a changed one asks first",
         );
+        Relisted::Redefined(changes.changed.into_iter().map(str::to_string).collect())
     }
 }
 
@@ -329,9 +362,21 @@ impl McpClient for McpServer {
         Ok(tools)
     }
 
-    async fn invoke(&self, name: &str, arguments: Value) -> Result<CallToolResult, McpError> {
+    fn redefined(&self, name: &str) -> bool {
+        self.state.lock().relisted.redefines(name)
+    }
+
+    async fn invoke(
+        &self,
+        name: &str,
+        arguments: Value,
+        definition: Definition,
+    ) -> Result<CallToolResult, McpError> {
         let client = self.live_client().await?;
-        let outcome = client.invoke(name, arguments).await;
+        if definition == Definition::AsListed && self.redefined(name) {
+            return Err(McpError::ToolRedefined);
+        }
+        let outcome = client.invoke(name, arguments, definition).await;
         self.record_outcome(&client, &outcome);
         outcome
     }
@@ -361,7 +406,10 @@ impl<'a> ToolChanges<'a> {
             removed: names_missing_from(before, after),
             changed: after
                 .iter()
-                .filter(|tool| find(before, &tool.name).is_some_and(|old| old != *tool))
+                .filter(|tool| {
+                    find(before, &tool.name)
+                        .is_some_and(|old| definition_hash(old) != definition_hash(tool))
+                })
                 .map(|tool| tool.name.as_ref())
                 .collect(),
         }
