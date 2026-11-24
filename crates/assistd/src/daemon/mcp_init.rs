@@ -1,12 +1,12 @@
 //! MCP subsystem wiring for the daemon: servers start in the background, each one's tools are
 //! offered once it has connected, and OAuth servers are signed in and out on request.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_config::{
-    Config, McpAuth, McpHttpTransport, McpOAuthClient, McpServerConfig, McpServerUrl,
+    AbsoluteDir, Config, McpAuth, McpHttpTransport, McpOAuthClient, McpServerConfig, McpServerUrl,
     McpStdioTransport, McpTransport,
 };
 use assistd_core::{McpAccountError, McpAccounts, McpHost, McpLogin, McpServerStatus};
@@ -15,7 +15,7 @@ use assistd_mcp::{
     Connector, HttpAuth, HttpConfig, LaunchTarget, McpError, McpServer, OAuthConfig, Revocation,
     StdioConfig, TokenStore, begin_login, launch, sign_out, withdraw_tools,
 };
-use assistd_tools::{PinnedApprovalGate, VisionGate};
+use assistd_tools::{PinnedApprovalGate, SandboxInfo, SandboxedServer, ServerSandbox, VisionGate};
 use async_trait::async_trait;
 use futures_util::future::join_all;
 use parking_lot::Mutex;
@@ -32,7 +32,18 @@ pub(super) struct McpFleet {
     vision: Arc<VisionGate>,
     /// Where `auth = "oauth"` servers keep their tokens; `None` without a state directory.
     tokens: Option<TokenStore>,
+    /// What every stdio server runs in.
+    sandbox: Arc<ServerSandbox>,
+    /// Holds each stdio server's home, under its name; `None` without a data directory.
+    homes: Option<PathBuf>,
     stopping: CancellationToken,
+}
+
+/// Why a configured server has no way to be reached.
+#[derive(Debug, Clone, Copy)]
+enum Unreachable {
+    NoTokenStore,
+    NoDataDir,
 }
 
 /// The fleet's background start, stopped at shutdown with every server it started.
@@ -63,9 +74,16 @@ impl McpFleet {
     /// `host` as it settles.
     pub(super) fn spawn(self: Arc<Self>, host: &McpHost) -> McpService {
         for server in &self.servers {
-            let Some(connector) = connector(&server.config, self.tokens.clone()) else {
-                host.record_state(server.config.name.as_str(), no_token_store());
-                continue;
+            let connector = match self.connector(&server.config) {
+                Ok(connector) => connector,
+                Err(unreachable) => {
+                    let reason = unreachable.reason();
+                    host.record_state(
+                        server.config.name.as_str(),
+                        McpServerState::Unavailable { reason },
+                    );
+                    continue;
+                }
             };
             let start = Start {
                 server: server.clone(),
@@ -109,6 +127,31 @@ impl McpFleet {
         Ok((&http.url, oauth_config(client, tokens)))
     }
 
+    /// How to reach `server`, or why it cannot be reached.
+    fn connector(&self, server: &McpServerConfig) -> Result<Connector, Unreachable> {
+        let request_timeout = request_timeout(server);
+        match &server.transport {
+            McpTransport::Stdio(transport) => {
+                let homes = self.homes.as_ref().ok_or(Unreachable::NoDataDir)?;
+                let mut stdio = StdioConfig::sandboxed(
+                    server.name.to_string(),
+                    Arc::clone(&self.sandbox),
+                    sandboxed_server(transport, homes.join(server.name.as_str())),
+                );
+                stdio.request_timeout = request_timeout;
+                Ok(Connector::Stdio(stdio))
+            }
+            McpTransport::Http(transport) => {
+                let mut http = http_config(server, transport, request_timeout);
+                if let McpAuth::OAuth(client) = &transport.auth {
+                    let tokens = self.tokens.clone().ok_or(Unreachable::NoTokenStore)?;
+                    http.auth = HttpAuth::OAuth(oauth_config(client, tokens));
+                }
+                Ok(Connector::Http(Box::new(http)))
+            }
+        }
+    }
+
     /// Cancel every pending start and stop every server.
     async fn shutdown(&self) {
         self.stopping.cancel();
@@ -129,8 +172,9 @@ impl McpAccounts for McpFleet {
         let pending = begin_login(name, url.as_url(), &oauth, request_timeout)
             .await
             .map_err(mcp_failure)?;
-        let connector =
-            connector(&server.config, self.tokens.clone()).ok_or(McpAccountError::NoTokenStore)?;
+        let connector = self
+            .connector(&server.config)
+            .map_err(|_| McpAccountError::NoTokenStore)?;
         let start = Start {
             server: server.clone(),
             connector,
@@ -162,6 +206,17 @@ impl McpAccounts for McpFleet {
             .map_err(mcp_failure)?;
         info!(target: "assistd::mcp", server = %name, "MCP server signed out");
         Ok(wire_revocation(revocation))
+    }
+}
+
+impl Unreachable {
+    fn reason(self) -> String {
+        match self {
+            Self::NoTokenStore => McpAccountError::NoTokenStore.to_string(),
+            Self::NoDataDir => {
+                "there is no user data directory to keep the server's home in".to_owned()
+            }
+        }
     }
 }
 
@@ -244,9 +299,12 @@ impl Start {
 
 /// A status per configured server and the fleet that starts and signs them in, whose tools ask
 /// before each call unless `approvals` holds their definitions and whose image results follow `vision`.
-/// No fleet when MCP is disabled.
+/// Stdio servers run in a sandbox started as `sandbox` starts commands, with the directory of
+/// `config_path` hidden. No fleet when MCP is disabled.
 pub(super) fn prepare(
     config: &Config,
+    config_path: &Path,
+    sandbox: &SandboxInfo,
     approvals: PinnedApprovalGate,
     vision: Arc<VisionGate>,
 ) -> (Vec<McpServerStatus>, Option<Arc<McpFleet>>) {
@@ -278,6 +336,8 @@ pub(super) fn prepare(
         approvals,
         vision,
         tokens: token_file().map(TokenStore::new),
+        sandbox: Arc::new(ServerSandbox::over(sandbox, &own_files(config_path))),
+        homes: dirs::data_dir().map(|data| data.join("assistd").join("mcp")),
         stopping: CancellationToken::new(),
     };
     (statuses, Some(Arc::new(fleet)))
@@ -291,12 +351,6 @@ fn failed_state(error: &McpError) -> McpServerState {
         other => McpServerState::Unavailable {
             reason: other.to_string(),
         },
-    }
-}
-
-fn no_token_store() -> McpServerState {
-    McpServerState::Unavailable {
-        reason: McpAccountError::NoTokenStore.to_string(),
     }
 }
 
@@ -324,25 +378,6 @@ fn request_timeout(server: &McpServerConfig) -> Duration {
     Duration::from_secs(server.request_timeout_secs.get())
 }
 
-/// How to reach `server`; `None` for an OAuth server when there is nowhere to keep `tokens`.
-fn connector(server: &McpServerConfig, tokens: Option<TokenStore>) -> Option<Connector> {
-    let request_timeout = request_timeout(server);
-    match &server.transport {
-        McpTransport::Stdio(transport) => Some(Connector::Stdio(stdio_config(
-            server,
-            transport,
-            request_timeout,
-        ))),
-        McpTransport::Http(transport) => {
-            let mut http = http_config(server, transport, request_timeout);
-            if let McpAuth::OAuth(client) = &transport.auth {
-                http.auth = HttpAuth::OAuth(oauth_config(client, tokens?));
-            }
-            Some(Connector::Http(http))
-        }
-    }
-}
-
 fn oauth_config(client: &McpOAuthClient, tokens: TokenStore) -> OAuthConfig {
     OAuthConfig {
         client_id: client.client_id.clone(),
@@ -352,19 +387,37 @@ fn oauth_config(client: &McpOAuthClient, tokens: TokenStore) -> OAuthConfig {
     }
 }
 
-fn stdio_config(
-    server: &McpServerConfig,
-    transport: &McpStdioTransport,
-    request_timeout: Duration,
-) -> StdioConfig {
-    let mut stdio = StdioConfig::new(
-        server.name.to_string(),
-        transport.command.to_string_lossy().into_owned(),
-    );
-    stdio.args.clone_from(&transport.args);
-    stdio.env.clone_from(&transport.env);
-    stdio.request_timeout = request_timeout;
-    stdio
+/// What `transport` runs and may reach, with `home` as its `$HOME`.
+fn sandboxed_server(transport: &McpStdioTransport, home: PathBuf) -> SandboxedServer {
+    let paths = |granted: &[AbsoluteDir]| granted.iter().map(|dir| dir.as_path().into()).collect();
+    SandboxedServer {
+        command: transport.command.clone(),
+        args: transport.args.clone(),
+        env: transport.env.clone(),
+        home,
+        read: paths(&transport.read),
+        write: paths(&transport.write),
+        network: transport.network,
+    }
+}
+
+/// The daemon's socket and its config, data, state, cache and runtime directories, which no
+/// server may be granted.
+fn own_files(config_path: &Path) -> Vec<PathBuf> {
+    let user_dirs = [
+        dirs::config_dir(),
+        dirs::data_dir(),
+        dirs::state_dir(),
+        dirs::cache_dir(),
+        dirs::runtime_dir(),
+    ];
+    user_dirs
+        .into_iter()
+        .flatten()
+        .map(|dir| dir.join("assistd"))
+        .chain(config_path.parent().map(Path::to_path_buf))
+        .chain([assistd_ipc::socket_path()])
+        .collect()
 }
 
 fn http_config(

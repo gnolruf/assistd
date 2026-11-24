@@ -40,7 +40,7 @@ pub use oauth::{
 };
 pub use server::McpServer;
 pub use session::Connector;
-pub use stdio::StdioConfig;
+pub use stdio::{ServerSpawner, StdioConfig};
 pub use streamable::{HttpAuth, HttpConfig};
 
 /// A connection to a single MCP server.

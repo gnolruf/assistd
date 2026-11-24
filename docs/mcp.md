@@ -15,6 +15,7 @@ enabled = true
 name = "filesystem"
 command = "npx"                       # a stdio server: a child process
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/docs"]
+read = ["/home/me/docs"]              # what its sandbox shows of your files
 
 [[mcp.servers]]
 name = "remote"
@@ -29,6 +30,56 @@ The settings panel (`/settings` in the chat, or `assistd settings`)
 writes the same entries: on its Tools tab, turn MCP on and open
 `servers` to add, change or delete one in a form. Its other
 `[[mcp.servers]]` entries keep their comments.
+
+## What a stdio server can reach
+
+Every stdio server runs in a bubblewrap sandbox; there is no way to run
+one outside it. A server sees:
+
+- `/usr`, read-only, with the certificates and name resolution files from
+  `/etc`, and a `/tmp` of its own;
+- a home directory of its own,
+  `~/.local/share/assistd/mcp/<name>`, which is its `$HOME` and working
+  directory and is kept between launches, so `npx` and `uvx` keep their
+  caches there. No server sees another's;
+- the host paths its entry grants: `read = [...]` read-only and
+  `write = [...]` writable, each at its own path. A leading `~` is your
+  real home;
+- the network, unless its entry sets `network = false`.
+
+It never sees your real home, the daemon's socket, or assistd's config,
+data, state and cache directories, even inside a granted path; a grant
+that points into one of them is refused. It cannot open Unix sockets, so
+it reaches no agent or session bus. Its environment is `PATH`, the
+locale and terminal variables and what `env` sets.
+
+The command must itself be visible: under `/usr`, or under a granted
+path. One installed in your home is not, and `assistd mcp status` says
+so; grant the directory that holds it and whatever it loads:
+
+```toml
+[[mcp.servers]]
+name = "notes"
+command = "~/.cargo/bin/notes-mcp"    # hypothetical
+read = ["~/.cargo/bin", "~/notes"]
+```
+
+A server that worked unsandboxed fails until its entry grants what it
+reads, and the server's own error in the daemon log is the only hint of
+which file that was. What common servers need:
+
+| Server | Grant |
+|---|---|
+| A filesystem server | Each directory passed in `args`, in `write` (or `read` to keep it read-only). |
+| A git server | The repository checkout in `write`, and `~/.gitconfig` in `read`. |
+| GitHub, GitLab and other API servers | Nothing; put the token in `env`. One that reads `gh`'s login needs `read = ["~/.config/gh"]`. |
+| AWS tools | `read = ["~/.aws"]`, or the keys in `env`. |
+| A SQLite server | The database's directory in `write`, since SQLite writes its journal beside the file. |
+| `node` from nvm, or a tool from `uv`, `pipx` or `cargo` | `read` for the install, such as `~/.nvm`, `~/.local/share/uv` with `~/.local/bin`, or `~/.cargo/bin`. |
+| A server that only computes | `network = false`, once its packages are cached in its home or installed under `/usr`. |
+
+Granting `~` whole works but gives the server everything the sandbox was
+meant to keep from it, your SSH and browser files included.
 
 ## Checking on servers
 

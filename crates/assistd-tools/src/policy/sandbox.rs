@@ -28,6 +28,7 @@ mod reader;
 mod scope;
 mod scratch_cap;
 mod seccomp;
+mod server;
 
 pub(crate) use confined::ConfinedSpawner;
 pub(crate) use home::is_within_visible_home_entry;
@@ -38,6 +39,7 @@ pub use reader::{ReaderProgram, ReaderSandbox, ReaderSandboxError};
 pub use scope::ScopeError;
 pub(crate) use scratch_cap::Guarded;
 pub use scratch_cap::{SCRATCH_MARKER, ScratchCap};
+pub use server::{SandboxedServer, ServerSandbox, ServerSandboxError};
 
 /// The `PATH` sandboxed commands run with, and the fallback when the
 /// daemon has no usable one.

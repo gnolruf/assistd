@@ -68,7 +68,7 @@ flowchart TB
 | `assistd-embed`  | Embedding HTTP client + the worker that drains the semantic store's rows without a vector, as four backlogs; launch spec for its llama-server. | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`, `SearchKind`, `SearchPlace`); the in-memory image `Attachment`, its format check and capped file loader; `Access`, what a tool call reports it touched; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec and presets file + control plane + `PageTranscriber` for the OCR model. | `config`, `ipc`, `utils`                                                         |
-| `assistd-mcp`    | Stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools.  | `config`, `ipc`, `tools`, `utils`                                                |
+| `assistd-mcp`    | Sandboxed stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools. | `config`, `ipc`, `tools`, `utils`                                                |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `TaskStore` in `memory.db`, `SemanticStore` with its one search in the rebuildable `index.db` and `vectors.db`, and the `MessageChunker` backlog. | `ipc`, `utils`                                                                   |
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
@@ -1531,12 +1531,47 @@ connects, since every turn takes its own snapshot of the catalog. A
 server that fails to start or to list its tools is retried with the same
 backoff as restarts, and is reported as unavailable, with its last error,
 in `GetReadiness` and `GetCapabilities` until an attempt succeeds. One
-whose command is missing or not executable, or that answers 401 or 403
-("needs authorization"), is not retried. Shutdown cancels pending
+whose sandbox cannot be laid out as configured (a command that is
+missing, not executable or outside what the sandbox shows, a granted
+path that does not exist or lies in assistd's own directories), or that
+answers 401 or 403 ("needs authorization"), is not retried. Shutdown cancels pending
 retries. Each call asks the user first until that tool is "always
 allowed". Like every tool's, their text results are
 held to the `[tools.output]` cap by the registry, spilling overflow to
 `<registry-name>-<n>.txt`.
+
+A stdio server runs in `ServerSandbox`, a bwrap profile that
+`assistd-tools` builds from the tool sandbox's programs; there is no
+unwrapped mode, and without a tool sandbox no server starts. It has what
+a relay's quarantine has (read-only `/usr`, the merged-`/usr` links, the
+certificate, resolver and loader entries of `/etc`, fresh `/tmp`, `/dev`
+and `/proc`, its own user, PID, IPC and UTS namespaces) plus
+`/etc/hosts`, `/etc/nsswitch.conf`, `/etc/passwd` and `/etc/group`, and
+the same seccomp filter, capped systemd scope and `prlimit` and `choom`
+wrappers as a tool command. `$HOME` and the working directory are
+`$XDG_DATA_HOME/assistd/mcp/<name>`, created mode 0700 and bound
+writable, so a server keeps its own state and package caches and sees no
+other server's. The entry's `read` and `write` paths are bound at their
+own paths, parents first, from their symlink-resolved targets. The
+daemon's socket and its config (the directory of the loaded config
+file), data, state, cache and runtime directories are never shown: a
+grant that resolves inside one is refused, and one that holds any gets a
+tmpfs over each directory and `/dev/null` over the socket, mounted after
+the grants and before the home, which lies in the data directory. A
+missing one under a writable grant is covered too, so the server cannot
+create the token file ahead of the daemon. The command is looked up on
+the daemon's `PATH`, which the server keeps, and must lie under `/usr`,
+the home or a grant; nothing under the real `$HOME` is bound for it,
+since the directory of a command may be `$HOME` itself and a runtime
+needs more than its `bin`. The environment is the tool sandbox's (locale
+and terminal variables) with `SHELL`, `PATH`, `HOME` and the entry's
+`env`, which travels in the process environment and never on bwrap's
+command line. The network namespace is shared unless the entry sets
+`network = false`; a networked server is spawned from the thread
+Landlock bars from abstract Unix sockets, as `--share-net` commands are,
+and on a kernel without Landlock scoping only `network = false` servers
+start. node, npx and python start and spawn children with `AF_UNIX`
+refused.
 
 When a server's process or session ends, its process group is killed
 at once, and the next call to one of its tools starts it again. Restarts

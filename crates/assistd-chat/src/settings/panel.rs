@@ -945,7 +945,7 @@ fn parse_input(kind: SettingKind, text: &str) -> Result<toml::Value, String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use assistd_config::{Config, McpTransport};
     use crossterm::event::KeyModifiers;
@@ -1042,7 +1042,7 @@ mod tests {
         press(&mut panel, KeyCode::Down);
         press(&mut panel, KeyCode::Down);
         typed(&mut panel, "npx");
-        for entry in ["-y", "TOKEN=a=b"] {
+        for entry in ["-y", "TOKEN=a=b", "/srv/docs"] {
             press(&mut panel, KeyCode::Down);
             press(&mut panel, KeyCode::Enter);
             press(&mut panel, KeyCode::Enter);
@@ -1050,6 +1050,10 @@ mod tests {
             press(&mut panel, KeyCode::Enter);
             press(&mut panel, KeyCode::Esc);
         }
+        for _ in ["write", "network"] {
+            press(&mut panel, KeyCode::Down);
+        }
+        press(&mut panel, KeyCode::Right);
         press(&mut panel, KeyCode::Down);
         press(&mut panel, KeyCode::Enter);
         assert!(panel.save());
@@ -1064,6 +1068,8 @@ mod tests {
         assert_eq!(stdio.command, PathBuf::from("npx"));
         assert_eq!(stdio.args, ["-y"]);
         assert_eq!(stdio.env.get("TOKEN").map(String::as_str), Some("a=b"));
+        assert_eq!(stdio.read[0].as_path(), Path::new("/srv/docs"));
+        assert!(stdio.write.is_empty() && !stdio.network);
 
         press(&mut panel, KeyCode::Char('a'));
         typed(&mut panel, "files");

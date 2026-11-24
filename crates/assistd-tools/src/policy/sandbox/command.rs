@@ -44,7 +44,7 @@ const ISOLATION_FLAGS: [&str; 7] = [
 
 /// The top-level system directories a quarantine mirrors from the host,
 /// as the symlinks into `/usr` they are on a merged-`/usr` system.
-const QUARANTINE_SYSTEM_LINKS: [&str; 4] = ["/bin", "/sbin", "/lib", "/lib64"];
+pub(super) const QUARANTINE_SYSTEM_LINKS: [&str; 4] = ["/bin", "/sbin", "/lib", "/lib64"];
 
 /// The `/etc` entries a quarantine exposes: certificates, name resolution
 /// and the dynamic loader's configuration.

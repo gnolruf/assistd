@@ -148,7 +148,7 @@ impl Lifeline {
 #[derive(Debug, Clone)]
 pub enum Connector {
     Stdio(StdioConfig),
-    Http(HttpConfig),
+    Http(Box<HttpConfig>),
 }
 
 impl Connector {

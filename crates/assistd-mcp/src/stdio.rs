@@ -1,45 +1,40 @@
 //! MCP servers run as child processes and spoken to over their
 //! stdin/stdout by `rmcp`; stderr is forwarded to tracing.
 
-use std::collections::{BTreeSet, HashMap};
-use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
-use std::process::Stdio;
+use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
 use rmcp::ServiceExt;
 use tokio::io::{AsyncRead, ReadBuf};
-use tokio::process::{Child, ChildStderr, Command};
+use tokio::process::{Child, ChildStderr};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 
+use assistd_tools::{SandboxedServer, ServerSandbox, ServerSandboxError};
 use assistd_utils::log_lines::forward_lines;
-use assistd_utils::process_group::{ProcessGroup, set_parent_death_signal};
+use assistd_utils::process_group::ProcessGroup;
 
 use crate::error::McpError;
 use crate::session::{MAX_MESSAGE_BYTES, McpPeer, OpenService, client_config};
-
-/// Daemon variables a server inherits besides `LC_*`; anything else,
-/// credentials included, must come from [`StdioConfig::env`].
-const INHERITED_ENV: &[&str] = &[
-    "HOME", "LANG", "LANGUAGE", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "TZ", "USER",
-];
 
 /// How long a shutdown waits for the MCP session to close the child's
 /// stdin before signalling the process group.
 const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Per-server stdio transport configuration. `Debug` gives the arg count
-/// and env var names, never their values.
+/// Starts a server's process with its stdin, stdout and stderr piped, leading
+/// its own process group.
+pub type ServerSpawner =
+    Arc<dyn Fn() -> BoxFuture<'static, Result<Child, ServerSandboxError>> + Send + Sync>;
+
+/// Per-server stdio transport configuration.
 #[derive(Clone)]
 pub struct StdioConfig {
-    pub command: String,
-    pub args: Vec<String>,
-    /// Set on top of the few daemon variables every server inherits.
-    pub env: HashMap<String, String>,
+    pub spawner: ServerSpawner,
     /// Bounds the initialize handshake and every request.
     pub request_timeout: Duration,
     /// Server name used in tracing logs.
@@ -47,35 +42,43 @@ pub struct StdioConfig {
 }
 
 impl StdioConfig {
-    /// Config that runs `command` with no args or extra env and a 30s
-    /// request timeout.
-    pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
+    /// Config that starts its server with `spawner` and a 30s request timeout.
+    pub fn new(label: impl Into<String>, spawner: ServerSpawner) -> Self {
         Self {
-            command: command.into(),
-            args: Vec::new(),
-            env: HashMap::new(),
+            spawner,
             request_timeout: Duration::from_secs(30),
             label: label.into(),
         }
+    }
+
+    /// Config that starts `server` in `sandbox` with a 30s request timeout.
+    pub fn sandboxed(
+        label: impl Into<String>,
+        sandbox: Arc<ServerSandbox>,
+        server: SandboxedServer,
+    ) -> Self {
+        let server = Arc::new(server);
+        let spawner: ServerSpawner = Arc::new(move || {
+            let (sandbox, server) = (Arc::clone(&sandbox), Arc::clone(&server));
+            Box::pin(async move { sandbox.spawn(&server).await })
+        });
+        Self::new(label, spawner)
     }
 }
 
 impl fmt::Debug for StdioConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StdioConfig")
-            .field("command", &self.command)
-            .field("arg_count", &self.args.len())
-            .field("env_names", &self.env.keys().collect::<BTreeSet<_>>())
             .field("request_timeout", &self.request_timeout)
             .field("label", &self.label)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 /// Spawn the server in its own process group and run the initialize handshake.
 /// Errors if either fails; a failed handshake kills the child.
 pub(crate) async fn connect(cfg: &StdioConfig) -> Result<(McpPeer, ChildLifeline), McpError> {
-    let (mut child, group) = spawn_child(cfg)?;
+    let (mut child, group) = spawn_child(cfg).await?;
     let stdout = LineCappedReader::new(child.stdout.take().expect("stdout piped"));
     let stdin = child.stdin.take().expect("stdin piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -198,25 +201,11 @@ impl<R: AsyncRead + Unpin> AsyncRead for LineCappedReader<R> {
     }
 }
 
-fn spawn_child(cfg: &StdioConfig) -> Result<(Child, ProcessGroup), McpError> {
-    let spawn_error = |source| McpError::Spawn {
-        path: cfg.command.clone(),
-        source,
-    };
-    let mut cmd = Command::new(&cfg.command);
-    cmd.args(&cfg.args)
-        .env_clear()
-        .envs(inherited_env(std::env::vars_os()))
-        .envs(cfg.env.iter())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .process_group(0);
-    set_parent_death_signal(&mut cmd);
-    let child = cmd.spawn().map_err(spawn_error)?;
-    let group = ProcessGroup::led_by(&child)
-        .ok_or_else(|| spawn_error(io::Error::other("spawned child reported no pid")))?;
+async fn spawn_child(cfg: &StdioConfig) -> Result<(Child, ProcessGroup), McpError> {
+    let child = (cfg.spawner)().await?;
+    let group = ProcessGroup::led_by(&child).ok_or_else(|| {
+        ServerSandboxError::Spawn(io::Error::other("spawned child reported no pid"))
+    })?;
     Ok((child, group))
 }
 
@@ -227,14 +216,6 @@ async fn abandon(mut child: Child, group: ProcessGroup, error: McpError) -> McpE
     drop(group);
     let _ = child.wait().await;
     error
-}
-
-fn inherited_env(
-    vars: impl IntoIterator<Item = (OsString, OsString)>,
-) -> impl Iterator<Item = (OsString, OsString)> {
-    let inherited = |name: &str| INHERITED_ENV.contains(&name) || name.starts_with("LC_");
-    vars.into_iter()
-        .filter(move |(name, _)| name.to_str().is_some_and(inherited))
 }
 
 async fn forward_stderr(stream: ChildStderr, label: String) {
@@ -266,30 +247,5 @@ mod tests {
         let err = reader.read_until(b'\n', &mut line).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(line.len() <= MAX_MESSAGE_BYTES + 8 * 1024);
-    }
-
-    #[test]
-    fn debug_lists_env_names_but_not_values() {
-        let mut cfg = StdioConfig::new("local", "server");
-        cfg.env.insert("API_TOKEN".into(), "hunter2".into());
-        let rendered = format!("{cfg:?}");
-        assert!(rendered.contains("API_TOKEN"), "{rendered}");
-        assert!(!rendered.contains("hunter2"), "{rendered}");
-    }
-
-    #[test]
-    fn servers_inherit_only_basic_session_and_locale_variables() {
-        let vars = [
-            "PATH",
-            "HOME",
-            "LC_ALL",
-            "TZ",
-            "GITHUB_TOKEN",
-            "AWS_SECRET_ACCESS_KEY",
-            "SSH_AUTH_SOCK",
-        ]
-        .map(|name| (OsString::from(name), OsString::from("value")));
-        let names: Vec<_> = inherited_env(vars).map(|(name, _)| name).collect();
-        assert_eq!(names, ["PATH", "HOME", "LC_ALL", "TZ"]);
     }
 }
