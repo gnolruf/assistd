@@ -29,6 +29,11 @@ CREATE TABLE document_vectors (
     vector BLOB CHECK (length(vector) > 4)
 ) STRICT;
 
+CREATE TABLE access_vectors (
+    hash   BLOB NOT NULL UNIQUE CHECK (length(hash) = 16),
+    vector BLOB CHECK (length(vector) > 4)
+) STRICT;
+
 -- At most one row: the embedding space every stored vector is in.
 CREATE TABLE embedding_meta (
     id              INTEGER PRIMARY KEY CHECK (id = 0),

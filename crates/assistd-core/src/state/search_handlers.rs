@@ -1,4 +1,5 @@
-//! Handler for the `Search` request: one ranking of sessions, memories and documents.
+//! Handler for the `Search` request: one ranking of sessions, memories, documents and
+//! the files and pages sessions touched.
 
 use assistd_config::Config;
 use assistd_ipc::{Event, EventBody, SearchKind};
@@ -55,7 +56,7 @@ impl AppState {
 /// none is named. Errors when a named kind, or every kind, is turned off.
 fn searched_kinds(config: &Config, named: &[SearchKind]) -> Result<Vec<SearchKind>, DispatchError> {
     let turned_on = |kind: &SearchKind| match kind {
-        SearchKind::Sessions | SearchKind::Memories => config.memory.enabled,
+        SearchKind::Sessions | SearchKind::Memories | SearchKind::Accesses => config.memory.enabled,
         SearchKind::Documents => config.documents.enabled,
     };
     if let Some(off) = named.iter().find(|kind| !turned_on(kind)) {

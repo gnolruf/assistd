@@ -5,13 +5,14 @@ use rusqlite::Connection;
 
 /// The `PRAGMA user_version` of an `index.db` holding [`SCHEMA_SQL`]. Any change to
 /// the schema takes the next number, and every older file is then built again.
-pub(crate) const VERSION: i64 = 2;
+pub(crate) const VERSION: i64 = 1;
 
 /// Every table of the index. A chunk's `source` names a row of `memory.db` when its
-/// kind is a message or a memory, so nothing here can hold it to that row.
+/// kind is a message, a memory or an access, so nothing here can hold it to that row.
 const SCHEMA_SQL: &str = r"
--- At most one row: the `memory.db` whose messages and memories are chunked here, by
--- its `database_identity`, and the highest message id whose chunks are cut.
+-- At most one row: the `memory.db` whose messages, memories and accesses are chunked
+-- here, by its `database_identity`, and the highest message id whose chunks, and those
+-- of the accesses stored with it, are cut.
 CREATE TABLE chunked_source (
     id              INTEGER PRIMARY KEY CHECK (id = 0),
     memory_identity BLOB NOT NULL CHECK (length(memory_identity) = 16),
@@ -106,14 +107,15 @@ CREATE INDEX idx_page_transcriptions_waiting ON page_transcriptions(document_id,
     WHERE state = 0;
 
 -- A byte range into the text a chunk is cut from: `kind` is 0 for a message's content,
--- 1 for a memory's value, 2 for a document page's content, and `source` is the id of
--- that message, memory or document. `page` is 0 unless the source is a document.
+-- 1 for a memory's value, 2 for a document page's content, 3 for an access's label on
+-- a line of its own and then its target, and `source` is the id of that message,
+-- memory, document or access. `page` is 0 unless the source is a document.
 -- `hash` is the first 16 bytes of the SHA-256 of the bytes the range covers, which is
 -- what `vectors.db` stores the text's vector under. The id is also the chunk's rowid
 -- in `chunk_words`.
 CREATE TABLE chunks (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind       INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 2),
+    kind       INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 3),
     source     INTEGER NOT NULL,
     page       INTEGER NOT NULL CHECK (page >= 0),
     byte_start INTEGER NOT NULL,
@@ -138,7 +140,7 @@ CREATE VIRTUAL TABLE chunk_words USING fts5(text, content='', contentless_delete
 -- The chunk texts a write removed a chunk of, by `chunks.kind` and `chunks.hash`.
 -- The write that fills it empties it before it commits.
 CREATE TABLE removed_chunk_texts (
-    kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 2),
+    kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 3),
     hash BLOB NOT NULL CHECK (length(hash) = 16),
     PRIMARY KEY (kind, hash)
 ) STRICT, WITHOUT ROWID;

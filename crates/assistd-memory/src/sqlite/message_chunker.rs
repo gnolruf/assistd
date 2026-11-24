@@ -1,4 +1,5 @@
-//! The backlog of saved messages that `index.db` has not cut into chunks.
+//! The backlog of saved messages that `index.db` has not cut into chunks, they and
+//! the accesses stored with them.
 
 use std::sync::Arc;
 
@@ -14,14 +15,15 @@ use super::reconcile;
 /// Messages cut in one write to `index.db`.
 const MESSAGES_PER_PAGE: usize = 64;
 
-/// The saved user and assistant messages above the highest one `index.db` has
-/// chunked, each with its content. Doing a page cuts their chunks and moves that mark,
-/// which is the only way a message gets chunks.
+/// The saved messages above the highest one `index.db` has chunked that have chunks to
+/// cut: user and assistant messages with their content, and tool results stored with an
+/// access to a file or a page. Doing a page cuts their chunks and moves that mark, which
+/// is the only way a message or an access gets chunks.
 #[derive(Debug, Clone)]
 pub struct MessageChunker {
     handle: SqliteHandle,
-    /// Whether, with every message chunked, the message vectors were held against
-    /// the chunks since this chunker was made.
+    /// Whether, with every message chunked, the message and access vectors were held
+    /// against the chunks since this chunker was made.
     unheld_vectors_removed: bool,
 }
 
@@ -48,7 +50,7 @@ impl MessageChunker {
 
 impl Backlog for MessageChunker {
     type RowId = MessageId;
-    type Row = String;
+    type Row = Option<String>;
     type Error = MemoryError;
 
     async fn page_after(&self, after: Option<MessageId>) -> Result<Page<Self>> {
@@ -76,12 +78,12 @@ impl Backlog for MessageChunker {
 impl Pass for MessageChunker {
     type Error = MemoryError;
 
-    /// Once the first pass to leave no message unchunked has ended, the message
-    /// vectors no chunk holds the text of are removed.
+    /// Once the first pass to leave no message unchunked has ended, the message and
+    /// access vectors no chunk holds the text of are removed.
     async fn run(&mut self, signals: &Signals) -> Result<DrainEnd> {
         let end = drain(self, signals).await?;
         if matches!(end, DrainEnd::Emptied { .. }) && !self.unheld_vectors_removed {
-            self.unheld_vectors_removed = self.handle.remove_unheld_message_vectors().await?;
+            self.unheld_vectors_removed = self.handle.remove_unheld_transcript_vectors().await?;
         }
         Ok(end)
     }

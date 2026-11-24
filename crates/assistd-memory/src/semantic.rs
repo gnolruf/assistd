@@ -1,5 +1,6 @@
-//! Retrieval over the chunks cut from transcripts, saved memories and documents: one
-//! search of whichever kinds are asked for, by vector and by their words.
+//! Retrieval over the chunks cut from transcripts, saved memories, documents and what
+//! tool calls touched: one search of whichever kinds are asked for, by vector and by
+//! their words.
 
 use std::fmt;
 use std::fs::Metadata;
@@ -8,6 +9,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use assistd_ipc::AccessAction;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::sync::Notify;
@@ -25,7 +27,7 @@ pub struct ChunkSearch {
     pub query_vector: Vec<f32>,
     /// The kinds of source to search.
     pub kinds: Vec<ChunkSource>,
-    /// Which sessions' messages are searched; other kinds ignore it.
+    /// Which sessions' messages and accesses are searched; other kinds ignore it.
     pub sessions: SessionScope,
     /// Hits to return at most.
     pub top_k: usize,
@@ -42,8 +44,8 @@ pub enum SearchRanking {
     VectorAndKeyword,
 }
 
-/// One source a search found, a message, a memory or a document, shown through its
-/// best-ranked chunk.
+/// One source a search found, a message, a memory, a document or the accesses to one
+/// file or page, shown through its best-ranked chunk.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
     pub chunk_id: ChunkId,
@@ -52,7 +54,8 @@ pub struct SearchHit {
     /// The chunk's cosine similarity to the query; `None` while its text has no vector.
     pub similarity: Option<f32>,
     /// How many other messages and documents among those searched hold this same
-    /// text; always zero for a memory.
+    /// text; for an access, how many other sessions among them touched the same file
+    /// or page; always zero for a memory.
     pub held_elsewhere: usize,
 }
 
@@ -82,11 +85,22 @@ pub enum ChunkLocator {
         bytes: Range<usize>,
         indexed_at: DateTime<Utc>,
     },
+    /// A file or a page a tool call touched, whose chunk's text is the page's title on
+    /// a line of its own, when it has one, then the path or URL.
+    Access {
+        session_id: SessionId,
+        /// The tool result the access is stored with.
+        message_id: MessageId,
+        action: AccessAction,
+        timestamp: DateTime<Utc>,
+        /// The session's title, or its first user message cut short when untitled.
+        session_label: String,
+    },
 }
 
 impl ChunkLocator {
-    /// Whether both chunks were cut from the same source: one session, one memory, or
-    /// one document.
+    /// Whether both chunks were cut from the same source: one session's messages, one
+    /// memory, one document, or one session's accesses.
     pub fn same_source(&self, other: &Self) -> bool {
         match (self, other) {
             (
@@ -107,6 +121,12 @@ impl ChunkLocator {
                     document_id: other, ..
                 },
             ) => document_id == other,
+            (
+                Self::Access { session_id, .. },
+                Self::Access {
+                    session_id: other, ..
+                },
+            ) => session_id == other,
             _ => false,
         }
     }
@@ -114,7 +134,7 @@ impl ChunkLocator {
 
 /// A source matched by one or more chunks, listed once so it can be read on
 /// demand instead of quoted. Displays as kind, short id, label, date and match count;
-/// a memory as its key.
+/// a memory as its key, and a session's accesses as that session with their count.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourcePointer {
     /// Where the source's best-ranked match sits.
@@ -169,6 +189,19 @@ impl fmt::Display for SourcePointer {
                 indexed_at.format(POINTER_DATE_FORMAT),
                 self.matches,
             ),
+            ChunkLocator::Access {
+                session_id,
+                timestamp,
+                session_label,
+                ..
+            } => write!(
+                f,
+                "chat {} \"{}\" {}, {} matching file{plural} or page{plural}",
+                session_id.short(),
+                session_label.replace('\n', " "),
+                timestamp.format(POINTER_DATE_FORMAT),
+                self.matches,
+            ),
         }
     }
 }
@@ -221,6 +254,9 @@ pub enum ChunkSource {
     /// A saved memory, whose whole value is one chunk.
     Memory,
     Document,
+    /// A file a tool call read or wrote, or a page it fetched: one chunk holding the
+    /// page's title, when it has one, and the path or URL.
+    Access,
 }
 
 /// The L2-normalised embedding of `text` for every chunk cut from `source` that holds
@@ -251,6 +287,7 @@ pub struct UnindexedRows {
     pub message_chunks: u64,
     pub document_chunks: u64,
     pub memories: u64,
+    pub accesses: u64,
 }
 
 /// What the index holds of one registered index root.
@@ -383,15 +420,16 @@ pub struct IndexPass {
 #[async_trait]
 pub trait RecallStore: fmt::Debug + Send + Sync + 'static {
     /// The `top_k` best sources of `search`'s kinds, best first, each through its
-    /// best-ranked chunk. Messages outside its sessions are dropped before ranking. A
-    /// text several messages or documents hold is one hit, at the best-ranked of
-    /// them; every memory is a hit of its own.
+    /// best-ranked chunk. Messages and accesses outside its sessions are dropped before
+    /// ranking. A text several messages or documents hold is one hit, at the
+    /// best-ranked of them, and so is a file or a page however many accesses touched
+    /// it, at the first of them; every memory is a hit of its own.
     async fn search(&self, search: ChunkSearch) -> Result<Vec<SearchHit>>;
 
     /// The chunks around `locator` in its source: for a message, the last chunk of
     /// the previous user or assistant message in its session and the first of the next;
     /// for a document, those starting just before and after it, on any of its pages;
-    /// for a memory, none.
+    /// for a memory or an access, none.
     async fn adjacent_chunks(&self, locator: &ChunkLocator) -> Result<AdjacentChunks>;
 
     /// The stored text of page `page`, counted from zero, of the document indexed at

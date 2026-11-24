@@ -1,8 +1,10 @@
 //! What a tool call touched, reported by the call and stored beside its result.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use assistd_utils::text::flatten_line_breaks;
+use serde::{Deserialize, Serialize};
 
 /// Most characters of a fetched page's title that are kept.
 const MAX_TITLE_CHARS: usize = 200;
@@ -41,5 +43,24 @@ impl Access {
             url: url.into(),
             title,
         }
+    }
+}
+
+/// What a tool call did to a file or a page, for the accesses a search ranks.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessAction {
+    Read,
+    Wrote,
+    Fetched,
+}
+
+impl fmt::Display for AccessAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Read => "read",
+            Self::Wrote => "wrote",
+            Self::Fetched => "fetched",
+        })
     }
 }

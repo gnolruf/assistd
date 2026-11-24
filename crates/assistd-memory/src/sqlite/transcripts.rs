@@ -202,7 +202,7 @@ impl TranscriptStore for SqliteTranscriptStore {
         trace: ToolTrace,
     ) -> Result<AppendedMessage> {
         let row = MessageRow::new(msg, now_millis());
-        let role = row.role;
+        let touched_anything = !trace.accesses.is_empty();
         let appended = self
             .handle
             .try_write(move |tx| {
@@ -217,7 +217,9 @@ impl TranscriptStore for SqliteTranscriptStore {
                 "append_tool_result",
                 MemoryError::BranchNotFound(branch),
             ))?;
-        self.signal_saved_message(role);
+        if touched_anything {
+            self.handle.messages_to_chunk().notify_one();
+        }
         Ok(appended)
     }
 

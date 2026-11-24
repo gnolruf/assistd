@@ -23,7 +23,7 @@ pub mod tool_report;
 mod voice;
 pub mod wakeword;
 
-pub use access::Access;
+pub use access::{Access, AccessAction};
 pub use attachment::{Attachment, ImageAttachment, ImageMime};
 #[cfg(feature = "client")]
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};

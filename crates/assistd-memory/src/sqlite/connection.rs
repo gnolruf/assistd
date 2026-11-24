@@ -98,8 +98,8 @@ impl SqliteHandle {
     /// Open `memory.db` at `path` with `index.db` and `vectors.db` beside it (creating
     /// parent directories), restrict them to their owner, apply pragmas, and migrate
     /// `memory.db`. Either of the other two that is not a readable database or holds
-    /// another schema version is replaced by an empty one, and the message and memory
-    /// chunks of `index.db` are brought in line with `memory.db`.
+    /// another schema version is replaced by an empty one, and the message, memory and
+    /// access chunks of `index.db` are brought in line with `memory.db`.
     pub async fn open(path: &Path) -> Result<Self> {
         let files = DatabaseFiles {
             memory: path,
@@ -140,7 +140,7 @@ impl SqliteHandle {
         &self.pages_to_transcribe
     }
 
-    /// Signalled once a committed write has saved a message that has no chunks yet.
+    /// Signalled once a committed write has saved a message that has chunks to cut.
     pub(super) fn messages_to_chunk(&self) -> &Arc<Notify> {
         &self.messages_to_chunk
     }
@@ -251,7 +251,7 @@ impl SqliteHandle {
     }
 
     /// Like [`Self::write`]. When the committed write erased rows it truncates the
-    /// WAL, then removes from `index.db` the chunks of the messages and memories that
+    /// WAL, then removes from `index.db` the chunks of the messages, memories and accesses that
     /// are gone.
     pub(super) async fn write_erasing<T, F>(&self, op: &'static str, statements: F) -> Result<T>
     where
@@ -323,7 +323,7 @@ impl SqliteHandle {
         }
     }
 
-    /// Remove the chunks whose message or memory `memory.db` no longer holds. A
+    /// Remove the chunks whose message, memory or access `memory.db` no longer holds. A
     /// failure is logged: searches skip those chunks, and the next start removes them.
     async fn remove_orphaned_chunks(&self) {
         let removed = self
@@ -357,7 +357,7 @@ impl SqliteHandle {
         if reconciled.built_from_another {
             tracing::warn!(
                 target: "assistd::memory",
-                "index.db was built from another memory.db; its message and memory chunks \
+                "index.db was built from another memory.db; its message, memory and access chunks \
                  are dropped and cut again"
             );
         }
@@ -371,12 +371,12 @@ impl SqliteHandle {
         Ok(())
     }
 
-    /// Remove the message vectors whose text no message chunk holds, unless saved
-    /// messages still wait to be chunked; returns whether it could.
-    pub(super) async fn remove_unheld_message_vectors(&self) -> Result<bool> {
+    /// Remove the message and access vectors whose text no chunk of their kind holds,
+    /// unless saved messages still wait to be chunked; returns whether it could.
+    pub(super) async fn remove_unheld_transcript_vectors(&self) -> Result<bool> {
         let removed = self
-            .write_index_erasing("remove unheld message vectors", |tx| {
-                let removed = reconcile::remove_unheld_message_vectors(tx)?;
+            .write_index_erasing("remove unheld message and access vectors", |tx| {
+                let removed = reconcile::remove_unheld_transcript_vectors(tx)?;
                 Ok(Erasing {
                     erased: removed.is_some_and(|vectors| vectors > 0),
                     value: removed,
@@ -387,7 +387,7 @@ impl SqliteHandle {
             tracing::debug!(
                 target: "assistd::memory",
                 vectors,
-                "removed the message vectors no chunk holds the text of"
+                "removed the message and access vectors no chunk holds the text of"
             );
         }
         Ok(removed.is_some())

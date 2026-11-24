@@ -6,6 +6,7 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::access::AccessAction;
 use crate::event::Role;
 
 /// One kind of stored text a search ranks.
@@ -15,10 +16,17 @@ pub enum SearchKind {
     Sessions,
     Memories,
     Documents,
+    /// The files and pages the tool calls of saved sessions read, wrote or fetched.
+    Accesses,
 }
 
 impl SearchKind {
-    pub const ALL: [Self; 3] = [Self::Sessions, Self::Memories, Self::Documents];
+    pub const ALL: [Self; 4] = [
+        Self::Sessions,
+        Self::Memories,
+        Self::Documents,
+        Self::Accesses,
+    ];
 
     /// The wire spelling, which is also what `--in` takes.
     pub fn name(self) -> &'static str {
@@ -26,6 +34,7 @@ impl SearchKind {
             Self::Sessions => "sessions",
             Self::Memories => "memories",
             Self::Documents => "documents",
+            Self::Accesses => "accesses",
         }
     }
 
@@ -63,5 +72,13 @@ pub enum SearchPlace {
         byte_start: u64,
         byte_end: u64,
         indexed_at: DateTime<Utc>,
+    },
+    /// A file or a page a tool call of a saved session touched; the passage is the
+    /// page's title, when it has one, then the path or URL. `timestamp` is the call's.
+    Access {
+        session_id: String,
+        title: String,
+        timestamp: DateTime<Utc>,
+        action: AccessAction,
     },
 }
