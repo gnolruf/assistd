@@ -385,6 +385,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sse-stream",
  "tempfile",
  "thiserror 2.0.21",

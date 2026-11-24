@@ -814,6 +814,7 @@ fn sample_plan() -> Plan {
                 AnticipatedAction {
                     action: PlannedAction::McpTool {
                         name: "mcp__mail__list".into(),
+                        definition: Some(DefinitionHash("5f2a".into())),
                     },
                     problem: Some("no such tool".into()),
                     outlook: ActionOutlook::Asks,
@@ -837,7 +838,7 @@ fn sample_plan() -> Plan {
     }
 }
 
-const SAMPLE_PLAN_WIRE: &str = r#"{"id":"p1","summary":"read and summarize","steps":[{"description":"list mail","actions":[{"action":{"kind":"program","program":"git","subcommand":"status"},"outlook":"judge_decides"},{"action":{"kind":"web_host","host":"example.org"},"outlook":"unasked"},{"action":{"kind":"mcp_tool","name":"mcp__mail__list"},"problem":"no such tool","outlook":"asks"},{"action":{"kind":"app","desktop_entry":"firefox.desktop"},"outlook":"asks"},{"action":{"kind":"write","under":"/home/u/notes"},"outlook":"unasked"}]}]}"#;
+const SAMPLE_PLAN_WIRE: &str = r#"{"id":"p1","summary":"read and summarize","steps":[{"description":"list mail","actions":[{"action":{"kind":"program","program":"git","subcommand":"status"},"outlook":"judge_decides"},{"action":{"kind":"web_host","host":"example.org"},"outlook":"unasked"},{"action":{"kind":"mcp_tool","name":"mcp__mail__list","definition":"5f2a"},"problem":"no such tool","outlook":"asks"},{"action":{"kind":"app","desktop_entry":"firefox.desktop"},"outlook":"asks"},{"action":{"kind":"write","under":"/home/u/notes"},"outlook":"unasked"}]}]}"#;
 
 const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"mode":"accept_edits","allowed_hosts":["example.org"],"announce":true,"kept_runs":200}"#;
 

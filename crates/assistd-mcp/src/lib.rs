@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 
 use assistd_config::McpServerName;
 use assistd_ipc::attachment::MAX_IMAGE_BYTES;
-use assistd_ipc::{Attachment, PlannedAction};
+use assistd_ipc::{Attachment, DefinitionHash, PlannedAction};
 use assistd_tools::{
-    ApprovalGate, ConfirmSource, ConfirmationRequest, ImageMime, JudgeContext, JudgedClass,
-    MCP_TOOL_NAME_PREFIX, Risk, Summary, Tool, ToolError, ToolOutput, TurnContext, Unattended,
-    VisionGate,
+    ConfirmSource, ConfirmationRequest, ImageMime, JudgeContext, JudgedClass, MCP_TOOL_NAME_PREFIX,
+    PinnedApprovalGate, Risk, Standing, Summary, Tool, ToolError, ToolOutput, TurnContext,
+    Unattended, VisionGate,
 };
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
@@ -23,6 +23,7 @@ use rmcp::model::{CallToolResult, ContentBlock, EmbeddedResource, Resource, Reso
 use serde_json::Value;
 
 mod admission;
+mod definition;
 mod error;
 mod launch;
 mod oauth;
@@ -31,6 +32,7 @@ mod session;
 mod stdio;
 mod streamable;
 
+use definition::definition_hash;
 pub use error::{McpError, mcp_error_line};
 pub use launch::{LaunchTarget, launch, withdraw_tools};
 pub use oauth::{
@@ -47,49 +49,124 @@ pub trait McpClient: fmt::Debug + Send + Sync + 'static {
     /// Every tool the server currently exposes. Safe to call concurrently.
     async fn list_tools(&self) -> Result<Vec<rmcp::model::Tool>, McpError>;
 
-    /// Invoke the server-native tool `name` with `arguments`.
-    async fn invoke(&self, name: &str, arguments: Value) -> Result<CallToolResult, McpError>;
+    /// Whether the server now defines tool `name` differently than in the first listing.
+    fn redefined(&self, _name: &str) -> bool {
+        false
+    }
+
+    /// Invoke the server-native tool `name` with `arguments`, the call having been confirmed
+    /// for `definition`. Fails with [`McpError::ToolRedefined`] when that was the listed
+    /// definition and the server has redefined the tool.
+    async fn invoke(
+        &self,
+        name: &str,
+        arguments: Value,
+        definition: Definition,
+    ) -> Result<CallToolResult, McpError>;
+}
+
+/// Which definition of a tool a call reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Definition {
+    /// The one in the first listing, which the registry offers.
+    AsListed,
+    /// One the server changed to across a restart.
+    Redefined,
+}
+
+/// Why a call asks.
+#[derive(Debug, Clone, Copy)]
+enum Unsettled {
+    NeverApproved,
+    ChangedSinceApproved,
+}
+
+impl Unsettled {
+    /// What is unsettled about the tool, to follow "an MCP tool that" or "which".
+    fn clause(self) -> &'static str {
+        match self {
+            Self::NeverApproved => "is not yet approved",
+            Self::ChangedSinceApproved => "was approved before and has changed since",
+        }
+    }
 }
 
 /// Exposes one MCP tool as a [`Tool`] under `registry_name`. Each call asks the user first
-/// until the tool is approved for good; image results are dropped while `vision` reports no
-/// support.
+/// until the tool is approved for good, and again once its definition no longer hashes to
+/// `definition`; image results are dropped while `vision` reports no support.
 #[derive(Debug)]
 struct McpToolAdapter {
     client: Arc<dyn McpClient>,
     tool: rmcp::model::Tool,
+    definition: DefinitionHash,
     registry_name: String,
-    approvals: ApprovalGate,
+    approvals: PinnedApprovalGate,
     vision: Arc<VisionGate>,
 }
 
 impl McpToolAdapter {
-    /// Whether the user allows this call with `args`; "always" approves
-    /// the tool for good.
-    async fn confirmed(&self, turn: &TurnContext, args: &Value) -> bool {
+    fn reached(&self) -> Definition {
+        if self.client.redefined(&self.tool.name) {
+            Definition::Redefined
+        } else {
+            Definition::AsListed
+        }
+    }
+
+    /// Whether the user allows this call with `args` to the `reached` definition. "Always"
+    /// approves the listed definition for good; a redefined one is asked about every time.
+    async fn confirmed(&self, turn: &TurnContext, args: &Value, reached: Definition) -> bool {
         let name = self.registry_name.as_str();
-        self.approvals
-            .confirm(turn, name, || ConfirmationRequest {
-                tool: name.to_string(),
-                script: format!("{args:#}"),
-                matched_pattern: "calls an MCP tool that is not yet approved".to_string(),
-                summary: call_summary(name),
-                always_allow: vec![name.to_string()],
-                risk: Risk::Elevated,
-                unattended: Unattended::Judged(JudgeContext {
-                    class: JudgedClass::McpTool,
-                    cwd: None,
-                    why: format!(
-                        "it calls the MCP tool `{name}`, which is not yet approved, with these \
-                         JSON arguments"
-                    ),
-                    grantable: vec![PlannedAction::McpTool {
+        let unsettled = match (self.approvals.standing(name, &self.definition), reached) {
+            (Standing::Approved, Definition::AsListed) => return true,
+            (Standing::Unapproved, _) => Unsettled::NeverApproved,
+            (Standing::Approved | Standing::Changed, _) => Unsettled::ChangedSinceApproved,
+        };
+        let request = self.request(args, unsettled, reached);
+        match reached {
+            Definition::AsListed => {
+                self.approvals
+                    .confirm(turn, name, &self.definition, request)
+                    .await
+            }
+            Definition::Redefined => self.approvals.confirm_once(turn, request).await,
+        }
+    }
+
+    /// The prompt for a call with `args`; only the listed definition can be approved for
+    /// good or granted to a plan.
+    fn request(
+        &self,
+        args: &Value,
+        unsettled: Unsettled,
+        reached: Definition,
+    ) -> ConfirmationRequest {
+        let name = self.registry_name.as_str();
+        let listed = reached == Definition::AsListed;
+        let clause = unsettled.clause();
+        ConfirmationRequest {
+            tool: name.to_string(),
+            script: format!("{args:#}"),
+            matched_pattern: format!("calls an MCP tool that {clause}"),
+            summary: call_summary(name),
+            always_allow: listed.then(|| name.to_string()).into_iter().collect(),
+            risk: Risk::Elevated,
+            unattended: Unattended::Judged(JudgeContext {
+                class: JudgedClass::McpTool,
+                cwd: None,
+                why: format!(
+                    "it calls the MCP tool `{name}`, which {clause}, with these JSON arguments"
+                ),
+                grantable: listed
+                    .then(|| PlannedAction::McpTool {
                         name: name.to_string(),
-                    }],
-                }),
-                source: ConfirmSource::Main,
-            })
-            .await
+                        definition: Some(self.definition.clone()),
+                    })
+                    .into_iter()
+                    .collect(),
+            }),
+            source: ConfirmSource::Main,
+        }
     }
 }
 
@@ -107,13 +184,18 @@ impl Tool for McpToolAdapter {
         self.tool.schema_as_json_value()
     }
 
+    fn definition(&self) -> Option<DefinitionHash> {
+        Some(self.definition.clone())
+    }
+
     /// Always `Ok`: a declined or failed call becomes a failed [`ToolOutput`].
     async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
-        if !self.confirmed(turn, &args).await {
+        let reached = self.reached();
+        if !self.confirmed(turn, &args, reached).await {
             return Ok(declined_output(&self.registry_name));
         }
         let start = Instant::now();
-        let outcome = self.client.invoke(&self.tool.name, args).await;
+        let outcome = self.client.invoke(&self.tool.name, args, reached).await;
         let duration = start.elapsed();
         match outcome {
             Ok(result) => Ok(tool_output(result, duration, self.vision.supported())),
@@ -127,11 +209,12 @@ impl Tool for McpToolAdapter {
 
 /// [`Tool`] entries for every tool `client` exposes, named `mcp__<server_name>__<tool>`, minus
 /// malformed, duplicate or oversized tools and any past the server's count or total-size cap.
-/// Calls ask first unless `approvals` holds the tool; images become a text note when `vision` says no.
+/// Calls ask first unless `approvals` holds the tool's definition; images become a text note
+/// when `vision` says no.
 pub async fn adapt_client_as_tools(
     client: Arc<dyn McpClient>,
     server_name: &McpServerName,
-    approvals: &ApprovalGate,
+    approvals: &PinnedApprovalGate,
     vision: &Arc<VisionGate>,
 ) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let tools = client.list_tools().await?;
@@ -141,6 +224,7 @@ pub async fn adapt_client_as_tools(
             Box::new(McpToolAdapter {
                 client: client.clone(),
                 registry_name,
+                definition: definition_hash(&tool),
                 tool,
                 approvals: approvals.clone(),
                 vision: vision.clone(),

@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
+use assistd_ipc::DefinitionHash;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -38,11 +39,11 @@ pub use policy::{
     Allowlist, AllowlistError, Answer, Approval, ApprovalGate, Approvals, CONFIRM_TIMEOUT,
     ConfirmRouter, ConfirmationGate, ConfirmationRequest, FileScope, HomeAccess,
     IpcConfirmationGate, JUDGE_TIMEOUT, JudgeContext, JudgeModel, JudgedClass, JudgedCommand,
-    NoPendingConfirm, NoPendingReview, PromptParking, Protected, ReaderProgram, ReaderSandbox,
-    ReaderSandboxError, Risk, SCRATCH_MARKER, SafetyJudge, SandboxError, SandboxInfo,
-    SandboxPrograms, SandboxRequest, SandboxedCommand, ScopeError, ScratchCap, SearchPath,
-    SharedDirs, SpokenAnswer, StandingApprovals, Summary, ToolSandbox, ToolsDisabled, Unattended,
-    Verdict, VoiceGate, probe_sandbox,
+    NoPendingConfirm, NoPendingReview, PinnedApprovalGate, PinnedApprovals, PromptParking,
+    Protected, ReaderProgram, ReaderSandbox, ReaderSandboxError, Risk, SCRATCH_MARKER, SafetyJudge,
+    SandboxError, SandboxInfo, SandboxPrograms, SandboxRequest, SandboxedCommand, ScopeError,
+    ScratchCap, SearchPath, SharedDirs, SpokenAnswer, Standing, StandingApprovals, Summary,
+    ToolSandbox, ToolsDisabled, Unattended, Verdict, VoiceGate, probe_sandbox,
 };
 pub use presentation::{OutputCap, PresentSpec};
 pub use quarantine::{Egress, Quarantine, QuarantineError};
@@ -90,6 +91,12 @@ pub trait Tool: fmt::Debug + Send + Sync + 'static {
     /// when the result holds nothing but what the model sent or the web returned.
     fn reads_host(&self, _args: &Value) -> bool {
         true
+    }
+
+    /// The hash an approval of this tool is pinned to; `None` unless a server outside the
+    /// daemon defines the tool.
+    fn definition(&self) -> Option<DefinitionHash> {
+        None
     }
 
     /// Execute the tool with JSON arguments as part of `turn`.

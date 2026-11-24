@@ -325,13 +325,23 @@ pub enum PlannedAction {
     },
     /// Reach exactly `host` over the web.
     WebHost { host: String },
-    /// Call the MCP tool with this full name.
-    McpTool { name: String },
+    /// Call the MCP tool with this full name while its definition hashes to `definition`;
+    /// `None` covers no call.
+    McpTool {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        definition: Option<DefinitionHash>,
+    },
     /// Launch the app with this desktop entry id.
     App { desktop_entry: String },
     /// Write files under the directory `under`.
     Write { under: PathBuf },
 }
+
+/// SHA-256 of what an MCP server declares a tool to be, in lowercase hex.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DefinitionHash(pub String);
 
 /// A plan's id, fresh for every plan the planner makes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

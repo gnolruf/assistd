@@ -10,8 +10,8 @@ use assistd_core::planner::PlanningTools;
 use assistd_core::{BuildToolsDeps, McpServerStatus, RelayDeps};
 use assistd_memory::SessionId;
 use assistd_tools::{
-    ApprovalGate, ConfirmationGate, IpcConfirmationGate, MemoryOps, SandboxInfo, ToolRegistry,
-    ToolSandbox, ToolsDisabled, VisionGate,
+    ConfirmationGate, IpcConfirmationGate, MemoryOps, PinnedApprovalGate, SandboxInfo,
+    ToolRegistry, ToolSandbox, ToolsDisabled, VisionGate,
 };
 use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::readiness::ReadinessCell;
@@ -65,7 +65,7 @@ pub(super) fn init(
         }
     };
     let gate: Arc<dyn ConfirmationGate> = Arc::new(IpcConfirmationGate);
-    let mcp_approvals = ApprovalGate::new(
+    let mcp_approvals = PinnedApprovalGate::new(
         gate.clone(),
         Arc::new(assistd_core::mcp_tool_approvals(config_path)?),
     );

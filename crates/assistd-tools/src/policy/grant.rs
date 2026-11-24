@@ -83,9 +83,16 @@ fn allows(granted: &PlannedAction, needed: &PlannedAction) -> bool {
         (PlannedAction::WebHost { host: granted }, PlannedAction::WebHost { host }) => {
             granted.eq_ignore_ascii_case(host)
         }
-        (PlannedAction::McpTool { name: granted }, PlannedAction::McpTool { name }) => {
-            granted == name
-        }
+        (
+            PlannedAction::McpTool {
+                name: granted,
+                definition: Some(pinned),
+            },
+            PlannedAction::McpTool {
+                name,
+                definition: Some(definition),
+            },
+        ) => granted == name && pinned == definition,
         (
             PlannedAction::App {
                 desktop_entry: granted,
@@ -129,7 +136,7 @@ pub(super) fn spoken_needs(actions: &[PlannedAction]) -> String {
             _ => None,
         }),
         named("call", |action| match action {
-            PlannedAction::McpTool { name } => Some(spoken_mcp_tool(name)),
+            PlannedAction::McpTool { name, .. } => Some(spoken_mcp_tool(name)),
             _ => None,
         }),
         named("open", |action| match action {
@@ -165,7 +172,7 @@ fn spoken_mcp_tool(name: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use assistd_ipc::ConfirmSource;
+    use assistd_ipc::{ConfirmSource, DefinitionHash};
 
     use super::*;
     use crate::policy::{JudgeContext, JudgedClass, Risk, Summary};
@@ -237,6 +244,17 @@ mod tests {
         assert!(grant.covers(&request(Unattended::WebHost("docs.rs".into()))));
         assert!(!grant.covers(&request(Unattended::WebHost("static.docs.rs".into()))));
 
+        let call = |definition: Option<&str>| PlannedAction::McpTool {
+            name: "mcp__tracker__create_issue".into(),
+            definition: definition.map(|hash| DefinitionHash(hash.into())),
+        };
+        let pinned = TurnGrant {
+            actions: vec![call(Some("aa")), call(None)],
+        };
+        assert!(pinned.covers(&needing(vec![call(Some("aa"))])));
+        assert!(!pinned.covers(&needing(vec![call(Some("bb"))])));
+        assert!(!pinned.covers(&needing(vec![call(None)])));
+
         assert!(!grant.covers(&needing(Vec::new())));
         assert!(!grant.covers(&request(Unattended::Never)));
     }
@@ -252,6 +270,7 @@ mod tests {
             host("github.com"),
             PlannedAction::McpTool {
                 name: "mcp__tracker__create_issue".into(),
+                definition: None,
             },
         ];
         assert_eq!(

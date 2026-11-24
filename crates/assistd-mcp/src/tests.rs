@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use assistd_tools::test_support::{AlwaysAllowGate, DenyAllGate};
-use assistd_tools::{Approval, Approvals, ConfirmationGate};
+use assistd_tools::{Approval, ConfirmationGate, PinnedApprovals};
 use parking_lot::Mutex;
 use serde_json::json;
 
@@ -9,7 +9,10 @@ use super::*;
 
 /// [`adapt_client_as_tools`] for server `web` with every call allowed.
 async fn adapt_allowing(client: Arc<dyn McpClient>) -> Result<Vec<Box<dyn Tool>>, McpError> {
-    let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
+    let approvals = PinnedApprovalGate::new(
+        Arc::new(AlwaysAllowGate),
+        Arc::new(PinnedApprovals::unsaved()),
+    );
     adapt_client_as_tools(
         client,
         &"web".parse().unwrap(),
@@ -48,7 +51,12 @@ impl McpClient for ErrFakeClient {
         Ok(vec![mcp_tool("search", "search")])
     }
 
-    async fn invoke(&self, _name: &str, _arguments: Value) -> Result<CallToolResult, McpError> {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _arguments: Value,
+        _definition: Definition,
+    ) -> Result<CallToolResult, McpError> {
         Err(self.err.lock().take().expect("err pre-armed"))
     }
 }
@@ -184,7 +192,12 @@ impl McpClient for ImageClient {
         Ok(vec![mcp_tool("snap", "take a screenshot")])
     }
 
-    async fn invoke(&self, _name: &str, _arguments: Value) -> Result<CallToolResult, McpError> {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _arguments: Value,
+        _definition: Definition,
+    ) -> Result<CallToolResult, McpError> {
         Ok(call_result(json!({
             "content": [{"type": "image", "mimeType": "image/png", "data": "AAAA"}]
         })))
@@ -194,7 +207,10 @@ impl McpClient for ImageClient {
 #[tokio::test]
 async fn adapter_follows_the_vision_gate_on_every_call() {
     let vision = VisionGate::new(false);
-    let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
+    let approvals = PinnedApprovalGate::new(
+        Arc::new(AlwaysAllowGate),
+        Arc::new(PinnedApprovals::unsaved()),
+    );
     let tools = adapt_client_as_tools(
         Arc::new(ImageClient),
         &"shots".parse().unwrap(),
@@ -246,7 +262,12 @@ impl McpClient for CountingClient {
         Ok(vec![mcp_tool("delete", "deletes a file")])
     }
 
-    async fn invoke(&self, _name: &str, _arguments: Value) -> Result<CallToolResult, McpError> {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _arguments: Value,
+        _definition: Definition,
+    ) -> Result<CallToolResult, McpError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(text_result("deleted"))
     }
@@ -269,13 +290,13 @@ impl ConfirmationGate for AnsweringGate {
 
 async fn gated_tool(
     gate: Arc<dyn ConfirmationGate>,
-    approvals: Arc<Approvals>,
+    approvals: Arc<PinnedApprovals>,
 ) -> (Box<dyn Tool>, Arc<CountingClient>) {
     let client = Arc::new(CountingClient::default());
     let mut tools = adapt_client_as_tools(
         client.clone(),
         &"files".parse().unwrap(),
-        &ApprovalGate::new(gate, approvals),
+        &PinnedApprovalGate::new(gate, approvals),
         &VisionGate::new(true),
     )
     .await
@@ -285,7 +306,8 @@ async fn gated_tool(
 
 #[tokio::test]
 async fn declined_call_never_reaches_the_server() {
-    let (tool, client) = gated_tool(Arc::new(DenyAllGate), Arc::new(Approvals::unsaved())).await;
+    let (tool, client) =
+        gated_tool(Arc::new(DenyAllGate), Arc::new(PinnedApprovals::unsaved())).await;
     let out = tool
         .invoke(&TurnContext::default(), json!({"path": "/x"}))
         .await
@@ -304,8 +326,7 @@ async fn call_asks_with_its_arguments_and_always_approves_the_tool() {
         answer: Approval::Always,
         asked: Mutex::new(Vec::new()),
     });
-    let approvals = Arc::new(Approvals::unsaved());
-    let (tool, client) = gated_tool(gate.clone(), Arc::clone(&approvals)).await;
+    let (tool, client) = gated_tool(gate.clone(), Arc::new(PinnedApprovals::unsaved())).await;
 
     tool.invoke(&TurnContext::default(), json!({"path": "/x"}))
         .await
@@ -315,7 +336,6 @@ async fn call_asks_with_its_arguments_and_always_approves_the_tool() {
         .unwrap();
 
     assert_eq!(client.calls.load(Ordering::SeqCst), 2);
-    assert!(approvals.contains("mcp__files__delete"));
     let asked = gate.asked.lock();
     let [request] = asked.as_slice() else {
         panic!("only the first call should ask: {asked:?}");
@@ -326,17 +346,43 @@ async fn call_asks_with_its_arguments_and_always_approves_the_tool() {
 }
 
 #[tokio::test]
-async fn approved_tool_runs_without_asking() {
-    let approvals = Arc::new(Approvals::unsaved());
+async fn approval_holds_only_for_the_definition_approved() {
+    let listed = definition_hash(&mcp_tool("delete", "deletes a file"));
+    let approvals = Arc::new(PinnedApprovals::unsaved());
     approvals
-        .approve("mcp__files__delete")
+        .approve("mcp__files__delete", &listed)
         .await
         .expect("unsaved approve");
-    let (tool, client) = gated_tool(Arc::new(DenyAllGate), approvals).await;
+    let (tool, client) = gated_tool(Arc::new(DenyAllGate), Arc::clone(&approvals)).await;
     tool.invoke(&TurnContext::default(), json!({}))
         .await
         .unwrap();
     assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+
+    let earlier = definition_hash(&mcp_tool("delete", "lists a file"));
+    approvals
+        .approve("mcp__files__delete", &earlier)
+        .await
+        .expect("unsaved approve");
+    let gate = Arc::new(AnsweringGate {
+        answer: Approval::Always,
+        asked: Mutex::new(Vec::new()),
+    });
+    let (tool, client) = gated_tool(gate.clone(), approvals).await;
+    for _ in 0..2 {
+        tool.invoke(&TurnContext::default(), json!({}))
+            .await
+            .unwrap();
+    }
+    assert_eq!(client.calls.load(Ordering::SeqCst), 2);
+    let asked = gate.asked.lock();
+    let [request] = asked.as_slice() else {
+        panic!("only the first call to the changed tool should ask: {asked:?}");
+    };
+    assert_eq!(
+        request.matched_pattern,
+        "calls an MCP tool that was approved before and has changed since"
+    );
 }
 
 /// Advertises a fixed list of tools.
@@ -349,7 +395,12 @@ impl McpClient for ListingClient {
         Ok(self.0.clone())
     }
 
-    async fn invoke(&self, _name: &str, _arguments: Value) -> Result<CallToolResult, McpError> {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _arguments: Value,
+        _definition: Definition,
+    ) -> Result<CallToolResult, McpError> {
         Ok(text_result(""))
     }
 }

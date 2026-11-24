@@ -69,6 +69,10 @@ pub enum McpError {
     /// A browser sign-in did not finish: no redirect in time, or one the flow refused.
     #[error("MCP login failed: {0}")]
     Login(String),
+
+    /// The call was confirmed for the listed definition, which the server has since replaced.
+    #[error("MCP server redefined the tool after a restart")]
+    ToolRedefined,
 }
 
 impl McpError {
@@ -169,6 +173,10 @@ pub fn mcp_error_line(tool_name: &str, err: &McpError) -> String {
             "[error] {tool_name}: MCP login failed: {detail}. \
              Try: `assistd mcp login <server>` again\n"
         ),
+        McpError::ToolRedefined => format!(
+            "[error] {tool_name}: its MCP server redefined this tool after a restart, so the \
+             call was not sent. Try: the call again, which asks the user first\n"
+        ),
     }
 }
 
@@ -228,6 +236,7 @@ mod tests {
             ("oauth", McpError::OAuth("token store: unreadable".into())),
             ("session_expired", McpError::SessionExpired),
             ("login", McpError::Login("state mismatch".into())),
+            ("tool_redefined", McpError::ToolRedefined),
         ];
         for (label, err) in cases {
             let line = mcp_error_line("mcp__web__search", &err);

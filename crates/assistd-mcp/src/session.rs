@@ -16,10 +16,10 @@ use rmcp::service::{
 };
 use serde_json::Value;
 
-use crate::McpClient;
 use crate::error::McpError;
 use crate::stdio::{self, ChildLifeline, StdioConfig};
 use crate::streamable::{self, HttpConfig, HttpLifeline};
+use crate::{Definition, McpClient};
 
 /// Longest message read from a server, as a stdio line, a JSON body or one SSE event: a
 /// largest accepted image base64-encoded, plus envelope.
@@ -57,7 +57,12 @@ impl McpClient for McpPeer {
         self.within_timeout(self.peer.list_all_tools()).await
     }
 
-    async fn invoke(&self, name: &str, arguments: Value) -> Result<CallToolResult, McpError> {
+    async fn invoke(
+        &self,
+        name: &str,
+        arguments: Value,
+        _definition: Definition,
+    ) -> Result<CallToolResult, McpError> {
         let mut params = CallToolRequestParams::new(name.to_owned());
         params.arguments = match arguments {
             Value::Object(arguments) => Some(arguments),

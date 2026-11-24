@@ -6,7 +6,7 @@ use serde_json::{Map, Value, json};
 
 use assistd_ipc::task::MAX_TASK_PROMPT_BYTES;
 use assistd_ipc::{AnticipatedAction, Plan, PlanId, PlanStep, PlannedAction};
-use assistd_tools::{ActionCheck, ToolRegistry};
+use assistd_tools::{ActionCheck, Tool, ToolRegistry};
 use assistd_utils::path::expand_tilde_from_env;
 
 use super::WorkPermissions;
@@ -160,7 +160,8 @@ impl DraftAction {
         })
     }
 
-    fn into_action(self) -> PlannedAction {
+    /// The action named, an MCP tool pinned to the definition `tools` holds for it.
+    fn into_action(self, tools: &ToolRegistry) -> PlannedAction {
         let target = self.target.trim().to_string();
         match self.kind {
             DraftKind::Program => PlannedAction::Program {
@@ -173,7 +174,10 @@ impl DraftAction {
             DraftKind::WebHost => PlannedAction::WebHost {
                 host: target.to_ascii_lowercase(),
             },
-            DraftKind::McpTool => PlannedAction::McpTool { name: target },
+            DraftKind::McpTool => PlannedAction::McpTool {
+                definition: tools.get(&target).and_then(Tool::definition),
+                name: target,
+            },
             DraftKind::App => PlannedAction::App {
                 desktop_entry: target,
             },
@@ -193,7 +197,7 @@ pub(super) fn anticipated(
     permissions: &WorkPermissions,
 ) -> Vec<AnticipatedAction> {
     let mut distinct: Vec<PlannedAction> = Vec::new();
-    for action in actions.into_iter().map(DraftAction::into_action) {
+    for action in actions.into_iter().map(|action| action.into_action(tools)) {
         if !distinct.contains(&action) {
             distinct.push(action);
         }

@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use assistd_mcp::{
-    Connector, HttpAuth, HttpConfig, McpClient, McpError, McpServer, OAuthConfig, Revocation,
-    TokenStore, begin_login, sign_out,
+    Connector, Definition, HttpAuth, HttpConfig, McpClient, McpError, McpServer, OAuthConfig,
+    Revocation, TokenStore, begin_login, sign_out,
 };
 use axum::Router;
 use axum::extract::Request;
@@ -113,7 +113,10 @@ fn first_text(result: &CallToolResult) -> Option<&str> {
 }
 
 async fn echo(server: &McpServer, text: &str) -> Option<String> {
-    let result = server.invoke("echo", json!({"text": text})).await.ok()?;
+    let result = server
+        .invoke("echo", json!({"text": text}), Definition::AsListed)
+        .await
+        .ok()?;
     first_text(&result).map(str::to_owned)
 }
 
@@ -132,7 +135,9 @@ async fn lists_and_calls_tools_and_survives_an_oversized_reply() {
         assert_eq!(names, ["echo", "flood"], "json_response = {json_response}");
         assert_eq!(echo(&server, "hi").await.as_deref(), Some("hi"));
 
-        let flood = server.invoke("flood", json!({})).await;
+        let flood = server
+            .invoke("flood", json!({}), Definition::AsListed)
+            .await;
         assert!(flood.is_err(), "json_response = {json_response}: {flood:?}");
         assert_eq!(
             echo(&server, "still here").await.as_deref(),

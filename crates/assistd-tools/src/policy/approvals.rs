@@ -1,10 +1,11 @@
 //! Names approved with "always allow" for gates outside the program allowlist (web hosts, MCP
-//! tools, launched applications), kept in a TOML file.
+//! tools, launched applications), kept in a TOML file; an MCP tool with the hash of its definition.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use assistd_ipc::DefinitionHash;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -27,6 +28,11 @@ pub const APPROVED_MCP_TOOLS_FILE: &str = "approved_mcp_tools.toml";
 
 const APPROVALS_HEADER: &str = "\
 # Approved with \"always allow\". Delete an entry to be asked again.
+";
+
+const PINNED_APPROVALS_HEADER: &str = "\
+# Approved with \"always allow\", each for the definition with this SHA-256.
+# Delete an entry to be asked again.
 ";
 
 /// A set of names approved for good, saved after every approval.
@@ -151,6 +157,168 @@ struct Stored {
     approved: BTreeSet<String>,
 }
 
+/// How a definition stands against the one approved for good under its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    Approved,
+    /// The name was approved for a definition that hashed differently.
+    Changed,
+    Unapproved,
+}
+
+/// Names approved for good, each for the one definition whose hash is kept with it; saved
+/// after every approval.
+#[derive(Debug)]
+pub struct PinnedApprovals {
+    approved: RwLock<BTreeMap<String, DefinitionHash>>,
+    store: Option<PathBuf>,
+    saving: tokio::sync::Mutex<()>,
+}
+
+impl PinnedApprovals {
+    /// The approvals saved in `store`, and saved back there; none when it does not exist or
+    /// lists names without hashes. Fails when `store` exists but cannot be read or parsed.
+    pub fn load(store: PathBuf) -> Result<Self, AllowlistError> {
+        let approved = match read_store(&store)? {
+            Some(text) => {
+                let stored: StoredPins =
+                    toml::from_str(&text).map_err(|source| AllowlistError::Parse {
+                        path: store.clone(),
+                        source,
+                    })?;
+                stored.approved.pinned(&store)
+            }
+            None => BTreeMap::new(),
+        };
+        Ok(Self {
+            approved: RwLock::new(approved),
+            store: Some(store),
+            saving: tokio::sync::Mutex::new(()),
+        })
+    }
+
+    /// Approvals that last only as long as this value.
+    pub fn unsaved() -> Self {
+        Self {
+            approved: RwLock::default(),
+            store: None,
+            saving: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// How `definition` stands against the one `name` was approved for.
+    pub fn standing(&self, name: &str, definition: &DefinitionHash) -> Standing {
+        match self.approved.read().get(name) {
+            Some(approved) if approved == definition => Standing::Approved,
+            Some(_) => Standing::Changed,
+            None => Standing::Unapproved,
+        }
+    }
+
+    /// Approve `name` for good while it hashes to `definition`, in place of any earlier
+    /// approval, and save. On [`AllowlistError::Write`] the approval still holds until the
+    /// daemon exits.
+    pub async fn approve(
+        &self,
+        name: &str,
+        definition: &DefinitionHash,
+    ) -> Result<(), AllowlistError> {
+        let _saving = self.saving.lock().await;
+        let approved = {
+            let mut approved = self.approved.write();
+            approved.insert(name.to_string(), definition.clone());
+            approved.clone()
+        };
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let stored = StoredPins {
+            approved: StoredApproved::Pinned(approved),
+        };
+        let body = toml::to_string(&stored).map_err(|e| AllowlistError::Write {
+            path: store.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+        })?;
+        write_store(store, PINNED_APPROVALS_HEADER, &body).await
+    }
+}
+
+/// A [`ConfirmationGate`] that is skipped for definitions its [`PinnedApprovals`] hold.
+#[derive(Debug, Clone)]
+pub struct PinnedApprovalGate {
+    gate: Arc<dyn ConfirmationGate>,
+    approvals: Arc<PinnedApprovals>,
+}
+
+impl PinnedApprovalGate {
+    /// Asks `gate` about definitions missing from `approvals`.
+    pub fn new(gate: Arc<dyn ConfirmationGate>, approvals: Arc<PinnedApprovals>) -> Self {
+        Self { gate, approvals }
+    }
+
+    /// How `definition` stands against the one `name` was approved for.
+    pub fn standing(&self, name: &str, definition: &DefinitionHash) -> Standing {
+        self.approvals.standing(name, definition)
+    }
+
+    /// Whether the gate approves `request`; an "always" answer approves `name` for good
+    /// while it hashes to `definition`.
+    pub async fn confirm(
+        &self,
+        turn: &TurnContext,
+        name: &str,
+        definition: &DefinitionHash,
+        request: ConfirmationRequest,
+    ) -> bool {
+        confirm_remembering(
+            self.gate.as_ref(),
+            turn,
+            request,
+            self.approvals.approve(name, definition),
+        )
+        .await
+    }
+
+    /// Whether the gate approves `request`; an "always" answer counts only for this use.
+    pub async fn confirm_once(&self, turn: &TurnContext, request: ConfirmationRequest) -> bool {
+        self.gate.confirm(turn, request).await != Approval::Deny
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredPins {
+    approved: StoredApproved,
+}
+
+/// The `approved` key: a table of name to hash, or the list of bare names it once was.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredApproved {
+    Pinned(BTreeMap<String, DefinitionHash>),
+    Unpinned(BTreeSet<String>),
+}
+
+impl StoredApproved {
+    /// The approvals that name a definition; bare names from `store` are dropped with a warning.
+    fn pinned(self, store: &Path) -> BTreeMap<String, DefinitionHash> {
+        match self {
+            Self::Pinned(approved) => approved,
+            Self::Unpinned(names) => {
+                if !names.is_empty() {
+                    warn!(
+                        target: "assistd::policy",
+                        store = %store.display(),
+                        dropped = names.len(),
+                        "approvals without a definition hash no longer apply; their tools ask again"
+                    );
+                }
+                BTreeMap::new()
+            }
+        }
+    }
+}
+
 /// Whether `gate` lets the use in `request` go ahead; an "always" answer
 /// also runs `remember`, whose failure to save is logged.
 pub(super) async fn confirm_remembering(
@@ -222,5 +390,37 @@ mod tests {
         let reloaded = Approvals::load(store).expect("saved store loads");
         assert!(reloaded.contains("example.com"));
         assert!(!reloaded.contains("example.org"));
+    }
+
+    #[tokio::test]
+    async fn pinned_approval_holds_only_for_the_definition_approved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = dir.path().join(APPROVED_MCP_TOOLS_FILE);
+        let (first, second) = (DefinitionHash("aa".into()), DefinitionHash("bb".into()));
+
+        std::fs::write(&store, "approved = [\"mcp__files__delete\"]\n").expect("old format");
+        let approvals = PinnedApprovals::load(store.clone()).expect("old format loads");
+        assert_eq!(
+            approvals.standing("mcp__files__delete", &first),
+            Standing::Unapproved
+        );
+
+        approvals
+            .approve("mcp__files__delete", &first)
+            .await
+            .expect("saved");
+        let reloaded = PinnedApprovals::load(store).expect("saved store loads");
+        assert_eq!(
+            reloaded.standing("mcp__files__delete", &first),
+            Standing::Approved
+        );
+        assert_eq!(
+            reloaded.standing("mcp__files__delete", &second),
+            Standing::Changed
+        );
+        assert_eq!(
+            reloaded.standing("mcp__files__read", &first),
+            Standing::Unapproved
+        );
     }
 }

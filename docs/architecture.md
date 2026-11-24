@@ -879,6 +879,13 @@ yet approved, in every mode, and follows redirects only to the same or an approv
 vision projector. "Always allow" for a web host, an MCP tool or an application is saved
 beside the config in `approved_hosts.toml`, `approved_mcp_tools.toml` or
 `approved_apps.toml`.
+An MCP tool's approval is kept with the SHA-256 of the definition its server listed
+(name, description, input and output schema, annotations) and holds only while the tool
+still hashes to it: a redefined tool asks again, with a prompt that says it has changed
+since it was approved, and a grant a plan or saved task carries is pinned the same way.
+When a server restarts under a running daemon and lists a tool differently, every call to
+that tool asks, with no "always allow", until the daemon restarts and offers the new
+definition. The hash pins what a server declares, not what it does.
 An approved host is trusted with what the model was told, not with what it
 has read. Once a tool call has read this machine into a history, `web fetch`
 asks about every URL, approved host or not, with no "always allow", and `relay`

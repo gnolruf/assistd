@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use assistd_config::McpServerName;
-use assistd_tools::{ApprovalGate, MCP_TOOL_NAME_PREFIX, ToolCatalog, VisionGate};
+use assistd_tools::{MCP_TOOL_NAME_PREFIX, PinnedApprovalGate, ToolCatalog, VisionGate};
 use assistd_utils::backoff::RestartPolicy;
 use tracing::{info, warn};
 
@@ -17,7 +17,7 @@ use crate::session::Connector;
 #[derive(Debug, Clone)]
 pub struct LaunchTarget {
     pub catalog: Arc<ToolCatalog>,
-    pub approvals: ApprovalGate,
+    pub approvals: PinnedApprovalGate,
     pub vision: Arc<VisionGate>,
 }
 
