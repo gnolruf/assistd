@@ -6,6 +6,7 @@ use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
+use assistd_utils::env::inherited_env;
 use command_fds::CommandFdExt;
 use tokio::process::Command as ProcCommand;
 use tracing::warn;
@@ -25,10 +26,6 @@ const RESOURCE_LIMITS: [&str; 3] = ["--nproc=512", "--data=4294967296", "--fsize
 /// The `choom` flags that make every sandboxed process the kernel's first
 /// pick when the host runs out of memory.
 const OOM_SCORE_ADJUSTMENT: [&str; 3] = ["-n", "1000", "--"];
-
-/// Variables sandboxed commands inherit, besides `LC_*`; the rest, such as
-/// agent sockets and tokens, are cleared.
-const KEPT_ENV: &[&str] = &["LANG", "LANGUAGE", "LOGNAME", "TERM", "TZ", "USER"];
 
 /// The namespaces every sandboxed command gets of its own, network
 /// included, in its own session, killed with the daemon.
@@ -162,11 +159,11 @@ fn as_os_strs<'flags>(flags: impl IntoIterator<Item = &'flags OsString>) -> Vec<
     flags.into_iter().map(OsString::as_os_str).collect()
 }
 
-/// `bwrap` in a new capped scope, keeping only [`kept_env`] of the daemon's
-/// environment.
+/// `bwrap` in a new capped scope, keeping only the locale, terminal,
+/// time-zone and user-name variables of the daemon's environment.
 pub(super) fn scoped_bwrap(programs: &SandboxPrograms) -> ProcCommand {
     let mut cmd = ProcCommand::from(programs.scope.command(&programs.bwrap));
-    cmd.envs(kept_env(std::env::vars_os()));
+    cmd.envs(inherited_env(std::env::vars_os(), &[]));
     cmd
 }
 
@@ -212,16 +209,6 @@ pub(super) fn run_limited<I, S>(
     cmd.arg(&programs.prlimit).args(RESOURCE_LIMITS).arg("--");
     cmd.arg(&programs.choom).args(OOM_SCORE_ADJUSTMENT);
     cmd.arg(program).args(args);
-}
-
-/// The subset of `vars` sandboxed commands keep: [`KEPT_ENV`] and `LC_*`.
-fn kept_env(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Vec<(OsString, OsString)> {
-    vars.into_iter()
-        .filter(|(name, _)| {
-            name.to_str()
-                .is_some_and(|name| KEPT_ENV.contains(&name) || name.starts_with("LC_"))
-        })
-        .collect()
 }
 
 /// Read-only root with `$HOME`'s visible entries writable when bindable and `access` allows,
@@ -550,27 +537,6 @@ mod tests {
     }
 
     #[test]
-    fn environment_keeps_only_locale_and_terminal_variables() {
-        let vars = [
-            ("LANG", "C.UTF-8"),
-            ("LC_TIME", "en_GB.UTF-8"),
-            ("SSH_AUTH_SOCK", "/tmp/ssh-x/agent.1"),
-            ("GITHUB_TOKEN", "secret"),
-            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
-            ("SWAYSOCK", "/run/user/1000/sway-ipc.sock"),
-            ("WAYLAND_DISPLAY", "wayland-1"),
-            ("DISPLAY", ":0"),
-            ("XAUTHORITY", "/run/user/1000/xauth"),
-        ]
-        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
-        let names: Vec<String> = kept_env(vars)
-            .into_iter()
-            .map(|(name, _)| name.into_string().expect("utf-8"))
-            .collect();
-        assert_eq!(names, ["LANG", "LC_TIME"]);
-    }
-
-    #[test]
     fn bwrap_process_starts_from_a_cleared_environment() {
         let info = bwrap_info(Vec::new());
         let cmd = info
@@ -578,7 +544,7 @@ mod tests {
             .expect("command")
             .command;
         let runtime_dir = (OsString::from("XDG_RUNTIME_DIR"), "/run/user/1000".into());
-        let mut expected: Vec<_> = kept_env(std::env::vars_os())
+        let mut expected: Vec<_> = inherited_env(std::env::vars_os(), &[])
             .into_iter()
             .chain([runtime_dir])
             .map(|(name, value)| (name, Some(value)))
