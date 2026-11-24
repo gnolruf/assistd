@@ -43,6 +43,7 @@ impl Answering {
                 &TurnContext::default(),
             )
             .await
+            .report
     }
 }
 
@@ -83,7 +84,7 @@ async fn cancelling_the_parent_turn_stops_the_run() {
     .expect("cancellation stops the run");
 
     assert!(
-        matches!(result, Err(SubAgentError::Cancelled)),
+        matches!(result.report, Err(SubAgentError::Cancelled)),
         "{result:?}"
     );
 }

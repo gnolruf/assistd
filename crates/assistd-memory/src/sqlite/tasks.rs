@@ -825,7 +825,7 @@ mod tests {
     use super::*;
     use crate::{
         PersistedMessage, PersistedRelayEnd, PersistedRelayRun, PersistedRelayStep,
-        SqliteTranscriptStore, ToolOutcome, TranscriptStore,
+        SqliteTranscriptStore, ToolOutcome, ToolTrace, TranscriptStore,
     };
 
     /// The returned temp dir must outlive the store.
@@ -1044,7 +1044,15 @@ mod tests {
         };
         let result = PersistedMessage::tool_result("done", "c-1", "relay", outcome, true);
         transcripts
-            .append_relay_result(branch, turn, result, vec![step])
+            .append_tool_result(
+                branch,
+                turn,
+                result,
+                ToolTrace {
+                    relay_steps: vec![step],
+                    ..ToolTrace::default()
+                },
+            )
             .await
             .unwrap();
         tasks

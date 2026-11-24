@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
 
+use assistd_ipc::Access;
+
 use crate::TurnContext;
 use crate::memory::MemoryOps;
 use crate::{Tool, ToolError, ToolOutput};
@@ -84,7 +86,10 @@ impl Tool for RememberTool {
         let report = format!("remembered {key}: {value}");
         self.ops.save(&key, value).await?;
         tracing::info!(target: "assistd::memory", key = %key, "remember saved");
-        Ok(ToolOutput::text(report, start.elapsed()))
+        Ok(ToolOutput {
+            accesses: vec![Access::Saved(key)],
+            ..ToolOutput::text(report, start.elapsed())
+        })
     }
 }
 

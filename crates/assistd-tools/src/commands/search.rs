@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 
 use assistd_embed::EmbedderHandle;
-use assistd_ipc::{Role, SearchKind, SearchPlace};
+use assistd_ipc::{Access, Role, SearchKind, SearchPlace};
 use assistd_memory::{
     ChunkLocator, ChunkSearch, ChunkSource, MemoryError, PersistedRole, RecallStore,
     SHORT_SESSION_ID_CHARS, SearchHit, SearchRanking, SessionId, SessionScope, TranscriptStore,
@@ -223,7 +223,8 @@ impl SearchCommand {
         };
         let header = format!("{UNTRUSTED_HEADER}{}\n", session_header(&first.locator));
         let exchanges = self.exchanges(&hits, header).await?;
-        Ok(CommandOutput::ok(exchanges.into_bytes()))
+        let recalled = Access::Recalled(session.to_string());
+        Ok(CommandOutput::ok(exchanges.into_bytes()).touching([recalled]))
     }
 
     /// `hits` from one session under `header`, each between its neighbouring chunks

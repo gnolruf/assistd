@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use assistd_ipc::Access;
 use assistd_memory::{DocumentText, MemoryError, RecallStore};
 use assistd_utils::path::expand_tilde_from_env;
 
@@ -225,6 +226,7 @@ impl DocsCommand {
         Ok(CommandOutput {
             stdout: format!("{UNTRUSTED_HEADER}{}", excerpt.text).into_bytes(),
             stderr: note.into_bytes(),
+            accesses: vec![Access::Read(path)],
             ..CommandOutput::default()
         })
     }

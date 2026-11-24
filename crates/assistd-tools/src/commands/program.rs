@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use super::bash::{ScriptRun, run_script};
 use crate::chain::Word;
 use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
+use crate::commands::reads_of;
 use crate::policy::{BashPolicyCfg, ConfirmationGate, SandboxInfo, SubprocessPolicy};
 
 const PROGRAMS: [Program; 6] = [
@@ -52,6 +53,7 @@ struct Program {
 
 /// One of the system's text programs as a `run` command: its arguments are quoted into a
 /// script that runs as a `bash` script would, so a write option or a guarded path asks.
+/// A run that exits 0 reports the files it named as read.
 #[derive(Debug)]
 pub struct ProgramCommand {
     program: &'static Program,
@@ -108,8 +110,16 @@ impl Command for ProgramCommand {
             )
         })?;
         let stdin = input.stdin.as_deref().unwrap_or_default();
-        let ScriptRun { out, private_dirs } =
-            run_script(&self.policy, &input.turn, name, script, stdin).await?;
+        let ScriptRun {
+            out,
+            private_dirs,
+            reads,
+        } = run_script(&self.policy, &input.turn, name, script, stdin).await?;
+        let out = if out.exit_code == 0 {
+            out.touching(reads_of(&input.scope, reads).await)
+        } else {
+            out
+        };
         Ok(if private_dirs.is_empty() {
             out
         } else {

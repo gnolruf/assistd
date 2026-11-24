@@ -1,6 +1,7 @@
 //! SQLite-backed [`TranscriptStore`] over sessions, turns, branches, and messages.
 
 use std::collections::HashMap;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -9,13 +10,13 @@ use rusqlite::types::Type;
 use rusqlite::{ErrorCode, OptionalExtension, Row, Transaction};
 use tracing::warn;
 
-use assistd_ipc::{TaskId, TaskName, TaskRunId, TaskRunSummary};
+use assistd_ipc::{Access, TaskId, TaskName, TaskRunId, TaskRunSummary};
 
 use crate::{
     AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, HistoryRow, HistoryScope,
     MemoryError, MessageId, MessageKind, OpenedTurn, PersistedMessage, PersistedRelayStep,
     PersistedRole, PersistedToolCall, Reasoning, Result, ResumeCandidate, Seq, SessionId,
-    ToolOutcome, TranscriptStore, TurnId, TurnStats, UndoOutcome,
+    ToolOutcome, ToolTrace, TranscriptStore, TurnId, TurnStats, UndoOutcome,
 };
 
 use super::connection::{Erasing, SqliteHandle};
@@ -193,12 +194,12 @@ impl TranscriptStore for SqliteTranscriptStore {
         Ok(appended)
     }
 
-    async fn append_relay_result(
+    async fn append_tool_result(
         &self,
         branch: BranchId,
         turn: TurnId,
         msg: PersistedMessage,
-        steps: Vec<PersistedRelayStep>,
+        trace: ToolTrace,
     ) -> Result<AppendedMessage> {
         let row = MessageRow::new(msg, now_millis());
         let role = row.role;
@@ -207,12 +208,13 @@ impl TranscriptStore for SqliteTranscriptStore {
             .try_write(move |tx| {
                 let slot = claim_next_seq(tx, branch)?;
                 let appended = store_message(tx, branch, slot, turn, &row)?;
-                insert_relay_steps(tx, appended.id, &steps)?;
+                insert_accesses(tx, appended.id, &trace.accesses)?;
+                insert_relay_steps(tx, appended.id, &trace.relay_steps)?;
                 Ok(appended)
             })
             .await
             .map_err(MemoryError::sqlite_or_missing(
-                "append_relay_result",
+                "append_tool_result",
                 MemoryError::BranchNotFound(branch),
             ))?;
         self.signal_saved_message(role);
@@ -660,6 +662,33 @@ fn insert_message(
         ],
         |r| r.get(0),
     )
+}
+
+/// Insert `accesses` as what the call behind the tool result `message` touched.
+fn insert_accesses(
+    tx: &Transaction<'_>,
+    message: MessageId,
+    accesses: &[Access],
+) -> rusqlite::Result<()> {
+    let mut insert = tx.prepare_cached(
+        "INSERT INTO accesses (message_id, action, target, label) VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for access in accesses {
+        let (action, target, label) = access_columns(access);
+        insert.execute(rusqlite::params![message, action, target, label])?;
+    }
+    Ok(())
+}
+
+/// The `action` code, `target` and `label` that `access` is stored as.
+fn access_columns(access: &Access) -> (i64, &[u8], Option<&str>) {
+    match access {
+        Access::Read(path) => (0, path.as_os_str().as_bytes(), None),
+        Access::Wrote(path) => (1, path.as_os_str().as_bytes(), None),
+        Access::Fetched { url, title } => (2, url.as_bytes(), title.as_deref()),
+        Access::Recalled(session) => (3, session.as_bytes(), None),
+        Access::Saved(key) => (4, key.as_bytes(), None),
+    }
 }
 
 /// `calls` as the `messages.tool_calls` JSON array, or `None` when there are none.

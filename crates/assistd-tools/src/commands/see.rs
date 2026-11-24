@@ -11,6 +11,7 @@ use async_trait::async_trait;
 
 use crate::chain::Word;
 use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
+use crate::commands::reads_of;
 use crate::policy::{ConfirmationGate, ReadPolicy, SandboxInfo};
 use crate::vision::VisionGate;
 
@@ -91,7 +92,8 @@ impl Command for SeeCommand {
         let (attachment, size) = load_image_attachment(Path::new(path.as_str()))
             .await
             .map_err(|e| load_failed(e, path))?;
-        Ok(attached(attachment, size, path))
+        let accesses = reads_of(&input.scope, [path.as_str()]).await;
+        Ok(attached(attachment, size, path).touching(accesses))
     }
 }
 
@@ -104,10 +106,8 @@ fn attached(attachment: Attachment, size: usize, path: &Word) -> CommandOutput {
         human_size(size as u64)
     );
     CommandOutput {
-        stdout: stdout.into_bytes(),
-        stderr: Vec::new(),
-        exit_code: 0,
         attachments: vec![attachment],
+        ..CommandOutput::ok(stdout.into_bytes())
     }
 }
 

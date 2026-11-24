@@ -11,7 +11,7 @@ use tracing::warn;
 use assistd_ipc::Component;
 use assistd_llm::CompactionCut;
 use assistd_memory::{
-    BranchId, PersistedMessage, PersistedRelayStep, SessionId, TranscriptStore, TurnStats,
+    BranchId, PersistedMessage, SessionId, ToolTrace, TranscriptStore, TurnStats,
 };
 use assistd_utils::time::saturating_millis;
 
@@ -105,19 +105,15 @@ impl TranscriptLog {
         target
     }
 
-    /// Queue `msg` for `target`'s turn, with the sub-agent `relay_steps`
-    /// behind it when it is a `relay` tool result.
+    /// Queue `msg` for `target`'s turn, with the `trace` its call left when it is a
+    /// tool result.
     pub(crate) async fn persist_message(
         &self,
         target: PersistTarget,
         msg: PersistedMessage,
-        relay_steps: Option<Vec<PersistedRelayStep>>,
+        trace: Option<ToolTrace>,
     ) {
-        let command = WriteCommand::Message {
-            target,
-            msg,
-            relay_steps,
-        };
+        let command = WriteCommand::Message { target, msg, trace };
         self.queue_write(command).await;
     }
 
@@ -305,12 +301,12 @@ mod tests {
         async fn current_branch(&self, _s: SessionId) -> assistd_memory::Result<Option<BranchId>> {
             Ok(None)
         }
-        async fn append_relay_result(
+        async fn append_tool_result(
             &self,
             _b: BranchId,
             _t: TurnId,
             m: PersistedMessage,
-            _steps: Vec<PersistedRelayStep>,
+            _trace: ToolTrace,
         ) -> assistd_memory::Result<AppendedMessage> {
             self.arrive(m).await
         }

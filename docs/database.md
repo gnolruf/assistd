@@ -40,6 +40,7 @@ erDiagram
     document_pages ||--o{ chunks : "split into"
     document_pages ||--o| page_transcriptions : "read from its image as"
     documents }o--o{ page_readings : "file's pages read as"
+    messages ||--o{ accesses : "touched"
     messages ||--o{ relay_steps : "relayed by"
     relay_steps ||--o{ relay_entries : "did"
     chunks }o--o| message_vectors : "text embedded as"
@@ -115,6 +116,13 @@ erDiagram
         int compacted_after_seq
         text content
         int duration_ms
+    }
+    accesses {
+        int id PK
+        int message_id FK
+        int action "0 read, 1 wrote, 2 fetched, 3 recalled, 4 saved"
+        blob target "a path, a URL, a session's uuid or a memory's key"
+        text label "a fetched page's title"
     }
     relay_steps {
         int id PK
@@ -395,6 +403,17 @@ migrations: a change to its schema takes the next version number.
   newest seq at the time. On resume the model gets the summary plus
   the rows from `kept_from_seq` on, while clients still see every row.
   Undoing a turn the summary covers drops the summary.
+- **`accesses`**: what a tool call touched, one row per file read or
+  written, page fetched, past session looked into or memory saved,
+  hung off the call's tool-result row and written with it in one
+  transaction, so forks share it and undo deletes it with the message.
+  `target` is a name, not a row id: a file's absolute path, the URL a
+  fetch was answered from after redirects, a session's uuid, a memory's
+  key. It can name a file that was never indexed and outlives a rebuilt
+  index. `label` is a fetched page's title, flattened to one line of at
+  most 200 characters. A URL and a title are the page's own choice, so
+  both are untrusted text. The list may miss things, and nothing reads
+  it back yet.
 - **`relay_steps`** / **`relay_entries`**: what the sub-agents behind a
   `relay` tool result did, hung off that result's `messages` row so
   forks share it and undo deletes it with the message. Each planned

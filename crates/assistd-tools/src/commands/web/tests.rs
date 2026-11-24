@@ -319,6 +319,36 @@ async fn redirect_within_the_same_host_is_followed() {
 }
 
 #[tokio::test]
+async fn a_fetch_reports_the_url_that_answered_and_the_page_title_on_one_line() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let page = format!(
+        "<html><head><title>Lifetimes\nin Rust {}</title></head><body>text</body></html>",
+        "x".repeat(300)
+    );
+    let server = answer(
+        listener,
+        vec![
+            redirect_to(&format!("http://{addr}/book/lifetimes")),
+            response(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html",
+                page.as_bytes(),
+            ),
+        ],
+    );
+    let out = fetch(&allowing(), &format!("http://{addr}/short")).await;
+    server.await.unwrap();
+
+    let [Access::Fetched { url, title }] = out.accesses.as_slice() else {
+        panic!("{:?}", out.accesses);
+    };
+    assert_eq!(url, &format!("http://{addr}/book/lifetimes"));
+    let title = title.as_deref().expect("a title");
+    assert!(title.starts_with("Lifetimes in Rust xxx"), "{title}");
+    assert_eq!(title.chars().count(), 200);
+}
+
+#[tokio::test]
 async fn redirect_to_an_unapproved_host_is_refused() {
     let (addr, server) = serve(vec![redirect_to("http://localhost:1/?leak=x")]).await;
     let out = fetch(&allowing(), &format!("http://{addr}/")).await;

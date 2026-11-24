@@ -85,8 +85,9 @@ impl Command for BashCommand {
         }
         let script = Word::joined_by_spaces(script_words);
         let stdin = input.stdin.as_deref().unwrap_or_default();
-        let ScriptRun { out, private_dirs } =
-            run_script(&self.policy, &input.turn, "bash", script, stdin).await?;
+        let ScriptRun {
+            out, private_dirs, ..
+        } = run_script(&self.policy, &input.turn, "bash", script, stdin).await?;
         if private_dirs.is_empty() {
             return Ok(out);
         }
@@ -103,11 +104,12 @@ impl Command for BashCommand {
     }
 }
 
-/// What [`run_script`] produced, and the directories the script names that the sandbox gave
-/// it empty and private, comma-separated.
+/// What [`run_script`] produced, the directories the script names that the sandbox gave
+/// it empty and private, comma-separated, and the files its review found it names to read.
 pub(crate) struct ScriptRun {
     pub(crate) out: CommandOutput,
     pub(crate) private_dirs: String,
+    pub(crate) reads: Vec<String>,
 }
 
 /// Run `script` as `bash -c` under `policy` within `turn`, reporting as `tool`: reviewed and authorized,
@@ -120,7 +122,11 @@ pub(crate) async fn run_script(
     script: String,
     stdin: &[u8],
 ) -> Result<ScriptRun, CommandError> {
-    let ScriptReview { review, home } = policy.review_script(script.clone()).await;
+    let ScriptReview {
+        review,
+        home,
+        reads,
+    } = policy.review_script(script.clone()).await;
     policy
         .authorize(turn, tool, "command", &script, review)
         .await?;
@@ -142,7 +148,11 @@ pub(crate) async fn run_script(
         None => run.await,
     }
     .map_err(|error| spawn_failed(&error))?;
-    Ok(ScriptRun { out, private_dirs })
+    Ok(ScriptRun {
+        out,
+        private_dirs,
+        reads,
+    })
 }
 
 /// The output of a `run` guarded by `cap`: an error in place of a run the scratch directory

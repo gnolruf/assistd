@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use assistd_ipc::ConfirmSource;
+use assistd_ipc::{Access, ConfirmSource};
 use assistd_utils::path::{lexical_clean, split_at_existing, tilde_remainder};
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
@@ -232,10 +232,11 @@ impl Command for WriteCommand {
             .await?;
 
         let hidden_by = self.sandbox.private_dir_hiding(path.clone()).await;
-        write_without_symlinks(path, content)
+        write_without_symlinks(path.clone(), content)
             .await
             .map_err(|failure| failure.error(raw_path))?;
         Ok(CommandOutput {
+            accesses: vec![Access::Wrote(path)],
             stderr: hidden_by.map_or_default(|dir| {
                 hidden_from_bash_note(raw_path.as_str(), &dir, &self.sandbox.sharing_hint())
                     .into_bytes()

@@ -458,7 +458,7 @@ mod tests {
             stdout: stdout.to_vec(),
             stderr: stderr.to_vec(),
             exit_code,
-            attachments: Vec::new(),
+            ..CommandOutput::default()
         }
     }
 

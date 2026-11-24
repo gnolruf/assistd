@@ -66,7 +66,7 @@ flowchart TB
 | `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, admission (the queue that grants every model lane, and the permits for background work), presence machine with the policy task that drives it from idle time and GPU contention, listen dispatcher, socket server, document index passes and the watches between them, page transcription while drowsy, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-documents` | Document text extraction (text, HTML, PDF, office files, e-books) and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
 | `assistd-embed`  | Embedding HTTP client + the worker that drains the semantic store's rows without a vector, as three backlogs; launch spec for its llama-server. | `config`, `memory`, `utils`                                                      |
-| `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
+| `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; `Access`, what a tool call reports it touched; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec and presets file + control plane + `PageTranscriber` for the OCR model. | `config`, `ipc`, `utils`                                                         |
 | `assistd-mcp`    | Stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools.  | `config`, `ipc`, `tools`, `utils`                                                |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `TaskStore` in `memory.db`, `SemanticStore` in the rebuildable `index.db` and `vectors.db`. | `ipc`, `utils`                                                                   |
@@ -465,6 +465,20 @@ full transcript. The backend is dropped when the run ends, so none of it
 reaches the main history. What the client was shown is stored with the
 relay's tool result in `relay_steps` and `relay_entries`, never embedded, and
 replayed with branch history.
+
+A tool call also reports what it touched, as a list of `Access`es its
+`CommandOutput` and `ToolOutput` carry: `cat`, `see`, `docs read` and the text
+programs (`grep`, `head`, `tail`, `sort`, `uniq`, `wc`, when they exit 0) the
+files they read, by absolute path; `write` the file it wrote; `web fetch` the
+URL that answered, after redirects, with the page's title; `search --session`
+the session it looked into; `remember` the key it saved. `run` joins those of
+a chain's commands, and a relay those of its sub-agents, a read of a mounted
+input named by the input's own path. A `bash` script, an MCP tool, `ls`, `wm`,
+`screenshot` and the searches report nothing: a script's reads are not known,
+and a list of results is not a visit. The list is saved with the tool result
+in `accesses` (see [database.md](database.md)). It is not the record of
+whether a history has read this machine, which must err towards yes while
+this list may miss things; neither is derived from the other.
 
 A sub-agent's final answer is saved whole, with no length cap, to
 `~/.local/share/assistd/relays/<session>/relay-<uuid>.txt`, written by the

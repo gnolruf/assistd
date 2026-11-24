@@ -59,10 +59,14 @@ impl HtmlPage {
         })
     }
 
-    /// `body` decoded and rendered as text; returned unchanged if it cannot be parsed.
-    pub(super) fn render(&self, body: Vec<u8>) -> Vec<u8> {
+    /// `body` decoded and rendered as text, with the page's title when it has one; `body`
+    /// comes back unchanged and untitled if it cannot be parsed.
+    pub(super) fn render(&self, body: Vec<u8>) -> (Vec<u8>, Option<String>) {
         let html = decode(&body, self.declared);
-        page_text(&html, &self.url, self.extent).map_or(body, String::into_bytes)
+        match page_text(&html, &self.url, self.extent) {
+            Ok(page) => (page.rendered().into_bytes(), page.title),
+            Err(_) => (body, None),
+        }
     }
 }
 
@@ -176,8 +180,24 @@ impl TextDecorator for LinkDecorator {
     }
 }
 
-/// `html` rendered as text, `<title>` first, with links resolved against `page`.
-fn page_text(html: &str, page: &Url, extent: Extent) -> Result<String, html2text::Error> {
+/// A page as text: its `<title>`, when that holds any, and its body.
+struct PageText {
+    title: Option<String>,
+    body: String,
+}
+
+impl PageText {
+    /// The title, a blank line, then the body.
+    fn rendered(&self) -> String {
+        match &self.title {
+            Some(title) => format!("{title}\n\n{}", self.body),
+            None => self.body.clone(),
+        }
+    }
+}
+
+/// `html` as text, with links resolved against `page`.
+fn page_text(html: &str, page: &Url, extent: Extent) -> Result<PageText, html2text::Error> {
     let config = html2text::config::with_decorator(LinkDecorator::new(page))
         .allow_width_overflow()
         .no_link_wrapping()
@@ -189,12 +209,13 @@ fn page_text(html: &str, page: &Url, extent: Extent) -> Result<String, html2text
         Extent::Whole => dom.document.clone(),
     };
     let body = node_text(&config, root)?;
-    let Some(title) = title else {
-        return Ok(body);
+    let title = match title {
+        Some(title) => Some(node_text(&config, title)?.trim().to_string()),
+        None => None,
     };
-    Ok(match node_text(&config, title)?.trim() {
-        "" => body,
-        title => format!("{title}\n\n{body}"),
+    Ok(PageText {
+        title: title.filter(|title| !title.is_empty()),
+        body,
     })
 }
 

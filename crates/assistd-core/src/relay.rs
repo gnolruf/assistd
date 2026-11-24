@@ -15,7 +15,7 @@ use tracing::{Instrument, info, info_span};
 use uuid::Uuid;
 
 use assistd_config::ToolsOutputConfig;
-use assistd_ipc::{HostName, RelayEvent, RelayStepPlan};
+use assistd_ipc::{Access, HostName, RelayEvent, RelayStepPlan};
 use assistd_llm::SlotStash;
 use assistd_memory::SessionId;
 use assistd_search::SearxngClient;
@@ -28,7 +28,7 @@ use assistd_tools::{
 };
 use assistd_utils::path::expand_tilde_from_env;
 
-use crate::subagent::{RelayReport, SubAgentError, SubAgentRunner};
+use crate::subagent::{RelayReport, SubAgentError, SubAgentRun, SubAgentRunner};
 
 use role::{Reach, Role, Roles};
 
@@ -214,18 +214,21 @@ impl RelayTool {
 
     /// Relay `plan` within a task run on `lane`, cancelling it whenever the run yields to the
     /// user's interaction and rerunning it from `args` once the run has the lane again,
-    /// since its effects stay inside its quarantine. `None` when the run was cancelled first.
+    /// since its effects stay inside its quarantine. `None` when the run was cancelled first;
+    /// `touched` holds what the last run's sub-agents touched.
     async fn relay_giving_way(
         &self,
         mut plan: RelayPlan,
         args: &Value,
         turn: &TurnContext,
         lane: &dyn YieldableLane,
+        touched: &mut Vec<Access>,
     ) -> Result<Option<Result<RelayReport, StepFailed>>, ToolError> {
         loop {
+            touched.clear();
             tokio::select! {
                 biased;
-                outcome = self.relay(plan, turn) => return Ok(Some(outcome)),
+                outcome = self.relay(plan, turn, touched) => return Ok(Some(outcome)),
                 () = lane.yield_requested() => {}
             }
             info!(target: "assistd::relay", "relay cancelled for the user's conversation");
@@ -238,11 +241,17 @@ impl RelayTool {
         }
     }
 
-    /// Runs every step inside one slot-stash guard, so the swap is paid once per plan.
-    async fn relay(&self, plan: RelayPlan, turn: &TurnContext) -> Result<RelayReport, StepFailed> {
+    /// Runs every step inside one slot-stash guard, so the swap is paid once per plan,
+    /// adding what each step's sub-agent touched to `touched`.
+    async fn relay(
+        &self,
+        plan: RelayPlan,
+        turn: &TurnContext,
+        touched: &mut Vec<Access>,
+    ) -> Result<RelayReport, StepFailed> {
         self.deps
             .slot_stash
-            .preserve_across(self.run_plan(plan, turn))
+            .preserve_across(self.run_plan(plan, turn, touched))
             .await
     }
 
@@ -250,6 +259,7 @@ impl RelayTool {
         &self,
         plan: RelayPlan,
         turn: &TurnContext,
+        touched: &mut Vec<Access>,
     ) -> Result<RelayReport, StepFailed> {
         let steps = plan.rest.len() + 1;
         let at = |step| StepPosition { step, steps };
@@ -257,10 +267,12 @@ impl RelayTool {
             steps: plan.steps().map(RelayStep::plan).collect(),
         })
         .await;
-        let mut report = self.run_step(plan.first, None, at(1), turn).await?;
+        let mut report = self
+            .run_step(plan.first, None, at(1), turn, touched)
+            .await?;
         for (index, step) in plan.rest.into_iter().enumerate() {
             report = self
-                .run_step(step, Some(&report), at(index + 2), turn)
+                .run_step(step, Some(&report), at(index + 2), turn, touched)
                 .await?;
         }
         Ok(report)
@@ -274,6 +286,7 @@ impl RelayTool {
         previous: Option<&RelayReport>,
         position: StepPosition,
         turn: &TurnContext,
+        touched: &mut Vec<Access>,
     ) -> Result<RelayReport, StepFailed> {
         let span = info_span!(
             "relay_step",
@@ -286,7 +299,7 @@ impl RelayTool {
         })
         .await;
         let outcome = self
-            .run_subagent(step, previous, turn)
+            .run_subagent(step, previous, turn, touched)
             .instrument(span)
             .await;
         let failed = outcome.map_err(|source| StepFailed {
@@ -306,6 +319,7 @@ impl RelayTool {
         step: RelayStep,
         previous: Option<&RelayReport>,
         turn: &TurnContext,
+        touched: &mut Vec<Access>,
     ) -> Result<RelayReport, RelayError> {
         let gate: Arc<dyn ConfirmationGate> = Arc::new(RelayStepGate {
             inner: Arc::clone(&self.policy.gate),
@@ -332,7 +346,7 @@ impl RelayTool {
             }
             None => step.task,
         };
-        let mut report = self
+        let SubAgentRun { report, accesses } = self
             .deps
             .runner
             .run(
@@ -343,8 +357,15 @@ impl RelayTool {
                 CancellationToken::new(),
                 &turn.quarantined(),
             )
-            .await?;
-        report.map_evidence_to_inputs(&quarantine.input_dir(), &inputs);
+            .await;
+        let input_dir = quarantine.input_dir();
+        touched.extend(
+            accesses
+                .into_iter()
+                .filter_map(|access| outside_quarantine(access, &input_dir, &inputs)),
+        );
+        let mut report = report?;
+        report.map_evidence_to_inputs(&input_dir, &inputs);
         Ok(report)
     }
 
@@ -560,21 +581,23 @@ impl Tool for RelayTool {
         }
         tracing::Span::current().record("agents", plan.agents());
         info!(target: "assistd::relay", "relay started");
+        let mut accesses = Vec::new();
         let outcome = match turn.lane() {
             Some(lane) => {
-                self.relay_giving_way(plan, &args, turn, lane.as_ref())
+                self.relay_giving_way(plan, &args, turn, lane.as_ref(), &mut accesses)
                     .await?
             }
-            None => Some(self.relay(plan, turn).await),
+            None => Some(self.relay(plan, turn, &mut accesses).await),
         };
-        Ok(match outcome {
+        let output = match outcome {
             Some(Ok(report)) => ToolOutput::text(report.render(), start.elapsed()),
             Some(Err(error)) => {
                 info!(target: "assistd::relay", %error, "relay ended without a report");
                 ToolOutput::failed(format!("[error] relay: {error}"), start.elapsed())
             }
             None => ToolOutput::failed(RELAY_CANCELLED_WHILE_YIELDED, start.elapsed()),
-        })
+        };
+        Ok(ToolOutput { accesses, ..output })
     }
 }
 
@@ -834,6 +857,29 @@ fn handed_sites_note(sites: &[HostName]) -> String {
     )
 }
 
+/// `access` as the host knows it: a read below `input_dir` names the one of `inputs`
+/// mounted there, and a file that exists only inside the quarantine is no access.
+fn outside_quarantine(access: Access, input_dir: &Path, inputs: &[PathBuf]) -> Option<Access> {
+    match access {
+        Access::Read(path) => original_input(&path, input_dir, inputs).map(Access::Read),
+        Access::Wrote(_) => None,
+        elsewhere => Some(elsewhere),
+    }
+}
+
+/// `path` with its leading `input_dir/<name>` replaced by the input mounted under `name`.
+fn original_input(path: &Path, input_dir: &Path, inputs: &[PathBuf]) -> Option<PathBuf> {
+    let mounted = path.strip_prefix(input_dir).ok()?;
+    inputs.iter().find_map(|input| {
+        let below = mounted.strip_prefix(input.file_name()?).ok()?;
+        Some(if below.as_os_str().is_empty() {
+            input.clone()
+        } else {
+            input.join(below)
+        })
+    })
+}
+
 /// Where `input` is seen inside `quarantine`, mounted under its file name.
 fn mounted_path(quarantine: &Quarantine, input: &Path) -> PathBuf {
     quarantine
@@ -847,7 +893,7 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
 
-    use assistd_llm::{LlmBackend, ScriptedBackend, SlotDir};
+    use assistd_llm::{LlmBackend, ScriptedBackend, SlotDir, Step, ToolCall};
     use assistd_tools::test_support::{DenyAllGate, bash_policy, inert_sandbox};
     use assistd_tools::{Approvals, SharedDirs};
 
@@ -890,6 +936,38 @@ mod tests {
                 output: ToolsOutputConfig::default(),
             },
         )
+    }
+
+    /// The sub-agent sees its input mounted inside the quarantine; the relay's result
+    /// names the file it was given.
+    #[tokio::test]
+    async fn a_file_a_sub_agent_read_is_reported_by_the_relay_under_its_own_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let notes = project.path().join("notes.txt");
+        std::fs::write(&notes, "buy milk").unwrap();
+        let read_the_input = ToolCall {
+            id: "c-1".into(),
+            name: "run".into(),
+            arguments: json!({"command": "cat ../input/notes.txt | write copy.txt"}),
+        };
+        let contract = json!({"status": "done", "summary": "milk", "evidence": [], "caveats": []});
+        let sub_agent = ScriptedBackend::new([Step::tool_calls([read_the_input])])
+            .then_replying("The notes say to buy milk.")
+            .answering_schemas(contract.to_string());
+        let handed_out = Arc::new(sub_agent) as Arc<dyn LlmBackend>;
+        let parent = Arc::new(ScriptedBackend::default().handing_out([handed_out]));
+        let relay = relay_tool(&parent, dir.path());
+        let step = json!({
+            "task": "say what the notes ask for",
+            "inputs": [notes],
+            "agent": "file_review",
+        });
+
+        let output = relay.invoke(&TurnContext::default(), step).await.unwrap();
+
+        assert_eq!(output.exit_code, 0, "{}", output.output);
+        assert_eq!(output.accesses, [Access::Read(notes)]);
     }
 
     #[tokio::test]

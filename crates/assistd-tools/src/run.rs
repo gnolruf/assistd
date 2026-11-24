@@ -166,15 +166,16 @@ impl Tool for RunTool {
         tracing::Span::current().record("cmd", cmd_token);
 
         let start = Instant::now();
-        let out = match parse_chain(command) {
+        let mut out = match parse_chain(command) {
             Ok(chain) => execute(&chain, &self.registry, turn).await,
             Err(e) => CommandOutput::failed(2, parse_error_line(&e).into_bytes()),
         };
+        let accesses = std::mem::take(&mut out.accesses);
         let duration = start.elapsed();
-        Ok(tool_output(
-            present(out, &self.output_cap, duration),
-            duration,
-        ))
+        Ok(ToolOutput {
+            accesses,
+            ..tool_output(present(out, &self.output_cap, duration), duration)
+        })
     }
 }
 
@@ -236,6 +237,7 @@ fn tool_output(presented: PresentResult, duration: Duration) -> ToolOutput {
             stderr: presented.stderr_raw,
             stderr_overflow_file: presented.stderr_overflow_file,
         }),
+        accesses: Vec::new(),
     }
 }
 
@@ -243,6 +245,7 @@ fn tool_output(presented: PresentResult, duration: Duration) -> ToolOutput {
 mod tests {
     use std::path::Path;
 
+    use assistd_ipc::Access;
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;
     use regex::Regex;
@@ -354,6 +357,29 @@ mod tests {
             "cat notes.txt && web fetch https://example.com/"
         ));
         assert!(reads_host("bash \"cat ~/.ssh/id_rsa\""));
+    }
+
+    #[tokio::test]
+    async fn run_reports_what_every_command_of_its_chain_touched() {
+        let dir = fresh_dir();
+        let files = tempdir().unwrap();
+        let notes = files.path().join("notes.txt");
+        let image = files.path().join("shot.png");
+        std::fs::write(&notes, b"buy milk\n").unwrap();
+        std::fs::write(&image, PNG_BYTES).unwrap();
+        let tool = tool_with_dir(dir.path());
+        let command = format!(
+            "cat {notes} | cat && see {image} ; cat -b {notes} ; cat /nonexistent/gone",
+            notes = notes.display(),
+            image = image.display(),
+        );
+
+        let output = tool
+            .invoke(&TurnContext::default(), json!({ "command": command }))
+            .await
+            .unwrap();
+
+        assert_eq!(output.accesses, [Access::Read(notes), Access::Read(image)]);
     }
 
     fn assert_footer(output: &str, expected_exit: i32) {

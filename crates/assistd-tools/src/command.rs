@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use thiserror::Error;
 
-use assistd_ipc::Attachment;
+use assistd_ipc::{Access, Attachment};
 
 use crate::TurnContext;
 use crate::chain::Word;
@@ -209,6 +209,8 @@ pub struct CommandOutput {
     pub stderr: Vec<u8>,
     pub exit_code: i32,
     pub attachments: Vec<Attachment>,
+    /// What the command touched; it may miss things, and a script's reads are never known.
+    pub accesses: Vec<Access>,
 }
 
 impl CommandOutput {
@@ -216,19 +218,16 @@ impl CommandOutput {
     pub fn ok(stdout: Vec<u8>) -> Self {
         Self {
             stdout,
-            stderr: Vec::new(),
-            exit_code: 0,
-            attachments: Vec::new(),
+            ..Self::default()
         }
     }
 
     /// Construct a failed output with the given exit code and stderr bytes.
     pub fn failed(exit_code: i32, stderr: impl Into<Vec<u8>>) -> Self {
         Self {
-            stdout: Vec::new(),
             stderr: stderr.into(),
             exit_code,
-            attachments: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -241,12 +240,19 @@ impl CommandOutput {
         }
     }
 
-    /// Append `next`'s streams and attachments to this output and adopt
+    /// This output, also reporting that its command touched `accesses`.
+    pub fn touching(mut self, accesses: impl IntoIterator<Item = Access>) -> Self {
+        self.accesses.extend(accesses);
+        self
+    }
+
+    /// Append `next`'s streams, attachments and accesses to this output and adopt
     /// its exit code: the shape `&&`, `||` and `;` produce.
     pub fn then(mut self, next: Self) -> Self {
         self.stdout.extend(next.stdout);
         self.stderr.extend(next.stderr);
         self.attachments.extend(next.attachments);
+        self.accesses.extend(next.accesses);
         self.exit_code = next.exit_code;
         self
     }

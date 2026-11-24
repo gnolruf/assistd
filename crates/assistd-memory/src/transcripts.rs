@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use assistd_ipc::TaskRunSummary;
+use assistd_ipc::{Access, TaskRunSummary};
 
 use crate::{BranchId, MessageId, PersistedRelayStep, Result, Seq, SessionId, TurnId};
 
@@ -147,6 +147,15 @@ pub struct PersistedToolCall {
 pub struct ToolOutcome {
     pub exit_code: i64,
     pub duration_ms: u64,
+}
+
+/// What a tool call left beside its result, never part of the history the model sees.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolTrace {
+    /// What the call touched; it may miss things.
+    pub accesses: Vec<Access>,
+    /// The sub-agent steps behind a `relay` result, in plan order.
+    pub relay_steps: Vec<PersistedRelayStep>,
 }
 
 /// Per-branch metadata; `is_current_in_session` marks the session's current branch.
@@ -289,14 +298,14 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
         msg: PersistedMessage,
     ) -> Result<AppendedMessage>;
 
-    /// Append the `relay` tool result `msg` as [`append_message_to_branch`](Self::append_message_to_branch)
-    /// does, with the sub-agent `steps` behind it, in one transaction.
-    async fn append_relay_result(
+    /// Append the tool result `msg` as [`append_message_to_branch`](Self::append_message_to_branch)
+    /// does, with the `trace` its call left, in one transaction.
+    async fn append_tool_result(
         &self,
         branch: BranchId,
         turn: TurnId,
         msg: PersistedMessage,
-        steps: Vec<PersistedRelayStep>,
+        trace: ToolTrace,
     ) -> Result<AppendedMessage>;
 
     /// The relay steps stored with each message on `branch`, in plan order.

@@ -84,6 +84,9 @@ pub(crate) enum Review {
 pub(crate) struct ScriptReview {
     pub(crate) review: Review,
     pub(crate) home: HomeAccess,
+    /// The files the script names to read, as written; a directory read throughout is
+    /// left out.
+    pub(crate) reads: Vec<String>,
 }
 
 /// The policy, sandbox and gate a command runs model-chosen argv under.
@@ -106,6 +109,7 @@ impl SubprocessPolicy {
             let analysis = analyze(&script, cfg.scratch.as_deref(), Some(&cfg.allowlist));
             ScriptReview {
                 home: home_access(&analysis),
+                reads: files_read(&analysis),
                 review: guarded_review(&guards, analysis, &cfg.edit_scope, &cfg.protected),
             }
         })
@@ -228,6 +232,15 @@ impl ReadPolicy {
         })
         .await
     }
+}
+
+fn files_read(analysis: &Analysis) -> Vec<String> {
+    analysis
+        .effects
+        .iter()
+        .filter(|effect| effect.action == Action::Read && !effect.recursive)
+        .map(|effect| effect.path.clone())
+        .collect()
 }
 
 /// Read-only for a script that runs only programs on the read-only list, whatever the path

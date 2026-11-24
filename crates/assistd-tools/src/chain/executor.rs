@@ -251,12 +251,7 @@ async fn run_command(
     } else {
         prefix_stderr(name, &out.stderr)
     };
-    CommandOutput {
-        stdout: out.stdout,
-        stderr,
-        exit_code: out.exit_code,
-        attachments: out.attachments,
-    }
+    CommandOutput { stderr, ..out }
 }
 
 fn asks_for_help(args: &[Word]) -> bool {
@@ -345,7 +340,7 @@ mod tests {
                 stdout: self.stdout.to_vec(),
                 stderr: self.stderr.to_vec(),
                 exit_code: self.exit_code,
-                attachments: Vec::new(),
+                ..CommandOutput::default()
             })
         }
     }
