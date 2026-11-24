@@ -165,14 +165,6 @@ CREATE TABLE memories (
     CHECK (updated_at >= created_at)
 ) STRICT;
 
--- One row, written when the database is created: the random value that tells this
--- database from every other, which `index.db` records to say whose rows it indexes.
-CREATE TABLE database_identity (
-    id       INTEGER PRIMARY KEY CHECK (id = 0),
-    identity BLOB NOT NULL CHECK (length(identity) = 16)
-) STRICT;
-INSERT INTO database_identity (id, identity) VALUES (0, randomblob(16));
-
 -- `next_fire_at` is NULL until the scheduler computes it after a save, or when nothing
 -- is due. `mode` is 0 manual, 1 accept edits, 2 auto. `kept_runs` is how many finished
 -- runs the task keeps; NULL keeps the configured default.

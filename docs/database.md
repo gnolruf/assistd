@@ -86,10 +86,6 @@ erDiagram
     task_runs ||--o| sessions : "recorded in"
     sessions ||--o| active_session : "pointed at by"
 
-    database_identity {
-        int id PK "always 0"
-        blob identity "16 random bytes, written when memory.db is created"
-    }
     sessions {
         int id PK
         text uuid UK
@@ -222,9 +218,6 @@ point across sessions. Deleting a session, branch, message, or memory
 cascades to the rows that hang off it in this file; the chunks cut from
 it, in `index.db`, follow ([What ties the files together](#what-ties-the-files-together)).
 
-**`database_identity`** holds 16 random bytes written when the file is
-created, which tell one `memory.db` from every other.
-
 ### Transcripts
 
 - **`sessions`**: one row per conversation, written with its first
@@ -322,7 +315,6 @@ erDiagram
 
     chunked_source {
         int id PK "always 0"
-        blob memory_identity "the database_identity its chunks were cut from"
         int chunked_through "the highest message id whose chunks are cut"
     }
     index_roots {
@@ -390,10 +382,8 @@ can say. Only a document's page is in this file, and a trigger on
 `document_pages` deletes a deleted page's chunks. A message, a memory
 and an access are rows of `memory.db`.
 
-- **`chunked_source`**: the one row saying which `memory.db` the
-  message, memory and access chunks were cut from, by its
-  `database_identity`, and the highest message id whose chunks are
-  cut.
+- **`chunked_source`**: the one row holding the highest message id of
+  `memory.db` whose chunks are cut.
 - **`chunks`**: each chunk belongs to exactly one message, one memory,
   one page of a document or one access, and is a byte range into
   `messages.content`, `memories.value`, that page's
@@ -605,12 +595,16 @@ No transaction covers both, so a row of `memory.db` is always written
 first and `index.db` follows it. A crash between the two leaves
 `index.db` behind, never wrong, and the next start brings it level.
 
-- **Identity.** `database_identity` holds 16 random bytes written when
-  `memory.db` is created. `chunked_source` records the identity
-  `index.db` cut its message, memory and access chunks from. When the two differ
-  at start, those chunks are dropped and cut again, so the ids of a new
-  `memory.db` never meet another database's chunks. Document chunks
-  stay: they name no row of `memory.db`.
+- **Other messages.** A message's content is never rewritten and ids
+  only rise, so two copies of `memory.db` hold the same messages up to
+  some id and other ones above it. A start hashes the bytes that the
+  chunk of the highest message with one covers and compares them with
+  `chunks.hash`. When they differ, the index was cut from other
+  messages, from another `memory.db` or from a copy since replaced:
+  every message and access chunk is dropped and the mark set to 0, so
+  they are cut again. Their vectors stay for the chunks that hold the
+  same text again. Document chunks stay: they name no row of
+  `memory.db`.
 - **Messages.** A message is saved without chunks.
   `chunked_source.chunked_through` is the highest message id whose
   chunks are cut, and the message chunker cuts every user and assistant
@@ -686,10 +680,11 @@ Opening the files brings them level before anything reads them:
    with its sidecar files and created empty. Neither file has
    migrations: a change to its schema takes the next version number.
 3. **`index.db` is held against `memory.db`**, in one write:
-   - when `chunked_source` records another `database_identity`, every
-     message, memory and access chunk is dropped and the mark set to 0;
    - the chunks whose message, memory or access is gone are removed;
    - the mark is lowered to the highest message stored;
+   - when the chunk of the highest message with one does not cover that
+     message's text, every message and access chunk is dropped and the
+     mark set to 0;
    - each memory whose chunk does not cover its value has it cut again;
    - every memory now has its chunk, so the memory vectors that no
      memory chunk holds the text of are removed.

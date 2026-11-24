@@ -18,16 +18,14 @@ const MEMORY_DATABASE_SOURCES: [(ChunkSource, &str); 3] = [
     (ChunkSource::Access, "accesses"),
 ];
 
-/// The random value a `memory.db` is told from every other by.
-type DatabaseIdentity = [u8; 16];
-
 /// What bringing `index.db` in line with `memory.db` changed.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Reconciled {
-    /// Whether the chunks were cut from another `memory.db` and dropped for it.
-    pub built_from_another: bool,
     /// Chunks removed because their message, memory or access is gone.
     pub orphans_removed: usize,
+    /// Whether the message and access chunks were cut from other messages than those
+    /// stored and dropped for it.
+    pub cut_from_other_messages: bool,
     pub memories: RecutMemories,
     /// Memory vectors removed because no memory's chunk holds their text.
     pub unheld_vectors_removed: usize,
@@ -36,8 +34,8 @@ pub(super) struct Reconciled {
 impl Reconciled {
     /// Whether any chunk or vector was removed.
     pub(super) fn erased_rows(&self) -> bool {
-        self.built_from_another
-            || self.orphans_removed > 0
+        self.orphans_removed > 0
+            || self.cut_from_other_messages
             || self.memories.replaced > 0
             || self.unheld_vectors_removed > 0
     }
@@ -52,19 +50,20 @@ pub(super) struct RecutMemories {
     pub cut: usize,
 }
 
-/// Bring the message, memory and access chunks in line with the attached `memory.db`: drop
-/// them all when they were cut from another, remove those whose source is gone, and
-/// cut again each memory's chunk that does not cover its value. Every memory then
-/// has its chunk, so the memory vectors none of them holds are removed.
+/// Bring the message, memory and access chunks in line with the attached `memory.db`:
+/// remove those whose source is gone, drop every message and access chunk when they
+/// were cut from other messages, and cut again each memory's chunk that does not cover
+/// its value. Every memory then has its chunk, so the memory vectors none of them holds
+/// are removed.
 pub(super) fn reconcile(tx: &Transaction<'_>) -> rusqlite::Result<Reconciled> {
-    let built_from_another = adopt_memory_database(tx)?;
     let orphans_removed = remove_orphaned_chunks(tx)?;
     lower_mark_to_stored_messages(tx)?;
+    let cut_from_other_messages = drop_chunks_cut_from_other_messages(tx)?;
     let memories = recut_changed_memories(tx, None)?;
     let unheld_vectors_removed = delete_unheld_vectors(tx, ChunkSource::Memory)?;
     Ok(Reconciled {
-        built_from_another,
         orphans_removed,
+        cut_from_other_messages,
         memories,
         unheld_vectors_removed,
     })
@@ -218,33 +217,43 @@ fn chunk_accesses(tx: &Transaction<'_>, message: MessageId) -> rusqlite::Result<
     Ok(added)
 }
 
-/// Record the attached `memory.db` as the one whose messages, memories and accesses are
-/// chunked here. When another was recorded, drop every chunk cut from its rows and have every
-/// message chunked again; returns whether one was.
-fn adopt_memory_database(tx: &Transaction<'_>) -> rusqlite::Result<bool> {
-    let attached: DatabaseIdentity =
-        tx.query_row("SELECT identity FROM database_identity", [], |row| {
-            row.get(0)
-        })?;
-    let recorded: Option<DatabaseIdentity> = tx
-        .query_row("SELECT memory_identity FROM chunked_source", [], |row| {
-            row.get(0)
-        })
+/// Drop every message and access chunk and have every message chunked again when the
+/// chunk of the highest message that has one does not cover that message's text. A
+/// message is never rewritten, so one check tells whether the chunks below it were cut
+/// from the messages stored. The vectors stay for the chunks cut again. Returns whether
+/// the chunks were dropped.
+fn drop_chunks_cut_from_other_messages(tx: &Transaction<'_>) -> rusqlite::Result<bool> {
+    let newest: Option<(TextHash, Option<Vec<u8>>)> = tx
+        .query_row(
+            "SELECT cc.hash,
+                    (SELECT substr(CAST(m.content AS BLOB),
+                                   cc.byte_start + 1, cc.byte_end - cc.byte_start)
+                     FROM messages m WHERE m.id = cc.source)
+             FROM chunks cc
+             WHERE cc.kind = ?1
+             ORDER BY cc.source DESC
+             LIMIT 1",
+            [ChunkSource::Message],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .optional()?;
-    if recorded == Some(attached) {
+    let Some((chunk_hash, covered)) = newest else {
+        return Ok(false);
+    };
+    if covered.is_some_and(|bytes| text_hash(&bytes) == chunk_hash) {
         return Ok(false);
     }
+    let transcript_kinds = [ChunkSource::Message, ChunkSource::Access];
     tx.execute(
-        "DELETE FROM chunks WHERE kind IN (?1, ?2, ?3)",
-        MEMORY_DATABASE_SOURCES.map(|(source, _)| source),
+        "DELETE FROM chunks WHERE kind IN (?1, ?2)",
+        transcript_kinds,
     )?;
     tx.execute(
-        "INSERT INTO chunked_source (id, memory_identity, chunked_through) VALUES (0, ?1, 0)
-         ON CONFLICT(id) DO UPDATE
-         SET memory_identity = excluded.memory_identity, chunked_through = 0",
-        [attached],
+        "DELETE FROM removed_chunk_texts WHERE kind IN (?1, ?2)",
+        transcript_kinds,
     )?;
-    Ok(recorded.is_some())
+    tx.execute("UPDATE chunked_source SET chunked_through = 0", [])?;
+    Ok(true)
 }
 
 /// Lower the highest message chunked to the highest stored, so that a `memory.db` put
