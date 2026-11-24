@@ -10,14 +10,13 @@ pub(crate) const VERSION: i64 = 1;
 /// Every table of the index. A chunk's `source` names a row of `memory.db` when its
 /// kind is a message, a memory or an access, so nothing here can hold it to that row.
 const SCHEMA_SQL: &str = r"
--- At most one row: the `memory.db` whose messages, memories and accesses are chunked
--- here, by its `database_identity`, and the highest message id whose chunks, and those
--- of the accesses stored with it, are cut.
+-- One row: the highest message id of `memory.db` whose chunks, and those of the
+-- accesses stored with it, are cut.
 CREATE TABLE chunked_source (
     id              INTEGER PRIMARY KEY CHECK (id = 0),
-    memory_identity BLOB NOT NULL CHECK (length(memory_identity) = 16),
     chunked_through INTEGER NOT NULL CHECK (chunked_through >= 0)
 ) STRICT;
+INSERT INTO chunked_source (id, chunked_through) VALUES (0, 0);
 
 -- `pass` counts the walks over the root. `finished_pass` is the last of them that
 -- walked the whole root to its end, 0 while none has since this file was created.

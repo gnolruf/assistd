@@ -354,11 +354,11 @@ impl SqliteHandle {
                 })
             })
             .await?;
-        if reconciled.built_from_another {
+        if reconciled.cut_from_other_messages {
             tracing::warn!(
                 target: "assistd::memory",
-                "index.db was built from another memory.db; its message, memory and access chunks \
-                 are dropped and cut again"
+                "index.db was built from other messages than memory.db holds; its message and \
+                 access chunks are dropped and cut again"
             );
         }
         tracing::debug!(
