@@ -15,7 +15,10 @@ The model usually searches, picks a hit, and then fetches it. Fetching
 from a host you haven't approved yet asks you first, and so does every
 fetch once the conversation has read files or other data on this
 machine, since the URL could carry it. Search queries never ask: they
-go to the local instance, which passes them to its search engines. A query word
+go to the local instance, which passes them to its search engines. No
+page's text is kept for later: a fetched page leaves its address and
+title in the session, where `search` finds it
+([what is kept of the web](search.md#what-is-kept-of-the-web)). A query word
 starting with `!!` is a SearXNG shortcut that redirects to another
 site; the daemon never follows it, and the search fails instead.
 

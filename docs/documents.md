@@ -14,6 +14,11 @@ A search ranks files by meaning and by the query's exact words, so both
 their file. Text files, HTML, PDFs, office files and e-books are read.
 Everything runs on this machine.
 
+`search` is the daemon's one search, which also covers past sessions
+and saved memories. [search.md](search.md) describes it whole: its
+options, what a hit shows and how hits are ranked. This page covers the
+document index.
+
 ## Setup
 
 1. **Keep embedding on.** Document search needs the embedding server
@@ -54,8 +59,9 @@ or cache directory. Narrow folders are also better for other reasons:
   of up to 512 characters). Once it is full, new files are skipped. As a
   scale, 3,050 files of documentation, source code and books came to
   about 150,000 chunks.
-- **Everything indexed is copied** into the daemon's database (see
-  [Privacy](#privacy)). That index took about 210 MB there.
+- **Everything indexed is copied** into the daemon's `index.db` (see
+  [Privacy](#privacy)). That index took about 210 MB, 124 MB of it
+  vectors, which are kept beside it in `vectors.db`.
 - **Every chunk has to be embedded** before a search by meaning finds
   it, and by default that only happens while you are not using the
   model.
@@ -271,7 +277,8 @@ A passage several files hold is one line, for the first of them, with
 `also in N other places` ahead of the passage. A memory's line gives
 its key, and a session's the short id that `search --session <id>
 <words>` takes to show the hits of that one session, each between the
-messages around it.
+messages around it ([search.md](search.md#what-a-hit-shows) has every
+field).
 
 `docs read` prints the stored text of one indexed file from a page and
 byte offset, as much as fits one tool result, and says how to continue.
@@ -308,15 +315,20 @@ assistd documents search lease renewal terms
   and none of the indexed text. `vectors.db` holds the vectors computed
   from every chunk, of documents and sessions alike, which do not give
   the text back but do reflect it, and the text the OCR model read from
-  scanned pages, until their file is deleted or changed. Both are produced again when they are
-  missing, so a backup needs only `memory.db`. Passwords and keys are safer kept out of indexed folders
-  than left to the `sensitive` rule.
+  scanned pages, until their file is deleted or changed. Both are
+  produced again when they are missing, so a backup needs only
+  `memory.db`, and a backup of `memory.db` alone holds no indexed
+  text. Passwords and keys are safer kept out of indexed folders than
+  left to the `sensitive` rule.
 - **Nothing leaves the machine.** The worker that parses files has no
   network, and of your home directory it sees only the indexed folders,
   read-only. Embedding and OCR are done by the daemon's own local model
   servers.
-- **What the model reads becomes part of the conversation**, which is
-  saved in the same database like any other tool result.
+- **What the model reads becomes part of the session.** A passage
+  `search` or `docs read` printed is a tool result, saved in
+  `memory.db` like any other, so that much document text does reach a
+  backup of it. The path of each file `docs read` opened is saved
+  beside it, and a later `search` finds the session by that path.
 - **Turning it off keeps the index.** `enabled = false` stops indexing
   and takes `docs` away from the model, but what was stored stays. To
   delete it, keep `enabled = true`, set `roots = []`, and restart the
@@ -324,7 +336,8 @@ assistd documents search lease renewal terms
   with its documents.
 
 The index is a cache of files on disk, so nothing is lost by deleting
-it. [database.md](database.md#embeddings) describes the tables.
+it ([what deleting it costs](#deleting-the-index)).
+[database.md](database.md#indexdb) describes the tables.
 
 ## Troubleshooting
 
@@ -383,3 +396,18 @@ refused again.
 A model without a vision projector refuses every page; one that does
 not fit on the GPU cannot be loaded. The next run starts after five
 minutes, or when the daemon next drowses.
+
+### Deleting the index
+
+Stop the daemon first, and delete each file with its `-wal` and `-shm`
+files. The next start creates what is missing.
+
+| Deleted      | What comes back, and at what cost                                              |
+|--------------|--------------------------------------------------------------------------------|
+| `index.db`   | Every file is read again by the next pass, and past sessions and memories are cut again. Nothing is embedded or transcribed again: the vectors and the scanned pages' text wait in `vectors.db`. A file is found again once the pass has stored it. |
+| `vectors.db` | Every chunk is embedded again, under the permits [above](#when-indexing-and-embedding-run). For a large index that is hours, and until then files are found by their exact words only. Scanned pages keep their text, but a scan you rename, move or copy afterwards is read by the OCR model again. |
+| Both         | Both costs, and every scanned page is read by the OCR model again, while the daemon is drowsy. |
+
+`memory.db` is not part of the index. Deleting it deletes your
+sessions, memories and tasks, and nothing brings them back
+([database.md](database.md#what-losing-a-file-costs)).

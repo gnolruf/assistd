@@ -6,10 +6,10 @@ what losing each would cost.
 
 - **`memory.db`** holds what exists nowhere else: sessions, memories and
   tasks. The daemon never replaces it.
-- **`index.db`** holds what can be built again in seconds from
+- **`index.db`** holds what can be built again without a model, from
   `memory.db` and from the files on disk: document text, the chunks of
   every kind and their keyword index. The daemon builds it again itself
-  when it has to ([Three files](#three-files)).
+  when it has to ([Repair at start](#repair-at-start)).
 - **`vectors.db`** holds what a model computed, which takes hours of
   model time to produce again: the vector of every distinct chunk text,
   and the text the OCR model read from each scanned page. Nothing in it
@@ -19,7 +19,54 @@ what losing each would cost.
 Chats are saved whatever `[memory] enabled` says; turning it off only
 withholds the memory tools and recalled context from the model.
 
-## Entity-relationship diagram
+[search.md](search.md) describes the search these files serve, and
+[documents.md](documents.md) the document index from the outside.
+
+## What losing a file costs
+
+| File         | Losing it costs                                                                 | The daemon replaces it                                  |
+|--------------|---------------------------------------------------------------------------------|---------------------------------------------------------|
+| `memory.db`  | Every session, memory and task, and the record of what tool calls touched. Nothing else holds them. | Never. It refuses to start when the file cannot be opened. |
+| `index.db`   | The time to cut the messages and memories again and to read the indexed files again. No model runs: the vectors and the scanned pages' text wait in `vectors.db`. | When it is missing, unreadable or from another schema version. |
+| `vectors.db` | Model time. Every chunk text is embedded again, and until then a search finds text by its words only. The readings kept for scanned pages go too: a page already read keeps its text in `index.db`, and is read again by the OCR model once its file is stored afresh. | When it is missing, unreadable or from another schema version. |
+
+As a scale for the last row: the 154,468 distinct texts of the index
+measured [below](#scans) are 2.4 hours at the 18 chunks a second
+measured for embedding on the CPU.
+
+So a backup needs only `memory.db`, copied while the daemon is stopped.
+`index.db` holds the text of every indexed file and `vectors.db` the
+text read from scanned pages, so a copy of either holds documents
+([privacy](documents.md#privacy)).
+
+To reset a file, stop the daemon and move or delete it with its `-wal`
+and `-shm` files. The next start creates an empty one.
+
+- **`memory.db`**: the next start begins with no sessions, memories or
+  tasks. `index.db` drops the chunks cut from the old file and
+  `vectors.db` the vectors of their text; documents and their vectors
+  stay. A schema change to `memory.db` may require this reset instead
+  of shipping a migration.
+- **`index.db`**: everything in it is built again
+  ([Repair at start](#repair-at-start)).
+- **`vectors.db`**: every chunk waits for a vector, and the daemon logs
+  how many texts wait. Scanned pages keep the text `index.db` holds for
+  them, but a scan stored again, or every scan once `index.db` is also
+  built again, waits for the OCR model.
+
+Some changes empty part of a file without a reset:
+
+| Change                                                        | What is emptied                                   |
+|---------------------------------------------------------------|---------------------------------------------------|
+| `embedding.model`, `custom_args` or `document_prefix`, or a model reporting another dimension | The four vector tables. Everything is embedded again. |
+| `documents.ocr.model` or `prompt`                             | `page_readings`. Pages already read keep their text until their file is indexed again. |
+| A folder removed from `documents.roots`                       | Its documents, at the next start, and the vectors and readings only they held. |
+| `assistd documents reindex`                                   | `skipped_files`. Stored documents are read again only when their file changed. |
+| `assistd memory reindex`                                      | The marks on text the embedding server refused.   |
+
+Every table is `STRICT`, and every timestamp is Unix milliseconds.
+
+## `memory.db`
 
 ```mermaid
 erDiagram
@@ -32,21 +79,9 @@ erDiagram
     branches ||--o{ branch_messages : "orders"
     messages ||--|{ branch_messages : "appears in"
     branches ||--o| branch_summaries : "compacted by"
-    messages ||--o{ chunks : "split into"
-    memories ||--o| chunks : "value held as"
-    index_roots ||--o{ documents : "found under"
-    index_roots ||--o{ skipped_files : "found under"
-    documents ||--o{ document_pages : "made of"
-    document_pages ||--o{ chunks : "split into"
-    document_pages ||--o| page_transcriptions : "read from its image as"
-    documents }o--o{ page_readings : "file's pages read as"
     messages ||--o{ accesses : "touched"
     messages ||--o{ relay_steps : "relayed by"
     relay_steps ||--o{ relay_entries : "did"
-    chunks }o--o| message_vectors : "text embedded as"
-    chunks }o--o| memory_vectors : "text embedded as"
-    chunks }o--o| document_vectors : "text embedded as"
-    chunks ||--|| chunk_words : "words indexed in"
     tasks ||--o{ task_runs : "ran as"
     task_runs ||--o| sessions : "recorded in"
     sessions ||--o| active_session : "pointed at by"
@@ -54,11 +89,6 @@ erDiagram
     database_identity {
         int id PK "always 0"
         blob identity "16 random bytes, written when memory.db is created"
-    }
-    chunked_source {
-        int id PK "always 0"
-        blob memory_identity "the database_identity its chunks were cut from"
-        int chunked_through "the highest message id whose chunks are cut"
     }
     sessions {
         int id PK
@@ -153,89 +183,6 @@ erDiagram
         int created_at
         int updated_at
     }
-    index_roots {
-        int id PK
-        blob path UK
-        int pass "counts the walks over the root"
-        int finished_pass "the last pass to walk the whole root, else 0"
-    }
-    documents {
-        int id PK
-        int root_id FK
-        blob path UK
-        blob content_hash "SHA-256 of its pages in order"
-        blob file_hash "SHA-256 of the file's bytes; NULL unless a model may read its pages"
-        int mtime_ns "the file's stamp when read"
-        int size
-        int chunker "0 windows, 1 paragraphs"
-        int chunk_chars "the chunking it was cut with"
-        int overlap_chars
-        int seen_pass "the root's pass that last saw it"
-        int indexed_at
-    }
-    skipped_files {
-        blob path PK
-        int root_id FK
-        int mtime_ns "the file's stamp when read"
-        int size
-        int cause "why the read left nothing to index"
-        int seen_pass "the root's pass that last saw it"
-    }
-    document_pages {
-        int document_id PK, FK
-        int page PK "position in the file, from 0"
-        text content "the page's text as indexed, empty when it has none"
-    }
-    page_transcriptions {
-        int document_id PK, FK
-        int page PK, FK
-        int state "0 waiting, 1 read, 2 failed"
-    }
-    page_readings {
-        blob file_hash PK "the hash of the documents stored from the file"
-        int page PK "position in the file, from 0"
-        text text "what the OCR model read, empty for a blank page"
-    }
-    chunks {
-        int id PK "also its rowid in chunk_words"
-        int kind "0 message, 1 memory, 2 document, 3 access"
-        int source "the message, memory, document or access it is cut from"
-        int page "the document's page it is cut from, else 0"
-        int byte_start
-        int byte_end
-        blob hash "first 16 bytes of the SHA-256 of its text"
-    }
-    message_vectors {
-        blob hash UK "the hash of the message chunks that hold the text"
-        blob vector "quantised; NULL when the model cannot embed the text"
-    }
-    memory_vectors {
-        blob hash UK "the hash of the memory chunks that hold the text"
-        blob vector "quantised; NULL when the model cannot embed the text"
-    }
-    document_vectors {
-        blob hash UK "the hash of the document chunks that hold the text"
-        blob vector "quantised; NULL when the model cannot embed the text"
-    }
-    access_vectors {
-        blob hash UK "the hash of the access chunks that hold the text"
-        blob vector "quantised; NULL when the model cannot embed the text"
-    }
-    removed_chunk_texts {
-        int kind PK "the kind of the removed chunk"
-        blob hash PK "a text the open write removed a chunk of"
-    }
-    chunk_words {
-        int rowid PK "the chunk's id"
-        text text "indexed for keyword search, not stored"
-    }
-    embedding_meta {
-        int id PK "always 0"
-        text model
-        int dim
-        text server_args
-        text document_prefix
-    }
     tasks {
         int id PK
         text name UK
@@ -269,111 +216,16 @@ erDiagram
     }
 ```
 
-Every table is `STRICT`, and every timestamp is Unix milliseconds.
 Branches, turns, and messages carry their `session_id` and reference
 each other through composite `(session_id, id)` keys, so nothing can
 point across sessions. Deleting a session, branch, message, or memory
-cascades to the rows that hang off it in its own file.
+cascades to the rows that hang off it in this file; the chunks cut from
+it, in `index.db`, follow ([What ties the files together](#what-ties-the-files-together)).
 
-`index.db` holds `chunked_source`, `index_roots`, `documents`,
-`skipped_files`, `document_pages`, `page_transcriptions`, `chunks`,
-`chunk_words`, `removed_chunk_texts` and `removed_file_hashes`;
-`vectors.db` holds the four vector tables, `embedding_meta`,
-`page_readings` and `page_reader`; every other table is in `memory.db`.
-`chunks.source` names a row of one of four tables, which no foreign key
-can say. A trigger on `document_pages`, in the same file, deletes a
-deleted page's chunks. A message, a memory or an access is in another
-file, and so is a chunk's vector; [Three files](#three-files) says what holds them
-together.
+**`database_identity`** holds 16 random bytes written when the file is
+created, which tell one `memory.db` from every other.
 
-## Three files
-
-Inside a file rows are tied by keys, cascades and triggers. No
-transaction covers `memory.db` and `index.db`, so a row of `memory.db`
-is always written first and `index.db` follows it. A crash between the
-two leaves `index.db` behind, never wrong, and the next start brings it
-level.
-
-- **Identity.** `database_identity` holds 16 random bytes written when
-  `memory.db` is created. `chunked_source` records the identity
-  `index.db` cut its message, memory and access chunks from. When the two differ
-  at start, those chunks are dropped and cut again, so the ids of a new
-  `memory.db` never meet another database's chunks. Document chunks
-  stay: they name no row of `memory.db`.
-- **Messages.** A message is saved without chunks.
-  `chunked_source.chunked_through` is the highest message id whose
-  chunks are cut, and the message chunker cuts every user and assistant
-  message above it, at start and each time one is saved. A tool result
-  above the mark has a chunk cut for each file or page among its
-  `accesses`, by the same pass. It is a backlog
-  ([architecture](architecture.md#backlogs)) and the only code that cuts
-  a message. Message ids never recycle, so a stale chunk cannot come to
-  name another message. With `embedding.enabled = false` the chunker
-  does not run and the messages wait above the mark. A start lowers the
-  mark to the highest message stored, so a `memory.db` put back from an
-  older copy has its next messages chunked.
-- **Memories.** Once a save has committed, the memory's chunk is compared
-  with the value now stored, by hash, and cut again when they differ. A
-  start compares every memory the same way.
-- **Deletes.** A delete commits in `memory.db`, and then the chunks whose
-  message, memory or access is gone are removed from `index.db` and its WAL
-  truncated. A start removes them too. Until then a search skips them.
-
-A step on `index.db` that fails after its `memory.db` write committed is
-logged and left to the next start.
-
-`index.db` and `vectors.db` are written by one connection, in one
-transaction, but each file commits on its own, so a crash can keep one
-file's half of a write. Both ways heal: a chunk whose hash has no vector
-is embedded, and a vector whose text no chunk holds is removed. A page
-reading follows the same two rules as a document vector, with the
-file's hash in place of the text's.
-
-- **Finding a vector.** A chunk's vector is the row of its kind's table
-  in `vectors.db` under `chunks.hash`. The embedding queue is the chunks
-  whose hash has no row there.
-- **Removing a vector, after a write.** A write that removes chunks
-  deletes, in the same transaction, the vector of each text it removed
-  the last chunk of (`removed_chunk_texts` below).
-- **Removing a vector, by comparing a whole kind.** Every vector of a
-  kind whose hash no chunk of that kind holds is deleted, but only while
-  that kind's chunks are all cut, since a vector may be waiting for a
-  chunk that will hold it. Memory chunks are all cut once a start has
-  compared them, and the comparison follows. Message chunks are all cut
-  when the message chunker first leaves no message above its mark after
-  a start. Document chunks are all cut once a pass has walked the whole
-  of every root in `documents.roots` since `index.db` was created, which
-  `index_roots.finished_pass` records; the comparison runs at the end of
-  each round of passes.
-- **Finding a page's reading.** The text read from a scanned page is the
-  row of `page_readings` under its document's `file_hash` and the page's
-  position. Storing a document looks each page without text up there
-  before setting it to wait for the OCR model.
-- **Removing a reading.** A write that removes a document, or stores
-  other bytes at its path, deletes in the same transaction the readings
-  of a file no document is stored from any more (`removed_file_hashes`
-  below). The comparison at the end of each round of passes deletes
-  every reading whose file hash no document has, on the same condition
-  as the document vectors.
-
-So an `index.db` built again finds its vectors and its pages' readings
-waiting and asks no model for anything, and so does a root that was
-unavailable while it was built and comes back. A message undone while its chunks are being cut again keeps
-its vector until they all are; in every other case a vector goes with
-the write that removed its last chunk.
-
-The daemon deletes `index.db` and creates it empty when the file is not
-a database SQLite can read, or when its `PRAGMA user_version` is not the
-one this build writes; a missing file is created. The messages and
-memories are then chunked again and the next pass over each root reads
-its files. A scanned page takes the reading kept for it in `vectors.db`
-and waits for the OCR model only when it has none. `vectors.db`
-is replaced on the same two conditions; every chunk text is then
-embedded again, and the daemon logs how many wait, and every scanned
-page is read again. Neither file has
-migrations: a change to its schema takes the next version number.
-
-## Transcripts
+### Transcripts
 
 - **`sessions`**: one row per conversation, written with its first
   message. `title` is a short name the model generates from the first
@@ -435,7 +287,7 @@ migrations: a change to its schema takes the next version number.
   never reach the model's history or the embedding chunks, since they
   come from untrusted files and pages.
 
-## Key/value memories
+### Key/value memories
 
 **`memories`** holds the facts saved by the `remember` tool and
 `assistd memory`, one row per unique `key`. Saving an existing key
@@ -444,7 +296,7 @@ chunk over its whole value, cut once the save has committed; a save that
 changes the value replaces the chunk, which deletes the old value's
 vector unless another memory holds that value.
 
-## Tasks
+### Tasks
 
 **`tasks`** holds saved prompts run without the user opening a
 conversation, one row per unique `name`, with the triggers that start
@@ -457,17 +309,103 @@ except the active session, which stays as an ordinary one.
 **`task_queue`** has a row only once the queue has been paused or
 resumed, saying which.
 
-## Embeddings
+## `index.db`
 
-- **`chunks`**: each chunk belongs to exactly one message, one memory
-  or one page of a document, and is a byte range into
-  `messages.content`, `memories.value` or that page's
-  `document_pages.content`, so the text itself is never stored
-  twice. `kind` says which of the three and `source` is that row's id,
-  so a new kind of text needs a code and a vector table, not columns.
-  A memory is one chunk over its whole value. User and assistant messages are cut into overlapping windows of
-  512 characters (64 shared) by the message chunker, after the message
-  is saved; tool results are not chunked. A document is cut page by
+```mermaid
+erDiagram
+    index_roots ||--o{ documents : "found under"
+    index_roots ||--o{ skipped_files : "found under"
+    documents ||--o{ document_pages : "made of"
+    document_pages ||--o| page_transcriptions : "read from its image as"
+    document_pages ||--o{ chunks : "split into"
+    chunks ||--|| chunk_words : "words indexed in"
+
+    chunked_source {
+        int id PK "always 0"
+        blob memory_identity "the database_identity its chunks were cut from"
+        int chunked_through "the highest message id whose chunks are cut"
+    }
+    index_roots {
+        int id PK
+        blob path UK
+        int pass "counts the walks over the root"
+        int finished_pass "the last pass to walk the whole root, else 0"
+    }
+    documents {
+        int id PK
+        int root_id FK
+        blob path UK
+        blob content_hash "SHA-256 of its pages in order"
+        blob file_hash "SHA-256 of the file's bytes; NULL unless a model may read its pages"
+        int mtime_ns "the file's stamp when read"
+        int size
+        int chunker "0 windows, 1 paragraphs"
+        int chunk_chars "the chunking it was cut with"
+        int overlap_chars
+        int seen_pass "the root's pass that last saw it"
+        int indexed_at
+    }
+    skipped_files {
+        blob path PK
+        int root_id FK
+        int mtime_ns "the file's stamp when read"
+        int size
+        int cause "why the read left nothing to index"
+        int seen_pass "the root's pass that last saw it"
+    }
+    document_pages {
+        int document_id PK, FK
+        int page PK "position in the file, from 0"
+        text content "the page's text as indexed, empty when it has none"
+    }
+    page_transcriptions {
+        int document_id PK, FK
+        int page PK, FK
+        int state "0 waiting, 1 read, 2 failed"
+    }
+    chunks {
+        int id PK "also its rowid in chunk_words"
+        int kind "0 message, 1 memory, 2 document, 3 access"
+        int source "the message, memory, document or access it is cut from"
+        int page "the document's page it is cut from, else 0"
+        int byte_start
+        int byte_end
+        blob hash "first 16 bytes of the SHA-256 of its text"
+    }
+    chunk_words {
+        int rowid PK "the chunk's id"
+        text text "indexed for keyword search, not stored"
+    }
+    removed_chunk_texts {
+        int kind PK "the kind of the removed chunk"
+        blob hash PK "a text the open write removed a chunk of"
+    }
+    removed_file_hashes {
+        blob hash PK "a file hash the open write removed a document of"
+    }
+```
+
+`chunks.source` names a row of one of four tables, which no foreign key
+can say. Only a document's page is in this file, and a trigger on
+`document_pages` deletes a deleted page's chunks. A message, a memory
+and an access are rows of `memory.db`.
+
+- **`chunked_source`**: the one row saying which `memory.db` the
+  message, memory and access chunks were cut from, by its
+  `database_identity`, and the highest message id whose chunks are
+  cut.
+- **`chunks`**: each chunk belongs to exactly one message, one memory,
+  one page of a document or one access, and is a byte range into
+  `messages.content`, `memories.value`, that page's
+  `document_pages.content` or the access's label and target, so the
+  text itself is never stored twice. `kind` says which of the four and
+  `source` is that row's id, so a new kind of text needs a code and a
+  vector table, not columns. A memory is one chunk over its whole
+  value, and so is an access to a file or a page, over its label on a
+  line of its own, when it has one, then its target. User and assistant
+  messages are cut into overlapping windows of 512 characters (64
+  shared) by the message chunker, after the message is saved; the
+  content of a tool result is not chunked. A document is cut page by
   page, so no chunk spans two pages, and within a page where its text
   divides: at blank lines and Markdown headings, with whole paragraphs
   packed into a chunk of up to 512 characters and a heading always
@@ -531,53 +469,6 @@ resumed, saying which.
   for the file's bytes: a page with one is marked read at once, and only
   the others start waiting. A daemon start sets the failed rows back to
   waiting.
-- **`page_readings`**, in `vectors.db`: the text the OCR model read
-  from one page, under the `file_hash` of the file and the page's
-  position in it, empty for a page that shows nothing. A failed reading
-  is not kept. The rows belong to a file's bytes and not to a path or a
-  document id, so a renamed, moved or copied scan has its text at once,
-  and so does every scan after `index.db` is built again. A reading is
-  kept only while a document is stored from its file
-  ([Three files](#three-files)), so text read from a deleted or changed
-  file does not outlive it.
-- **`page_reader`**, in `vectors.db`: the one row naming what read
-  every kept reading: `documents.ocr.model` and `documents.ocr.prompt`.
-  When the daemon starts with either changed, `page_readings` is emptied
-  before any document is stored. Pages already read keep their text
-  until their file is indexed again.
-- **`removed_file_hashes`**: empty between writes. Triggers on
-  `documents` record the `file_hash` of every row a write deletes or
-  gives another hash. Before the write commits it deletes from
-  `vectors.db` the readings under each recorded hash that no document
-  has any more, and empties the table.
-- **`message_vectors`** / **`memory_vectors`** / **`document_vectors`** /
-  **`access_vectors`**, in `vectors.db`: one vector for each
-  distinct text the chunks of that kind hold, under the text's
-  `chunks.hash`. No chunk id appears in them, so a text that sits in
-  many places is embedded and stored once, and a vector follows its
-  text to any page of any file. A table per kind keeps a search of one
-  kind from reading the vectors of another. A chunk whose hash has no row is pending,
-  and the background embedding worker is given the first chunk holding
-  each pending text. A vector is stored only while a chunk of its kind
-  holds its text, and kept while `index.db` is being built again
-  ([Three files](#three-files)).
-  Vectors are L2-normalised by the embedder, so a dot product is cosine
-  similarity, and quantised to a quarter of their `f32`s: a
-  little-endian `f32` step, sized so the vector's largest component is
-  127 steps, then one `i8` count of steps per dimension.
-  A row with a `NULL` vector marks text the model rejected, or that
-  failed alone three times while the server embedded other text, so the
-  worker does not retry it; `assistd memory reindex` clears those marks
-  and wakes the worker.
-- **`removed_chunk_texts`**: empty between writes. A trigger on `chunks`
-  records the kind and hash of every chunk a write deletes, however the
-  chunk goes: with its page or its document, with a memory's old
-  value, or after its message or memory was deleted. Before the write commits it deletes from `vectors.db` the vector of each
-  recorded text that no chunk of that kind holds any more, and empties
-  the table. The check runs after the write's inserts, so a document
-  stored again, whose chunks are removed and added, keeps the vectors
-  of the text it still has, and a vector is erased by the same
-  write as the last text it was made from.
 - **`chunk_words`**: an FTS5 index of the words of every chunk of every
   kind. It is contentless:
   a row carries its chunk's id and the index entries for the chunk's
@@ -590,8 +481,85 @@ resumed, saying which.
   `read_regular_file` is indexed as `read`, `regular`, `file` in a row.
   The `search` command reads it for every kind it ranks; recalled
   context ranks by vector alone. On the document
-  index measured below it takes
+  index [search.md](search.md#measured) measures it takes
   25 MB beside 62 MB of page text and 124 MB of vectors.
+- **`removed_chunk_texts`**: empty between writes. A trigger on `chunks`
+  records the kind and hash of every chunk a write deletes, however the
+  chunk goes: with its page or its document, with a memory's old
+  value, or after its message or memory was deleted. Before the write commits it deletes from `vectors.db` the vector of each
+  recorded text that no chunk of that kind holds any more, and empties
+  the table. The check runs after the write's inserts, so a document
+  stored again, whose chunks are removed and added, keeps the vectors
+  of the text it still has, and a vector is erased by the same
+  write as the last text it was made from.
+- **`removed_file_hashes`**: empty between writes. Triggers on
+  `documents` record the `file_hash` of every row a write deletes or
+  gives another hash. Before the write commits it deletes from
+  `vectors.db` the readings under each recorded hash that no document
+  has any more, and empties the table.
+
+## `vectors.db`
+
+```mermaid
+erDiagram
+    message_vectors {
+        blob hash UK "the hash of the message chunks that hold the text"
+        blob vector "quantised; NULL when the model cannot embed the text"
+    }
+    memory_vectors {
+        blob hash UK "the hash of the memory chunks that hold the text"
+        blob vector "quantised; NULL when the model cannot embed the text"
+    }
+    document_vectors {
+        blob hash UK "the hash of the document chunks that hold the text"
+        blob vector "quantised; NULL when the model cannot embed the text"
+    }
+    access_vectors {
+        blob hash UK "the hash of the access chunks that hold the text"
+        blob vector "quantised; NULL when the model cannot embed the text"
+    }
+    embedding_meta {
+        int id PK "always 0"
+        text model
+        int dim
+        text server_args
+        text document_prefix
+    }
+    page_readings {
+        blob file_hash PK "the hash of the documents stored from the file"
+        int page PK "position in the file, from 0"
+        text text "what the OCR model read, empty for a blank page"
+    }
+    page_reader {
+        int id PK "always 0"
+        text model
+        text prompt
+    }
+```
+
+No table here has a key into another, in this file or outside it. A
+vector is found by the hash of its text and a page's reading by the
+hash of its file.
+
+- **`message_vectors`** / **`memory_vectors`** / **`document_vectors`** /
+  **`access_vectors`**, in `vectors.db`: one vector for each
+  distinct text the chunks of that kind hold, under the text's
+  `chunks.hash`. No chunk id appears in them, so a text that sits in
+  many places is embedded and stored once, and a vector follows its
+  text to any page of any file. A table per kind keeps a search of one
+  kind from reading the vectors of another. A chunk whose hash has no row is pending,
+  and the background embedding worker is given the first chunk holding
+  each pending text. A vector is stored only while a chunk of its kind
+  holds its text, and kept while `index.db` is being built again
+  ([What ties the files together](#what-ties-the-files-together)).
+  Vectors are L2-normalised by the embedder, so a dot product is cosine
+  similarity, and quantised to a quarter of their `f32`s: a
+  little-endian `f32` step, sized so the vector's largest component is
+  127 steps, then one `i8` count of steps per dimension.
+  A row with a `NULL` vector marks text the model rejected, or that
+  failed alone three times while the server embedded other text, so the
+  worker does not retry it; `assistd memory reindex` clears those marks
+  and wakes the worker.
 - **`embedding_meta`**, in `vectors.db`: the one row naming what
   produced every stored vector: `embedding.model`, the vector dimension the server reported,
   `embedding.custom_args` and `embedding.document_prefix`. When the
@@ -601,9 +569,162 @@ resumed, saying which.
   compared, and the worker embeds everything again.
   `embedding.query_prefix` is not recorded: it shapes only the query
   vector, which is never stored.
+- **`page_readings`**, in `vectors.db`: the text the OCR model read
+  from one page, under the `file_hash` of the file and the page's
+  position in it, empty for a page that shows nothing. A failed reading
+  is not kept. The rows belong to a file's bytes and not to a path or a
+  document id, so a renamed, moved or copied scan has its text at once,
+  and so does every scan after `index.db` is built again. A reading is
+  kept only while a document is stored from its file
+  ([What ties the files together](#what-ties-the-files-together)), so text read from a deleted or changed
+  file does not outlive it.
+- **`page_reader`**, in `vectors.db`: the one row naming what read
+  every kept reading: `documents.ocr.model` and `documents.ocr.prompt`.
+  When the daemon starts with either changed, `page_readings` is emptied
+  before any document is stored. Pages already read keep their text
+  until their file is indexed again.
 
-Every search (recalled context, the `search` command) is one
-store call that names the kinds it searches, and it scans every vector
+## What ties the files together
+
+Inside a file, rows are tied by keys, cascades and triggers. Across
+files there is no key and no transaction, so a row names what it needs
+by a name or by a hash of content, and a rule keeps the name true.
+
+| From                         | To                                   | Named by                                  |
+|------------------------------|--------------------------------------|-------------------------------------------|
+| A chunk in `index.db`        | Its message, memory or access in `memory.db` | `chunks.kind` and `chunks.source`, good only for the `memory.db` that `chunked_source` records |
+| A chunk in `index.db`        | Its vector in `vectors.db`           | `chunks.hash`, the hash of its text       |
+| A document in `index.db`     | Its scanned pages' text in `vectors.db` | `documents.file_hash`, the hash of the file's bytes, and the page's position |
+| An access in `memory.db`     | A file, a page, a session or a memory | `accesses.target`: a path, a URL, a uuid or a key, which may name what is gone |
+
+`vectors.db` names nothing, which is why it outlasts both other files.
+
+### `memory.db` and `index.db`
+
+No transaction covers both, so a row of `memory.db` is always written
+first and `index.db` follows it. A crash between the two leaves
+`index.db` behind, never wrong, and the next start brings it level.
+
+- **Identity.** `database_identity` holds 16 random bytes written when
+  `memory.db` is created. `chunked_source` records the identity
+  `index.db` cut its message, memory and access chunks from. When the two differ
+  at start, those chunks are dropped and cut again, so the ids of a new
+  `memory.db` never meet another database's chunks. Document chunks
+  stay: they name no row of `memory.db`.
+- **Messages.** A message is saved without chunks.
+  `chunked_source.chunked_through` is the highest message id whose
+  chunks are cut, and the message chunker cuts every user and assistant
+  message above it, at start and each time one is saved. A tool result
+  above the mark has a chunk cut for each file or page among its
+  `accesses`, by the same pass. It is a backlog
+  ([architecture](architecture.md#backlogs)) and the only code that cuts
+  a message. Message ids never recycle, so a stale chunk cannot come to
+  name another message. With `embedding.enabled = false` the chunker
+  does not run and the messages wait above the mark. A start lowers the
+  mark to the highest message stored, so a `memory.db` put back from an
+  older copy has its next messages chunked.
+- **Memories.** Once a save has committed, the memory's chunk is compared
+  with the value now stored, by hash, and cut again when they differ. A
+  start compares every memory the same way.
+- **Deletes.** A delete commits in `memory.db`, and then the chunks whose
+  message, memory or access is gone are removed from `index.db` and its WAL
+  truncated. A start removes them too. Until then a search skips them.
+
+A step on `index.db` that fails after its `memory.db` write committed is
+logged and left to the next start.
+
+### `index.db` and `vectors.db`
+
+They are written by one connection, in one transaction, but each file
+commits on its own, so a crash can keep one file's half of a write.
+Both ways heal: a chunk whose hash has no vector is embedded, and a
+vector whose text no chunk holds is removed. A page reading follows the
+same two rules as a document vector, with the file's hash in place of
+the text's.
+
+- **Finding a vector.** A chunk's vector is the row of its kind's table
+  in `vectors.db` under `chunks.hash`. The embedding queue is the chunks
+  whose hash has no row there.
+- **Removing a vector, after a write.** A write that removes chunks
+  deletes, in the same transaction, the vector of each text it removed
+  the last chunk of (`removed_chunk_texts`).
+- **Removing a vector, by comparing a whole kind.** Every vector of a
+  kind whose hash no chunk of that kind holds is deleted, but only while
+  that kind's chunks are all cut, since a vector may be waiting for a
+  chunk that will hold it. Memory chunks are all cut once a start has
+  compared them, and the comparison follows. Message chunks are all cut
+  when the message chunker first leaves no message above its mark after
+  a start. Document chunks are all cut once a pass has walked the whole
+  of every root in `documents.roots` since `index.db` was created, which
+  `index_roots.finished_pass` records; the comparison runs at the end of
+  each round of passes.
+- **Finding a page's reading.** The text read from a scanned page is the
+  row of `page_readings` under its document's `file_hash` and the page's
+  position. Storing a document looks each page without text up there
+  before setting it to wait for the OCR model.
+- **Removing a reading.** A write that removes a document, or stores
+  other bytes at its path, deletes in the same transaction the readings
+  of a file no document is stored from any more (`removed_file_hashes`). The comparison at the end of each round of passes deletes
+  every reading whose file hash no document has, on the same condition
+  as the document vectors.
+
+So an `index.db` built again finds its vectors and its pages' readings
+waiting and asks no model for anything, and so does a root that was
+unavailable while it was built and comes back. A message undone while its chunks are being cut again keeps
+its vector until they all are; in every other case a vector goes with
+the write that removed its last chunk.
+
+## Repair at start
+
+Opening the files brings them level before anything reads them:
+
+1. **`memory.db` is opened and migrated.** The daemon refuses to start
+   when it cannot be, and never replaces it.
+2. **`vectors.db` and `index.db` are checked.** A missing file is
+   created. One that SQLite cannot read as a database, or whose
+   `PRAGMA user_version` is not the one this build writes, is deleted
+   with its sidecar files and created empty. Neither file has
+   migrations: a change to its schema takes the next version number.
+3. **`index.db` is held against `memory.db`**, in one write:
+   - when `chunked_source` records another `database_identity`, every
+     message, memory and access chunk is dropped and the mark set to 0;
+   - the chunks whose message, memory or access is gone are removed;
+   - the mark is lowered to the highest message stored;
+   - each memory whose chunk does not cover its value has it cut again;
+   - every memory now has its chunk, so the memory vectors that no
+     memory chunk holds the text of are removed.
+4. **A `vectors.db` created empty is logged**, with the number of chunk
+   texts that wait for a vector.
+
+The rest is done by the backlogs
+([architecture](architecture.md#backlogs)) once the daemon runs:
+
+- The message chunker cuts the messages above the mark. When it first
+  leaves none, the message and access vectors no chunk holds the text
+  of are removed.
+- The index passes read every file of every root that has no row with
+  its stamp, which after a new `index.db` is all of them. At the end of
+  a round in which every root has been walked whole, the document
+  vectors and page readings no document holds are removed.
+- The embedding worker embeds every chunk whose text has no vector,
+  which after a new `index.db` beside a kept `vectors.db` is none.
+- A scanned page takes the reading kept for its file and waits for the
+  OCR model only when it has none. Page transcriptions that failed are
+  set back to waiting.
+- When the embedder comes up in another embedding space, or
+  `documents.ocr` names another model or prompt, the vectors or the
+  readings are emptied first
+  ([What losing a file costs](#what-losing-a-file-costs)).
+
+## Scans
+
+The store has one search ([search.md](search.md)). A caller gives it
+the query's text and vector, the kinds to search (messages, memories,
+documents, accesses), which sessions' messages and accesses count, how
+many hits it wants, and whether to rank by keyword as well as by
+vector.
+
+It scans every vector
 of each of those kinds and keeps the top matches; there is no vector
 index. A search that takes in documents runs on a read-only connection
 of its own. It scans `document_vectors` alone, keeps the nearest texts,
@@ -613,13 +734,11 @@ too few documents and more vectors remain, it scans again through the
 chunks, keeping one chunk a document, so one long document never crowds
 out the rest. A message search reaches each vector through its chunk,
 which drops the messages outside the search's sessions before any is
-ranked; `search` leaves out the current session's messages that are
-still in the model's context. A search of accesses scans
+ranked. A search of accesses scans
 `access_vectors` alone and places each text at the first access holding
 it in the search's sessions, since one file is read many times over. What is
 kept of each kind is merged by similarity, which one embedding space and
-one stored form make comparable across kinds. `search` ranks by
-keyword as well, as [Search](#search) describes.
+one stored form make comparable across kinds.
 
 One scan of quantised 768-dimension vectors, measured on a Ryzen 7
 9800X3D with the file in the page cache, when each vector belonged to
@@ -632,9 +751,40 @@ one chunk:
 | 1,000,000 | 820 MB | 200 ms |
 
 Quantising moved no top-8 result in these runs and changed a
-similarity by at most 0.0005. A document index holds fewer vectors than
-chunks: of 209,375 chunks cut from 9,229 files (this repository, the
-Rust books and `/usr/share/doc`), 154,468 held distinct text.
+similarity by at most 0.0005.
+
+What a scan costs is the row, not the bytes: stepping through vector
+rows with no arithmetic took 107 to 162 ns a row. A vector is therefore
+stored once for each distinct text, and a document index holds fewer
+vectors than chunks. Measured by running the extraction worker over
+9,229 files and cutting them by the document chunker's rules:
+
+| Files                | Chunks  | Distinct texts | Repeats |
+|----------------------|---------|----------------|---------|
+| This repository      | 13,009  | 12,981         | 0.2%    |
+| `/usr/share/doc`     | 143,890 | 116,725        | 19%     |
+| The Rust books       | 52,476  | 24,762         | 53%     |
+| All                  | 209,375 | 154,468        | 26%     |
+
+The repeats are print pages and "-all" pages that hold a manual's
+chapters a second time; one text sat in 2,503 places. Whole-file
+duplicates were 0.6% of the chunks. A scan of a vector for each of the
+209,375 chunks took 33.9 ms, and of the 154,468 distinct ones 18.6 ms
+(random bytes of a vector's size, the file in memory). At 18 chunks a
+second, embedding them is 3.2 hours against 2.4.
+
+Finding a vector by hash means reading across two files. On the same
+index, with both attached to one connection:
+
+| Read                                                        | Time   |
+|-------------------------------------------------------------|--------|
+| Finding nothing to embed among 209,375 chunks               | 62 ms  |
+| Comparing 141,487 vectors with the chunks that hold them    | 26 ms  |
+| Placing 300 winning hashes at their chunks                  | 0.3 ms |
+
+Stepping through a million vector rows took 107 ms with one reader and
+20 ms with eight, each on a range of rowids. The tables allow that; no
+scan does it yet.
 
 Since every search scans every document vector, the stored documents
 are held to 500,000 chunks (`MAX_DOCUMENT_CHUNKS`), where one scan reads
@@ -643,88 +793,6 @@ the index pass does. It checks the count before each file it stores, so
 the file that crosses the ceiling is stored whole, and every file after
 it is skipped as `index full` until documents are removed. Message
 chunks have no ceiling.
-
-## Search
-
-The store has one search. A caller gives it the query's text and vector,
-the kinds to search (messages, memories, documents, accesses), which
-sessions' messages and accesses count, how many hits it wants, and
-whether to rank by keyword as well as by vector. A hit is a source, one
-message, memory or document, or one file or page however many accesses
-touched it, shown through its best-ranked chunk.
-
-| Caller                                         | Kinds     | Ranked by          |
-|------------------------------------------------|-----------|--------------------|
-| Recalled context                               | memories, then messages of other sessions | vector, above `embedding.min_similarity` |
-| `search`                                       | the kinds enabled, or those `--in` names | vector and keyword |
-| `search --session`                             | messages of one past session | vector and keyword |
-| `assistd search`                               | the kinds enabled, or those `--in` names | vector and keyword |
-| `assistd memory reminisce`                     | messages  | vector and keyword |
-| `assistd documents search`                     | documents | vector and keyword |
-
-Embeddings match meaning and miss exact strings: an identifier, an error
-message, a name, an invoice number. So a search that asks for it ranks
-the sources twice and fuses the two rankings.
-
-- **By vector**: each source by its chunk nearest the query vector.
-- **By keyword**: each source by its chunk with the best BM25 score in
-  `chunk_words`, among the chunks of the kinds searched that hold any
-  word of the query. Each whitespace-separated word of the query is
-  matched as a phrase of its own tokens, so `INV-2024-0113` finds only
-  that number and no character of a query is read as FTS5 syntax. A text
-  that is the best chunk of several sources counts for the first of them
-  alone.
-- **Fused**: the 30 best sources of each ranking, or as many as the hits
-  asked for when that is more, are scored by reciprocal rank fusion, the
-  sum of `1 / (10 + rank)` over the rankings that hold the source, which
-  needs no common scale between cosine and BM25. A source is shown
-  through its chunk from the ranking that places it higher. At equal
-  score or rank the keyword ranking wins.
-
-A search by vector alone is the same fusion over one ranking, so its
-order is the order of similarity.
-
-A text several messages or documents hold is one hit: the best-ranked
-of them, with the count of the others among the kinds and sessions
-searched. Four copies of a file are one line of `search`, not four.
-Memories are never folded: two keys saved with one value are two hits.
-A file or a page is one hit however often it was touched, shown at the
-first access to it among the sessions searched, with the count of the
-other sessions that touched it; reading one file five times in a session
-adds nothing to that count.
-
-A chunk needs no vector to be found by its words, so a document or a
-message can be searched for an exact string as soon as it is stored;
-such a hit has no similarity to report. Recalled context holds its hits to a similarity,
-which a match by words alone does not have, so it ranks by vector only.
-
-The figures below were measured on documents. Messages are fused with
-the same constants, which have not been measured on them, and so are
-memories, of which only the value has its words indexed, not the key.
-
-Keywords are matched per chunk, not per page or per document: the chunk
-that matched is then the passage to show, and BM25 compares texts of one
-size. Measured on an index of 3,050 files in 151,597 chunks (this
-repository, Rust's books and error index, system documentation and a
-novel) embedded with EmbeddingGemma 2, over 69 queries. Each cell is the
-share of queries whose first relevant document came first, and within the
-first five:
-
-| Queries                                                    | Vectors only | Fused        |
-|------------------------------------------------------------|--------------|--------------|
-| 33 exact strings: identifiers, error messages, codes, names | 64%, 88%     | 94%, 100%    |
-| 12 questions that hold one exact string                    | 75%, 100%    | 100%, 100%   |
-| 24 paraphrases sharing no rare word with their answer      | 67%, 92%     | 75%, 92%     |
-
-For an exact string, one of the first five hits showed the passage holding
-it in 76% of queries by vector alone and in all of them fused. Matching
-keywords per page or per document instead put the right document first
-for 82% of the exact strings and showed the passage for 91%. With the
-fusion's usual constant of 60 in place of 10, nearly any document found
-by both rankings outranks the best of either, and the paraphrases' share
-within the first five fell to 83%. The keyword query took 10 ms at the
-median and 58 ms for a question made of common words, which most chunks
-match.
 
 ## Storage
 
@@ -754,11 +822,3 @@ match.
   one written by a newer `assistd`, or by a release from before the
   schema became a single version. It never runs without persistence
   and never replaces that file itself.
-- Resetting is manual: stop the daemon and move `memory.db` and its
-  `-wal` and `-shm` files aside; the next start creates an empty
-  database, and `index.db` drops the chunks cut from the old one. A
-  schema change to `memory.db` may require a reset instead of shipping a
-  migration. Deleting `index.db` while the daemon is stopped loses
-  nothing that is not built again, in seconds; deleting `vectors.db`
-  costs the time to embed everything and to transcribe every scanned
-  page again.
