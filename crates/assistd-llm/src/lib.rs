@@ -11,7 +11,9 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use assistd_ipc::{Attachment, Component, RelayEvent, StatusKind, StatusSeverity, ToolReport};
+use assistd_ipc::{
+    Access, Attachment, Component, RelayEvent, StatusKind, StatusSeverity, ToolReport,
+};
 
 pub mod completion;
 #[cfg(feature = "test-support")]
@@ -166,6 +168,8 @@ pub enum LlmEvent {
         result: Box<ToolReport>,
         /// Whether the call could put data from this machine in `result`.
         read_host: bool,
+        /// What the call touched.
+        accesses: Vec<Access>,
     },
     /// Progress of a relay running inside the tool call in flight.
     Relay(RelayEvent),

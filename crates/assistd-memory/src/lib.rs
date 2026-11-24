@@ -39,5 +39,5 @@ pub use tasks::{PrunedRuns, RecoveredQueue, TaskRecord, TaskRunEnd, UndecodableT
 pub use transcripts::{
     AppendedMessage, BranchHistory, BranchInfo, BranchSummary, HistoryRow, HistoryScope,
     MessageKind, OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall, Reasoning,
-    ResumeCandidate, ToolOutcome, TranscriptStore, TurnStats, UndoOutcome,
+    ResumeCandidate, ToolOutcome, ToolTrace, TranscriptStore, TurnStats, UndoOutcome,
 };

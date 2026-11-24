@@ -95,6 +95,20 @@ pub fn collapse_whitespace(text: &str) -> String {
     collapsed
 }
 
+/// `text` with every control character and Unicode line or paragraph separator
+/// replaced by a space, so it cannot start a new line.
+pub fn flatten_line_breaks(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() || is_line_separator(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// The message a panic carried, or a placeholder when its payload is not a string.
 pub fn panic_message(payload: &(dyn Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {

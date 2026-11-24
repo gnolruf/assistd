@@ -101,6 +101,20 @@ CREATE TABLE branch_summaries (
     duration_ms          INTEGER NOT NULL CHECK (duration_ms >= 0)
 ) STRICT;
 
+-- What a tool result's call touched. `action` is 0 read, 1 wrote, 2 fetched, 3 recalled,
+-- 4 saved; `target` is a file's absolute path, a URL, a session's uuid or a memory's key,
+-- and `label` a fetched page's title.
+CREATE TABLE accesses (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    action     INTEGER NOT NULL CHECK (action BETWEEN 0 AND 4),
+    target     BLOB NOT NULL CHECK (length(target) > 0),
+    label      TEXT,
+    CHECK (label IS NULL OR action = 2)
+) STRICT;
+CREATE INDEX idx_accesses_message ON accesses(message_id);
+CREATE INDEX idx_accesses_target ON accesses(target);
+
 -- What a `relay` tool result's sub-agents did. `outcome` is 0 answered, 1 failed,
 -- NULL for a step that never ran; `answer_file` is where the whole answer was saved.
 CREATE TABLE relay_steps (

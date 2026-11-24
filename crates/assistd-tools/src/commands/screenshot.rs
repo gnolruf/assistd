@@ -172,13 +172,11 @@ fn attach_png(png: Vec<u8>, target: &Target, backend: Backend) -> CommandOutput 
         backend.label(),
     );
     CommandOutput {
-        stdout: stdout.into_bytes(),
-        stderr: Vec::new(),
-        exit_code: 0,
         attachments: vec![Attachment::Image {
             mime: ImageMime::Png,
             bytes: png,
         }],
+        ..CommandOutput::ok(stdout.into_bytes())
     }
 }
 

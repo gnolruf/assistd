@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use assistd_ipc::{RelayEvent, StatusKind};
+use assistd_ipc::{Access, RelayEvent, StatusKind};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent, SlotAssignment, TurnBackend};
 use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{ToolRegistry, TurnContext};
@@ -59,11 +59,20 @@ pub enum SubAgentError {
     },
 }
 
+/// How a sub-agent run ended, and what its tool calls touched either way.
+#[derive(Debug)]
+pub struct SubAgentRun {
+    pub report: Result<RelayReport, SubAgentError>,
+    /// Paths are as the run's tools saw them.
+    pub accesses: Vec<Access>,
+}
+
 /// What a sub-agent run streamed: its last step's text, `None` when it never
-/// finished, and how many tool-calling steps it took.
+/// finished, how many tool-calling steps it took, and what those touched.
 struct FinalAnswer {
     text: Option<String>,
     tool_steps: u32,
+    accesses: Vec<Access>,
 }
 
 /// Runs sub-agents in backends of their own beside `parent`'s, on the
@@ -84,7 +93,7 @@ impl SubAgentRunner {
     /// answers, save that answer whole to the new file `answer_file`, then ask for its
     /// contract. Only the report reaches the model; `turn`, the calling turn, answers the
     /// run's prompts and is shown its tool calls, and the backend is dropped when the
-    /// run ends or `cancel` fires.
+    /// run ends or `cancel` fires. What its tool calls touched comes back however it ends.
     pub async fn run(
         &self,
         system_prompt: String,
@@ -93,10 +102,19 @@ impl SubAgentRunner {
         answer_file: PathBuf,
         cancel: CancellationToken,
         turn: &TurnContext,
-    ) -> Result<RelayReport, SubAgentError> {
-        let backend = self
+    ) -> SubAgentRun {
+        let isolated = self
             .parent
-            .isolated_backend(system_prompt, SlotAssignment::Unassigned)?;
+            .isolated_backend(system_prompt, SlotAssignment::Unassigned);
+        let backend = match isolated {
+            Ok(backend) => backend,
+            Err(error) => {
+                return SubAgentRun {
+                    report: Err(error.into()),
+                    accesses: Vec::new(),
+                };
+            }
+        };
         let agent = self
             .agents
             .agent(Arc::clone(&backend) as Arc<dyn TurnBackend>, tools);
@@ -105,19 +123,49 @@ impl SubAgentRunner {
             agent.run_turn(turn, task, Vec::new(), tx, cancel.clone()),
             final_answer(rx, turn)
         );
-        outcome?;
-        let answer = finished.text.ok_or(SubAgentError::Cancelled)?;
-        let saved = saved_answer(&answer);
-        let answer_file = save_answer(saved.contents, answer_file).await?;
-        let contract = contract_of(backend.as_ref(), &cancel).await?;
-        turn.report_relay(RelayEvent::Answered {
-            answer_chars: u32::try_from(saved.chars).unwrap_or(u32::MAX),
-            tool_steps: finished.tool_steps,
-            answer_file: answer_file.clone(),
-        })
-        .await;
-        Ok(RelayReport::new(contract, answer_file))
+        let FinalAnswer {
+            text,
+            tool_steps,
+            accesses,
+        } = finished;
+        let report = match outcome {
+            Ok(()) => {
+                let answered = Answered { text, tool_steps };
+                report_of(answered, backend.as_ref(), answer_file, &cancel, turn).await
+            }
+            Err(error) => Err(error.into()),
+        };
+        SubAgentRun { report, accesses }
     }
+}
+
+/// What a run that ended without an error streamed: its last step's text, `None` when
+/// it never finished, and how many tool-calling steps it took.
+struct Answered {
+    text: Option<String>,
+    tool_steps: u32,
+}
+
+/// Save the run's answer whole to the new file `answer_file`, ask `backend` for its
+/// contract, and tell `turn` the run answered.
+async fn report_of(
+    answered: Answered,
+    backend: &dyn LlmBackend,
+    answer_file: PathBuf,
+    cancel: &CancellationToken,
+    turn: &TurnContext,
+) -> Result<RelayReport, SubAgentError> {
+    let answer = answered.text.ok_or(SubAgentError::Cancelled)?;
+    let saved = saved_answer(&answer);
+    let answer_file = save_answer(saved.contents, answer_file).await?;
+    let contract = contract_of(backend, cancel).await?;
+    turn.report_relay(RelayEvent::Answered {
+        answer_chars: u32::try_from(saved.chars).unwrap_or(u32::MAX),
+        tool_steps: answered.tool_steps,
+        answer_file: answer_file.clone(),
+    })
+    .await;
+    Ok(RelayReport::new(contract, answer_file))
 }
 
 /// Write `contents` to the new owner-only file `path`, creating its directory,
@@ -171,12 +219,16 @@ async fn final_answer(mut rx: mpsc::Receiver<LlmEvent>, turn: &TurnContext) -> F
     let mut text = String::new();
     let mut done = false;
     let mut tool_steps = 0;
+    let mut accesses = Vec::new();
     let mut compacting_since = None;
-    while let Some(event) = rx.recv().await {
-        match &event {
+    while let Some(mut event) = rx.recv().await {
+        match &mut event {
             LlmEvent::StepStarted | LlmEvent::StepDiscarded => text.clear(),
             LlmEvent::Delta { text: delta } => text.push_str(delta),
             LlmEvent::ToolCallsRequested { .. } => tool_steps += 1,
+            LlmEvent::ToolResult {
+                accesses: touched, ..
+            } => accesses.append(touched),
             LlmEvent::Done => done = true,
             _ => {}
         }
@@ -187,6 +239,7 @@ async fn final_answer(mut rx: mpsc::Receiver<LlmEvent>, turn: &TurnContext) -> F
     FinalAnswer {
         text: done.then_some(text),
         tool_steps,
+        accesses,
     }
 }
 

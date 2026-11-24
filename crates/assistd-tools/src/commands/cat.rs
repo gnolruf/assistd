@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use crate::chain::OUTPUT_MAX;
 use crate::chain::Word;
 use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
-use crate::commands::{read_regular_file, read_regular_head};
+use crate::commands::{read_regular_file, read_regular_head, reads_of};
 use crate::policy::{ConfirmationGate, FileScope, ReadPolicy, SandboxInfo};
 
 /// `cat [-bn] [FILE]...`: concatenate files, or echo stdin if none are
@@ -86,10 +86,12 @@ impl Command for CatCommand {
                 .await?;
         }
         let mut out = Vec::new();
+        let mut read = Vec::new();
         for path in files {
             let chunk = if flags.metadata_only {
                 read_metadata(&input.scope, path).await?
             } else {
+                read.push(path.as_str());
                 read_text(&input.scope, path).await?
             };
             out.extend_from_slice(&chunk);
@@ -97,7 +99,8 @@ impl Command for CatCommand {
                 break;
             }
         }
-        Ok(CommandOutput::ok(number_if(out, &flags)))
+        let accesses = reads_of(&input.scope, read).await;
+        Ok(CommandOutput::ok(number_if(out, &flags)).touching(accesses))
     }
 }
 

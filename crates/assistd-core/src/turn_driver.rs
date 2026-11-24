@@ -9,10 +9,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use assistd_config::SynthesisConfig;
-use assistd_ipc::{Event, EventBody, EventKind, RelayEvent, ToolReport};
+use assistd_ipc::{Access, Event, EventBody, EventKind, RelayEvent, ToolReport};
 use assistd_llm::{CompactionCut, LlmEvent, ToolCall};
 use assistd_memory::{
-    PersistedMessage, PersistedRelayStep, PersistedToolCall, Reasoning, ToolOutcome, TurnStats,
+    PersistedMessage, PersistedToolCall, Reasoning, ToolOutcome, ToolTrace, TurnStats,
 };
 use assistd_utils::time::saturating_millis;
 use assistd_utils::token_counter::TokenCounter;
@@ -191,8 +191,9 @@ impl TurnTranslator {
                 name,
                 result,
                 read_host,
+                accesses,
             } => {
-                self.persist_tool_result(call_id, &name, &result, read_host)
+                self.persist_tool_result(call_id, &name, &result, read_host, accesses)
                     .await;
                 EventBody::ToolResult {
                     name,
@@ -275,6 +276,7 @@ impl TurnTranslator {
         name: &str,
         result: &ToolReport,
         read_host: bool,
+        accesses: Vec<Access>,
     ) {
         self.awaiting_tool_result = false;
         let outcome = ToolOutcome {
@@ -288,8 +290,11 @@ impl TurnTranslator {
             outcome,
             read_host,
         );
-        let relay_steps = self.relay.take().map(RelayTraceBuilder::finish);
-        self.persist_message(msg, relay_steps).await;
+        let trace = ToolTrace {
+            accesses,
+            relay_steps: self.relay.take().map_or_default(RelayTraceBuilder::finish),
+        };
+        self.persist_message(msg, Some(trace)).await;
     }
 
     /// Record `event` into the running relay's trace, starting one at its plan.
@@ -350,14 +355,10 @@ impl TurnTranslator {
         self.reasoning.take().map(ReasoningTrace::into_reasoning)
     }
 
-    async fn persist_message(
-        &self,
-        msg: PersistedMessage,
-        relay_steps: Option<Vec<PersistedRelayStep>>,
-    ) {
+    async fn persist_message(&self, msg: PersistedMessage, trace: Option<ToolTrace>) {
         if let Some(target) = &self.persist {
             self.transcript
-                .persist_message(target.clone(), msg, relay_steps)
+                .persist_message(target.clone(), msg, trace)
                 .await;
         }
     }

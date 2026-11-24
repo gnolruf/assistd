@@ -6,7 +6,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 
-use assistd_ipc::{Attachment, ToolAttachment, ToolReport, ToolStreams};
+use assistd_ipc::{Access, Attachment, ToolAttachment, ToolReport, ToolStreams};
 use assistd_utils::time::saturating_millis;
 
 /// What a tool call produced: the text the model reads plus the outcome
@@ -27,6 +27,8 @@ pub struct ToolOutput {
     pub attachments: Vec<Attachment>,
     /// A `run` chain's uncut streams, reported to clients only.
     pub streams: Option<RawStreams>,
+    /// What the call touched, stored beside its result; it may miss things.
+    pub accesses: Vec<Access>,
 }
 
 /// The stdout and stderr heads of a command chain, before footer and framing.

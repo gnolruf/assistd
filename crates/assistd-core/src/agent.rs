@@ -713,6 +713,7 @@ async fn send_tool_result(
             name: call.name.clone(),
             result: Box::new(result.report()),
             read_host,
+            accesses: result.accesses,
         })
         .await;
     payload

@@ -7,6 +7,7 @@ use assistd_ipc::PermissionMode;
 use assistd_memory::{
     ChunkLocator, ChunkSearch, ChunkSource, SearchHit, SearchRanking, SessionScope, SourcePointer,
 };
+use assistd_utils::text::flatten_line_breaks;
 use assistd_wm::FocusedWindowContext;
 
 use super::DispatchError;
@@ -250,20 +251,6 @@ fn sanitize_window_field(raw: &str) -> Option<String> {
     let flat = flatten_line_breaks(raw);
     let flat = flat.trim();
     (!flat.is_empty()).then(|| truncate_for_context(flat, MAX_WINDOW_FIELD_CHARS))
-}
-
-/// `raw` with every control character and Unicode line or paragraph
-/// separator replaced by a space, so it cannot start a new line.
-fn flatten_line_breaks(raw: &str) -> String {
-    raw.chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect()
 }
 
 /// Cut `text` to `max_chars` characters, marking a cut with `…`.

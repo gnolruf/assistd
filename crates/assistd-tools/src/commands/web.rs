@@ -12,7 +12,7 @@ use reqwest::redirect::{Attempt, Policy};
 use reqwest::{Response, Url};
 use url::Host;
 
-use assistd_ipc::ConfirmSource;
+use assistd_ipc::{Access, ConfirmSource};
 use assistd_search::SearxngClient;
 use assistd_utils::http::{BodyError, read_capped, remote_client_builder};
 use assistd_utils::net::{FilteredResolver, NonPublic, is_non_public, is_public};
@@ -527,6 +527,7 @@ async fn read_response(
             UNREACHABLE,
         ));
     }
+    let answered_from = response.url().clone();
     let html_page = match rendering {
         Rendering::Text(extent) => HtmlPage::of(&response, extent),
         Rendering::Raw => None,
@@ -543,10 +544,12 @@ async fn read_response(
                 "re-running or a different URL",
             ),
         })?;
-    Ok(CommandOutput::ok(match html_page {
+    let (text, title) = match html_page {
         Some(page) => on_blocking_pool(move || page.render(body)).await,
-        None => body,
-    }))
+        None => (body, None),
+    };
+    let fetched = Access::fetched(answered_from, title.as_deref());
+    Ok(CommandOutput::ok(text).touching([fetched]))
 }
 
 /// `url` with its `http` scheme swapped for `https`, keeping any explicit port.

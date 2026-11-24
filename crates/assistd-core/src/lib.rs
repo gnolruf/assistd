@@ -52,7 +52,7 @@ pub use state::{
     McpHost, McpLogin, McpServerStatus, McpService, MemoryStack, Query, Requester, StatusService,
     Subsystems, TurnOrigin, TurnService, VoiceService, branch_replay,
 };
-pub use subagent::{RelayReport, SubAgentError, SubAgentRunner};
+pub use subagent::{RelayReport, SubAgentError, SubAgentRun, SubAgentRunner};
 pub use tasks::{TaskError, TaskRunner, TaskService};
 pub use transcript::SessionContext;
 pub use vision::VisionRevalidator;

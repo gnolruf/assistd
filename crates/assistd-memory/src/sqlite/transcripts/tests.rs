@@ -534,7 +534,15 @@ async fn relay_trace_round_trips_follows_forks_and_goes_with_undo() {
     let result =
         PersistedMessage::tool_result("[error] relay: step 2", "c-1", "relay", outcome, true);
     let appended = store
-        .append_relay_result(branch, turn, result, relay_plan())
+        .append_tool_result(
+            branch,
+            turn,
+            result,
+            ToolTrace {
+                relay_steps: relay_plan(),
+                ..ToolTrace::default()
+            },
+        )
         .await
         .unwrap();
 
@@ -654,4 +662,73 @@ async fn a_message_whose_tool_calls_no_longer_decode_loads_without_them() {
         history[1].message,
         PersistedMessage::assistant_text("looking", None)
     );
+}
+
+/// Every `accesses` row as `(message, action, target, label)`, in the order stored.
+async fn stored_accesses(
+    store: &SqliteTranscriptStore,
+) -> Vec<(MessageId, i64, Vec<u8>, Option<String>)> {
+    store
+        .handle
+        .read("stored accesses", |c| {
+            c.prepare("SELECT message_id, action, target, label FROM accesses ORDER BY id")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect()
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn what_a_tool_call_touched_is_stored_with_its_result_until_no_branch_holds_it() {
+    let (store, _temp) = fresh_store().await;
+    let branch = store
+        .begin_session_with_main_branch(SessionId::new())
+        .await
+        .unwrap();
+    let turn = store
+        .begin_turn(
+            branch,
+            PersistedMessage::user("read the lease, then the page"),
+        )
+        .await
+        .unwrap()
+        .turn;
+    let outcome = ToolOutcome {
+        exit_code: 0,
+        duration_ms: 7,
+    };
+    let trace = ToolTrace {
+        accesses: vec![
+            Access::Read(PathBuf::from("/home/u/lease.pdf")),
+            Access::Fetched {
+                url: "https://example.com/tenancy".into(),
+                title: Some("Tenancy law".into()),
+            },
+        ],
+        relay_steps: Vec::new(),
+    };
+    let result = PersistedMessage::tool_result("both read", "c-1", "run", outcome, true);
+    let appended = store
+        .append_tool_result(branch, turn, result, trace)
+        .await
+        .unwrap();
+
+    let stored = [
+        (appended.id, 0, b"/home/u/lease.pdf".to_vec(), None),
+        (
+            appended.id,
+            2,
+            b"https://example.com/tenancy".to_vec(),
+            Some("Tenancy law".to_string()),
+        ),
+    ];
+    assert_eq!(stored_accesses(&store).await, stored);
+
+    let fork = store.fork_and_switch(branch, "fork").await.unwrap();
+    store.undo_last_turn(branch).await.unwrap();
+    assert_eq!(stored_accesses(&store).await, stored, "the fork holds it");
+
+    store.undo_last_turn(fork).await.unwrap();
+    assert!(stored_accesses(&store).await.is_empty());
 }

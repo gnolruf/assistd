@@ -1,15 +1,16 @@
 //! Built-in commands dispatched by the chain executor.
 
 use std::io::{self, ErrorKind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use assistd_ipc::Access;
 use assistd_utils::text::human_size;
 use tokio::io::AsyncReadExt;
 
 use crate::chain::OUTPUT_MAX;
 use crate::command::CommandRegistry;
-use crate::policy::{ConfirmationGate, FileScope, SandboxInfo};
+use crate::policy::{ConfirmationGate, FileScope, SandboxInfo, on_blocking_pool};
 
 pub mod bash;
 pub mod cat;
@@ -90,6 +91,27 @@ pub(crate) async fn read_regular_head(
     let mut head = Vec::new();
     file.take(limit).read_to_end(&mut head).await?;
     Ok((head, size))
+}
+
+/// An [`Access::Read`] of each of `paths`, made absolute as `scope` opens it; one that
+/// cannot be made absolute is left out.
+pub(crate) async fn reads_of<P: AsRef<Path>>(
+    scope: &FileScope,
+    paths: impl IntoIterator<Item = P>,
+) -> Vec<Access> {
+    let scope = scope.clone();
+    let paths: Vec<PathBuf> = paths
+        .into_iter()
+        .map(|path| path.as_ref().to_path_buf())
+        .collect();
+    on_blocking_pool(move || {
+        paths
+            .iter()
+            .filter_map(|path| scope.absolute(path).ok())
+            .map(|absolute| Access::Read(absolute.components().collect()))
+            .collect()
+    })
+    .await
 }
 
 /// Open `path` with its size on the blocking pool, refusing devices, FIFOs

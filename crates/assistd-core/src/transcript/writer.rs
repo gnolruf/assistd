@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use assistd_llm::CompactionCut;
 use assistd_memory::{
-    BranchId, BranchSummary, HistoryScope, MemoryError, PersistedMessage, PersistedRelayStep,
+    BranchId, BranchSummary, HistoryScope, MemoryError, PersistedMessage, ToolTrace,
     TranscriptStore, TurnId, TurnStats,
 };
 
@@ -44,11 +44,11 @@ pub(super) enum WriteCommand {
         target: PersistTarget,
         prompt: PersistedMessage,
     },
-    /// Append `msg` to the target's turn, with the sub-agent steps behind a `relay` result.
+    /// Append `msg` to the target's turn, with the trace its call left when it is a tool result.
     Message {
         target: PersistTarget,
         msg: PersistedMessage,
-        relay_steps: Option<Vec<PersistedRelayStep>>,
+        trace: Option<ToolTrace>,
     },
     TurnStats {
         target: PersistTarget,
@@ -86,11 +86,9 @@ impl TranscriptWriter {
         while let Some(command) = commands.recv().await {
             match command {
                 WriteCommand::OpenTurn { target, prompt } => self.open_turn(&target, prompt).await,
-                WriteCommand::Message {
-                    target,
-                    msg,
-                    relay_steps,
-                } => self.append_message(&target, msg, relay_steps).await,
+                WriteCommand::Message { target, msg, trace } => {
+                    self.append_message(&target, msg, trace).await;
+                }
                 WriteCommand::TurnStats { target, stats } => {
                     self.record_turn_stats(&target, stats).await;
                 }
@@ -158,7 +156,7 @@ impl TranscriptWriter {
         &mut self,
         target: &PersistTarget,
         msg: PersistedMessage,
-        relay_steps: Option<Vec<PersistedRelayStep>>,
+        trace: Option<ToolTrace>,
     ) {
         let role = RowRole::of(&msg);
         let Some(&turn) = target.turn.get() else {
@@ -171,10 +169,10 @@ impl TranscriptWriter {
             );
             return;
         };
-        let appended = match relay_steps {
-            Some(steps) => {
+        let appended = match trace {
+            Some(trace) => {
                 self.transcripts
-                    .append_relay_result(target.branch, turn, msg, steps)
+                    .append_tool_result(target.branch, turn, msg, trace)
                     .await
             }
             None => {

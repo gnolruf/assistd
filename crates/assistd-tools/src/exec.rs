@@ -228,7 +228,7 @@ pub(crate) async fn supervise(
                 stdout,
                 stderr: merged_stderr,
                 exit_code: OUTPUT_OVERFLOW_EXIT,
-                attachments: Vec::new(),
+                ..CommandOutput::default()
             }
         }
     })
@@ -239,7 +239,7 @@ fn exited(stdout: Vec<u8>, stderr: Vec<u8>, status: ExitStatus) -> CommandOutput
         stdout,
         stderr,
         exit_code: exit_code(status),
-        attachments: Vec::new(),
+        ..CommandOutput::default()
     }
 }
 
