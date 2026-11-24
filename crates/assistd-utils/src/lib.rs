@@ -1,4 +1,4 @@
-//! Helpers shared across the workspace: backoff and restarts, the loop that drains stored backlogs, path, file, HTTP, text, binary sniffing,
+//! Helpers shared across the workspace: backoff and restarts, the loop that drains stored backlogs, child environments, path, file, HTTP, text, binary sniffing,
 //! terminal-escaping and duration utilities, token counting, Hugging Face file IDs, readiness, and child-server and
 //! pipe-worker supervision.
 
@@ -6,6 +6,7 @@ pub mod backlog;
 pub mod backoff;
 pub mod binary;
 pub mod child_server;
+pub mod env;
 pub mod fs;
 pub mod hf;
 pub mod http;

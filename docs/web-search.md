@@ -70,8 +70,10 @@ The [sample config](../config/config.sample.toml) lists every
 The daemon writes its own `settings.yml` under
 `$XDG_RUNTIME_DIR/assistd/searxng/` at each launch and runs SearXNG on
 `127.0.0.1:8387` with a fresh secret. It ignores
-`/etc/searxng/settings.yml`, any `SEARXNG_*` variables in your
-environment, and the `searxng.service` unit some packages install.
+`/etc/searxng/settings.yml` and the `searxng.service` unit some
+packages install. Of your environment it gets only `HOME`, `PATH`,
+`SHELL`, `TMPDIR` and the locale and terminal variables: no
+`SEARXNG_*` settings, tokens, agent sockets or proxy variables.
 You don't need to enable that service, and running it doesn't affect
 the daemon's instance unless it is set to the same port.
 

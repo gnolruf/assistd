@@ -1,6 +1,6 @@
 //! How the SearXNG instance is launched.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
@@ -8,16 +8,19 @@ use std::time::Duration;
 
 use assistd_config::SearchConfig;
 use assistd_utils::child_server::{ChildServerSpec, random_secret};
+use assistd_utils::env::inherited_env;
 use tokio::process::Command;
 
 use crate::error::SearchServerError;
 use crate::settings::SettingsFile;
 
-const SEARXNG_ENV_PREFIX: &[u8] = b"SEARXNG_";
+/// What SearXNG inherits beyond the locale and terminal variables: where its
+/// interpreter, caches and temporary files are found.
+const HOST_VARS: &[&str] = &["HOME", "PATH", "SHELL", "TMPDIR"];
 
 /// Launch parameters for the supervised SearXNG instance. Its settings come
-/// only from the file and variables the daemon sets, never from the
-/// daemon's own `SEARXNG_*` environment. `Debug` omits the secret.
+/// only from the file and variables the daemon sets, and it inherits none of
+/// the daemon's credentials, sockets or proxies. `Debug` omits the secret.
 pub struct SearxngServerSpec {
     cfg: SearchConfig,
     settings: SettingsFile,
@@ -36,14 +39,14 @@ impl SearxngServerSpec {
         })
     }
 
-    fn set_managed_env(&self, cmd: &mut Command, inherited: impl IntoIterator<Item = OsString>) {
-        for name in inherited
-            .into_iter()
-            .filter(|name| is_searxng_setting(name))
-        {
-            cmd.env_remove(name);
-        }
-        cmd.env("SEARXNG_SETTINGS_PATH", self.settings.path())
+    fn set_env(
+        &self,
+        cmd: &mut Command,
+        daemon_env: impl IntoIterator<Item = (OsString, OsString)>,
+    ) {
+        cmd.env_clear()
+            .envs(inherited_env(daemon_env, HOST_VARS))
+            .env("SEARXNG_SETTINGS_PATH", self.settings.path())
             .env(
                 "SEARXNG_BIND_ADDRESS",
                 self.cfg.listen_addr().ip().to_string(),
@@ -74,7 +77,7 @@ impl ChildServerSpec for SearxngServerSpec {
     fn command(&self) -> Command {
         let mut cmd = Command::new(self.cfg.command.program());
         cmd.args(self.cfg.command.args());
-        self.set_managed_env(&mut cmd, std::env::vars_os().map(|(name, _)| name));
+        self.set_env(&mut cmd, std::env::vars_os());
         cmd
     }
 
@@ -91,13 +94,10 @@ impl ChildServerSpec for SearxngServerSpec {
     }
 }
 
-fn is_searxng_setting(name: &OsStr) -> bool {
-    name.as_encoded_bytes().starts_with(SEARXNG_ENV_PREFIX)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::ffi::OsStr;
 
     use super::*;
 
@@ -112,11 +112,20 @@ mod tests {
     }
 
     #[test]
-    fn only_the_daemons_searxng_settings_reach_the_child() {
+    fn the_child_gets_only_host_variables_and_the_managed_settings() {
         let mut cmd = Command::new("searxng-run");
-        let inherited = ["SEARXNG_LIMITER", "PATH", "SEARXNG_PORT", "SEARXNG_SECRET"];
+        let daemon_env = [
+            ("SEARXNG_LIMITER", "true"),
+            ("SEARXNG_PORT", "1"),
+            ("PATH", "/usr/bin"),
+            ("LANG", "C.UTF-8"),
+            ("GITHUB_TOKEN", "secret"),
+            ("SSH_AUTH_SOCK", "/tmp/ssh-x/agent.1"),
+            ("HTTPS_PROXY", "http://proxy:3128"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
         let spec = spec();
-        spec.set_managed_env(&mut cmd, inherited.map(OsString::from));
+        spec.set_env(&mut cmd, daemon_env);
         let env: BTreeMap<_, _> = cmd
             .as_std()
             .get_envs()
@@ -126,8 +135,9 @@ mod tests {
         assert_eq!(
             env,
             BTreeMap::from([
+                ("LANG".into(), set("C.UTF-8")),
+                ("PATH".into(), set("/usr/bin")),
                 ("SEARXNG_BIND_ADDRESS".into(), set("127.0.0.1")),
-                ("SEARXNG_LIMITER".into(), None),
                 ("SEARXNG_PORT".into(), set("8387")),
                 ("SEARXNG_SECRET".into(), set("s3cret")),
                 (
