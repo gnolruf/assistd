@@ -66,10 +66,10 @@ flowchart TB
 | `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, admission (the queue that grants every model lane, and the permits for background work), presence machine with the policy task that drives it from idle time and GPU contention, listen dispatcher, socket server, document index passes and the watches between them, page transcription while drowsy, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-documents` | Document text extraction (text, HTML, PDF, office files, e-books) and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
 | `assistd-embed`  | Embedding HTTP client + the worker that drains the semantic store's rows without a vector, as four backlogs; launch spec for its llama-server. | `config`, `memory`, `utils`                                                      |
-| `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; `Access`, what a tool call reports it touched; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
+| `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`, `SearchKind`, `SearchPlace`); the in-memory image `Attachment`, its format check and capped file loader; `Access`, what a tool call reports it touched; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec and presets file + control plane + `PageTranscriber` for the OCR model. | `config`, `ipc`, `utils`                                                         |
 | `assistd-mcp`    | Stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools.  | `config`, `ipc`, `tools`, `utils`                                                |
-| `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `TaskStore` in `memory.db`, `SemanticStore` in the rebuildable `index.db` and `vectors.db`. | `ipc`, `utils`                                                                   |
+| `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `TaskStore` in `memory.db`, `SemanticStore` with its one search in the rebuildable `index.db` and `vectors.db`, and the `MessageChunker` backlog. | `ipc`, `utils`                                                                   |
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, the `backlog` loop that drains stored rows lacking their result, tilde expansion, `human_size`, Hugging Face file IDs, binary-content sniffing, non-blocking regular-file open, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the chat-template token list and its neutraliser for text and JSON, terminal-safe escaping of daemon-supplied text, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, the `ChildServer` supervisor, and the `pipe_worker` supervisor and pending-reply map the extraction and voice workers run under. | none                                                                             |
@@ -85,7 +85,7 @@ and `core` supplies the model behind the tools' safety judge.
 
 The same binary also ships several client subcommands that speak the
 Unix-socket IPC: `chat`, `sleep` / `wake` / `drowse`,
-`ptt-start` / `ptt-stop`, `listen-*`, `voice-*`, `memory`, `documents`, and `tray`. The tray subcommand is a long-lived
+`ptt-start` / `ptt-stop`, `listen-*`, `voice-*`, `search`, `memory`, `documents`, and `tray`. The tray subcommand is a long-lived
 [StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/)
 client (via the [`ksni`](https://crates.io/crates/ksni) crate): it
 holds a passive `RequestBody::Subscribe` connection, translates the
@@ -479,7 +479,7 @@ input named by the input's own path. A `bash` script, an MCP tool, `ls`, `wm`,
 `screenshot` and the searches report nothing: a script's reads are not known,
 and a list of results is not a visit. The list is saved with the tool result
 in `accesses` (see [database.md](database.md)), and `search` finds the files
-and pages in it ([how](database.md#search)). It is not the record of
+and pages in it ([how](search.md#how-hits-are-ranked)). It is not the record of
 whether a history has read this machine, which must err towards yes while
 this list may miss things; neither is derived from the other.
 
@@ -1034,11 +1034,14 @@ Saved memories recalled into a new session's first turn sit in its context
 block under a header that labels them untrusted data, not instructions. A
 save is not gated: its tool result repeats the key and value, so the chat
 shows what was kept, and `assistd memory` lists and removes memories.
-Saving through the `remember` tool inserts the K/V row with one chunk
-over its whole value, and each user
-or assistant message is chunked in the transaction that saves it. With
-`embedding.enabled = false` no message chunks are cut; the next start with
-embedding on cuts them for the messages stored meanwhile. Embedding
+Saving through the `remember` tool inserts the K/V row, and once that
+has committed the memory's one chunk is cut over its whole value. A
+message is saved without chunks: the message chunker, a
+[backlog](#backlogs) woken by each save, cuts every user and assistant
+message above the highest one it has cut, and one chunk for each file
+or page a tool result's accesses name. With
+`embedding.enabled = false` the chunker does not run; the next start with
+embedding on cuts the messages stored meanwhile. Embedding
 is a [backlog](#backlogs): a chunk is pending while its text has no row in the
 vector table of its kind, which holds one vector for each distinct
 text under the hash of that text. The store signals after each committed
@@ -1078,8 +1081,9 @@ document chunks.
 Every vector is quantised to a byte per dimension. Every chunk also has its
 words in one full-text index. All of these are one search in the store,
 which is told the kinds to search and whether to rank by keyword as well
-([how](database.md#search)); `search` asks for
-the keyword half.
+([how](search.md#how-hits-are-ranked)); `search` asks for
+the keyword half. [search.md](search.md) covers the commands, what a hit
+shows and what is kept of the web.
 Like model requests,
 embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
@@ -1331,7 +1335,7 @@ registers behind `run`: `search`, with `documents.enabled` or
 then gains one line saying what `search` covers. `search [-n N] [--in <kinds>]
 <query>` embeds the query and ranks past sessions, saved memories,
 documents and the files and pages past sessions read, wrote or fetched in one list, both by vector and by the query's words, fusing the two
-rankings ([how](database.md#search)), so an identifier, an error message, a
+rankings ([how](search.md#how-hits-are-ranked)), so an identifier, an error message, a
 name or a number is found as written. `--in` holds it to the kinds named,
 `sessions`, `memories`, `documents` or `accesses` (searched with
 `memory.enabled`); a kind whose setting is off is left out
@@ -1732,7 +1736,15 @@ current task queue, presence, listen phase and capture state and is sent
 every presence change after, so the chat's indicators follow the daemon
 without polling it.
 
-## Data flow: a file into the index
+## Data flow: from a write to a search hit
+
+Three kinds of text reach `search` by three routes: a file in an
+indexed folder, a message, and a page a tool call fetched. Each is
+written to one file first, cut into chunks in `index.db`, and given a
+vector in `vectors.db` ([database.md](database.md) has the tables,
+[search.md](search.md) the search).
+
+### A document
 
 A walk through `~/papers/lease.pdf`, saved into a folder that
 `documents.roots` lists, until the model quotes it. The
@@ -1784,7 +1796,71 @@ A walk through `~/papers/lease.pdf`, saved into a folder that
    In a later turn the model calls `run` with
    `search lease renewal terms`. `SearchCommand` embeds the query,
    and the store ranks the documents, with the sessions and memories, by vector and by keyword and fuses
-   the two ([how](database.md#search)). The hit names the
+   the two ([how](search.md#how-hits-are-ranked)). The hit names the
    file, page and byte range; `docs read` prints the stored text from
    there. Both print under a header marking the text as untrusted, and
    both mark the turn as having read this machine.
+
+### A message
+
+A walk through the reply "the renewal clause gives sixty days", from
+the turn that produced it to a later session that asks about it.
+
+1. **Save** ([`crates/assistd-core/src/turn_driver.rs`](../crates/assistd-core/src/turn_driver.rs)).
+   The `TurnDriver` saves each message of the turn to `memory.db` as
+   the agent produces it, whatever `memory.enabled` says. No chunk is
+   written with it. The committed write wakes the message chunker.
+
+2. **Chunk** ([`crates/assistd-memory/src/sqlite/message_chunker.rs`](../crates/assistd-memory/src/sqlite/message_chunker.rs)).
+   The chunker is a [backlog](#backlogs): the messages above the
+   highest id it has cut. It cuts the reply into overlapping windows in
+   `index.db`, adds their words to the keyword index and moves its
+   mark. From here a search finds the reply by its exact words.
+
+3. **Embed** ([`crates/assistd-embed/src/embedder_task.rs`](../crates/assistd-embed/src/embedder_task.rs)).
+   The write wakes the embedding worker, which embeds message chunks
+   ahead of the rest and waits for no permit. The vector goes into
+   `message_vectors` under the hash of the chunk's text, once however
+   many messages hold that text.
+
+4. **Search.** In another session the model runs
+   `search lease renewal`. The store reaches each message vector
+   through its chunk, which drops the messages still in the model's
+   context, and ranks what is left with the other kinds. The hit names
+   the session by a short id, and `search --session <id> renewal`
+   prints the reply between the messages around it.
+
+5. **Undo.** Undoing the turn deletes its messages from `memory.db`.
+   Their chunks are then removed from `index.db`, and the same write
+   deletes each vector whose text no other message chunk holds.
+
+### A fetched page
+
+A walk through `web fetch https://example.org/renewal`, the "link" a
+session leaves behind. The page's text is not stored for search
+([what is kept of the web](search.md#what-is-kept-of-the-web)).
+
+1. **Report** ([`crates/assistd-tools/src/commands/web.rs`](../crates/assistd-tools/src/commands/web.rs)).
+   `web fetch` returns the page as text and, beside it, an
+   `Access::Fetched` holding the URL that answered after redirects and
+   the page's title. `run` joins the accesses of a chain's commands
+   into the tool result.
+
+2. **Save.** The `TurnDriver` writes the tool result and its rows of
+   `accesses` to `memory.db` in one transaction, so a fork shares them
+   and an undo deletes them together.
+
+3. **Chunk.** The message chunker, reaching the tool result, cuts one
+   chunk for each access to a file or a page: the title on a line of
+   its own, then the URL. The result's own content is not cut. An
+   access to a session or a memory gets no chunk.
+
+4. **Embed.** The worker embeds access chunks after message and memory
+   chunks and before any document, into `access_vectors`.
+
+5. **Search.** `search tenancy renewal rules` finds the page by the
+   words or the meaning of its title and address. The hit is an
+   `access` line naming the session that fetched it and when. A page
+   fetched in several sessions is one hit with the count of the others.
+   A file a session read with `cat` or wrote with `write` takes the
+   same route under its absolute path.

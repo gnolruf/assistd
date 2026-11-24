@@ -25,9 +25,10 @@ window-manager bindings), and integrates with the running compositor for context
   `docs` reads what it finds: text, HTML, PDFs, office files and e-books. Scanned
   PDF pages are read by an optional OCR model (`[documents.ocr]`) while
   the daemon is drowsy ([document search](docs/documents.md)).
-  That one `search` also covers saved memories and the transcripts of
-  earlier sessions, in one ranking. Alongside `run`, `remember` saves
-  facts.
+  That one `search` also covers saved memories, the messages of
+  earlier sessions and the files and web pages those sessions touched,
+  in one ranking ([search](docs/search.md)). Alongside `run`,
+  `remember` saves facts.
 - **Voice in/out.** Push-to-talk and hands-free
   [wake-word listening](docs/voice/wake-word.md) via Parakeet speech-to-text,
   with the wake phrase found by a keyword spotter and tested in the chat
@@ -48,8 +49,12 @@ window-manager bindings), and integrates with the running compositor for context
   VRAM; with `[sleep] gpu_auto_wake` it wakes once that process exits.
 - **Compositor-aware.** Native i3 and Sway backends; active-window
   context can be injected automatically into every turn.
-- **Persistent memory.** SQLite-backed conversation history plus
-  semantic search over past chunks for cross-session recall.
+- **Persistent memory.** Sessions, saved memories and tasks are kept
+  in SQLite, with branching and undo. A new session is given the
+  memories and past sessions nearest its first prompt, and `search`
+  finds the rest. The search index and its vectors sit in two files of
+  their own that the daemon rebuilds when they are lost
+  ([database](docs/database.md)).
 
 ### Prerequisites
 
@@ -190,7 +195,7 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | `assistd listen-toggle`  | Toggle [wake-word listening](docs/voice/wake-word.md).        |
 | `assistd voice-toggle`   | Toggle TTS playback.                                          |
 | `assistd voice-skip`     | Abort the current spoken response.                            |
-| `assistd search …`       | Search past sessions, the files and pages they touched, saved memories and indexed documents at once; `--in` names the kinds. |
+| `assistd search …`       | [Search](docs/search.md) past sessions, the files and pages they touched, saved memories and indexed documents at once; `--in` names the kinds. |
 | `assistd memory …`       | Inspect or mutate persistent memory; see `memory --help`.     |
 | `assistd documents …`    | [Document search](docs/documents.md): show what is indexed (`status`), walk the indexed folders now (`reindex`), or `search` them. |
 | `assistd tray`           | System tray icon and desktop notifications.                   |
