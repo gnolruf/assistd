@@ -69,8 +69,13 @@ pub(super) fn init(
         gate.clone(),
         Arc::new(assistd_core::mcp_tool_approvals(config_path)?),
     );
-    let (mcp_servers, mcp_fleet) =
-        mcp_init::prepare(config, mcp_approvals.clone(), deps.vision_gate.clone());
+    let (mcp_servers, mcp_fleet) = mcp_init::prepare(
+        config,
+        config_path,
+        &sandbox,
+        mcp_approvals.clone(),
+        deps.vision_gate.clone(),
+    );
     let overflow_dir = config.tools.output.resolved_overflow_dir()?;
     let built = assistd_core::build_tools(BuildToolsDeps {
         config,

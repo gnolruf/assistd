@@ -49,8 +49,9 @@ pub use sandbox::inert_sandbox;
 pub(crate) use sandbox::{ConfinedSpawner, Guarded, InputBind, is_within_visible_home_entry};
 pub use sandbox::{
     HomeAccess, Protected, ReaderProgram, ReaderSandbox, ReaderSandboxError, SCRATCH_MARKER,
-    SandboxError, SandboxInfo, SandboxPrograms, SandboxRequest, SandboxedCommand, ScopeError,
-    ScratchCap, SharedDirs, ToolSandbox, ToolsDisabled, probe_sandbox,
+    SandboxError, SandboxInfo, SandboxPrograms, SandboxRequest, SandboxedCommand, SandboxedServer,
+    ScopeError, ScratchCap, ServerSandbox, ServerSandboxError, SharedDirs, ToolSandbox,
+    ToolsDisabled, probe_sandbox,
 };
 
 /// Policy for the commands that spawn subprocesses: read-only scripts run unasked with `$HOME`

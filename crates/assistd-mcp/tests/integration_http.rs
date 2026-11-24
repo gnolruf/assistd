@@ -100,7 +100,7 @@ async fn serve_echo(json_response: bool) -> (Url, AbortOnDropHandle<()>) {
 async fn start(url: Url) -> Result<McpServer, McpError> {
     McpServer::start(
         "remote".into(),
-        Connector::Http(HttpConfig::new("remote", url)),
+        Connector::Http(Box::new(HttpConfig::new("remote", url))),
     )
     .await
 }
@@ -343,7 +343,7 @@ fn oauth_config(client_id: &str, tokens: &Path) -> OAuthConfig {
 async fn start_oauth(url: Url, client_id: &str, tokens: &Path) -> Result<McpServer, McpError> {
     let mut http = HttpConfig::new("remote", url);
     http.auth = HttpAuth::OAuth(oauth_config(client_id, tokens));
-    McpServer::start("remote".into(), Connector::Http(http)).await
+    McpServer::start("remote".into(), Connector::Http(Box::new(http))).await
 }
 
 /// The `redirect_uri` and `state` an authorization URL carries.

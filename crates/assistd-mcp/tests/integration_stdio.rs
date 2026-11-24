@@ -3,34 +3,54 @@
 
 #![cfg(feature = "test-support")]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_mcp::{
-    Connector, Definition, LaunchTarget, McpClient, McpError, McpServer, StdioConfig,
-    adapt_client_as_tools, launch,
+    Connector, Definition, LaunchTarget, McpClient, McpError, McpServer, ServerSpawner,
+    StdioConfig, adapt_client_as_tools, launch,
 };
 use assistd_tools::test_support::{AlwaysAllowGate, DenyAllGate};
 use assistd_tools::{
-    PinnedApprovalGate, PinnedApprovals, Tool, ToolCatalog, ToolRegistry, TurnContext, VisionGate,
+    PinnedApprovalGate, PinnedApprovals, ServerSandboxError, Tool, ToolCatalog, ToolRegistry,
+    TurnContext, VisionGate,
 };
 use assistd_utils::backoff::MIN_HEALTHY_SECONDS;
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
+use tokio::process::Command;
 
 fn fake_server_path() -> String {
     env!("CARGO_BIN_EXE_fake_mcp_server").to_string()
 }
 
-fn make_stdio_config(label: &str) -> StdioConfig {
-    let mut cfg = StdioConfig::new(label, fake_server_path());
+/// A config that starts the fake server, with `env` set, outside any sandbox.
+fn fake_config(env: &[(&str, &Path)]) -> StdioConfig {
+    let env: Vec<(String, PathBuf)> = env
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), value.to_path_buf()))
+        .collect();
+    let spawner: ServerSpawner = Arc::new(move || {
+        let spawned = Command::new(fake_server_path())
+            .envs(env.iter().map(|(name, value)| (name, value)))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .process_group(0)
+            .spawn()
+            .map_err(ServerSandboxError::Spawn);
+        Box::pin(async move { spawned })
+    });
+    let mut cfg = StdioConfig::new("fake", spawner);
     cfg.request_timeout = Duration::from_secs(5);
     cfg
 }
 
 async fn start_fake() -> Arc<McpServer> {
-    let server = McpServer::start("fake".into(), Connector::Stdio(make_stdio_config("fake")))
+    let server = McpServer::start("fake".into(), Connector::Stdio(fake_config(&[])))
         .await
         .expect("server should start");
     Arc::new(server)
@@ -204,7 +224,7 @@ async fn first_call_after_a_healthy_server_exits_restarts_it() {
 
 #[tokio::test]
 async fn unanswered_call_times_out_and_the_server_keeps_answering() {
-    let mut cfg = StdioConfig::new("fake", fake_server_path());
+    let mut cfg = fake_config(&[]);
     cfg.request_timeout = Duration::from_millis(300);
     let server = McpServer::start("fake".into(), Connector::Stdio(cfg))
         .await
@@ -229,7 +249,7 @@ async fn unanswered_call_times_out_and_the_server_keeps_answering() {
 
 #[tokio::test]
 async fn server_that_stops_answering_is_killed_and_restarted() {
-    let mut cfg = StdioConfig::new("fake", fake_server_path());
+    let mut cfg = fake_config(&[]);
     cfg.request_timeout = Duration::from_millis(300);
     let server = Arc::new(
         McpServer::start("fake".into(), Connector::Stdio(cfg))
@@ -260,12 +280,8 @@ async fn server_that_stops_answering_is_killed_and_restarted() {
 async fn shutdown_abandons_a_restart_stuck_in_its_handshake() {
     let pid_dir = tempfile::tempdir().unwrap();
     let pid_file = pid_dir.path().join("restarted.pid");
-    let mut cfg = make_stdio_config("fake");
+    let mut cfg = fake_config(&[("FAKE_MCP_STALL_RESTART_PID_FILE", &pid_file)]);
     cfg.request_timeout = Duration::from_secs(60);
-    cfg.env.insert(
-        "FAKE_MCP_STALL_RESTART_PID_FILE".into(),
-        pid_file.to_string_lossy().into_owned(),
-    );
     let server = McpServer::start("fake".into(), Connector::Stdio(cfg))
         .await
         .expect("server should start");
@@ -299,15 +315,8 @@ async fn shutdown_abandons_a_restart_stuck_in_its_handshake() {
 #[tokio::test]
 async fn tool_redefined_across_a_restart_asks_despite_its_approval() {
     let marker_dir = tempfile::tempdir().expect("tempdir");
-    let mut cfg = make_stdio_config("fake");
-    cfg.env.insert(
-        "FAKE_MCP_REDEFINE_ECHO_MARKER".into(),
-        marker_dir
-            .path()
-            .join("listed")
-            .to_string_lossy()
-            .into_owned(),
-    );
+    let marker = marker_dir.path().join("listed");
+    let cfg = fake_config(&[("FAKE_MCP_REDEFINE_ECHO_MARKER", &marker)]);
     let server = Arc::new(
         McpServer::start("fake".into(), Connector::Stdio(cfg))
             .await
@@ -406,11 +415,7 @@ async fn crashed_server_takes_its_process_group_with_it() {
 async fn failed_initialize_kills_the_process_group() {
     let pid_dir = tempfile::tempdir().unwrap();
     let pid_file = pid_dir.path().join("orphan.pid");
-    let mut cfg = make_stdio_config("fake");
-    cfg.env.insert(
-        "FAKE_MCP_FAIL_INIT_WITH_ORPHAN_PID_FILE".into(),
-        pid_file.to_string_lossy().into_owned(),
-    );
+    let cfg = fake_config(&[("FAKE_MCP_FAIL_INIT_WITH_ORPHAN_PID_FILE", &pid_file)]);
 
     let err = McpServer::start("fake".into(), Connector::Stdio(cfg))
         .await
@@ -427,15 +432,8 @@ async fn failed_initialize_kills_the_process_group() {
 #[tokio::test]
 async fn server_refused_at_first_start_offers_its_tools_after_a_retry() {
     let marker_dir = tempfile::tempdir().unwrap();
-    let mut cfg = make_stdio_config("fake");
-    cfg.env.insert(
-        "FAKE_MCP_FAIL_FIRST_INIT_MARKER".into(),
-        marker_dir
-            .path()
-            .join("refused")
-            .to_string_lossy()
-            .into_owned(),
-    );
+    let marker = marker_dir.path().join("refused");
+    let cfg = fake_config(&[("FAKE_MCP_FAIL_FIRST_INIT_MARKER", &marker)]);
     let target = LaunchTarget {
         catalog: Arc::new(ToolCatalog::new(Arc::new(ToolRegistry::new()))),
         approvals: PinnedApprovalGate::new(
@@ -469,30 +467,5 @@ async fn server_refused_at_first_start_offers_its_tools_after_a_retry() {
         .await
         .unwrap();
     assert_eq!(result.output, "echo:hi");
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn server_sees_only_inherited_and_configured_environment() {
-    assert!(
-        std::env::var_os("CARGO_MANIFEST_DIR").is_some(),
-        "cargo sets CARGO_MANIFEST_DIR for test processes"
-    );
-    let mut cfg = make_stdio_config("fake");
-    cfg.env.insert("CONFIGURED_TOKEN".into(), "secret".into());
-    let server = McpServer::start("fake".into(), Connector::Stdio(cfg))
-        .await
-        .expect("server should start");
-
-    let result = server
-        .invoke("env_names", json!({}), Definition::AsListed)
-        .await
-        .unwrap();
-    let listing = first_text(&result).expect("a text listing");
-    let names: Vec<&str> = listing.lines().collect();
-    assert!(names.contains(&"PATH"), "{names:?}");
-    assert!(names.contains(&"CONFIGURED_TOKEN"), "{names:?}");
-    assert!(!names.contains(&"CARGO_MANIFEST_DIR"), "{names:?}");
-
     server.shutdown().await;
 }

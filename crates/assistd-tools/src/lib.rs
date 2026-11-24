@@ -41,9 +41,10 @@ pub use policy::{
     IpcConfirmationGate, JUDGE_TIMEOUT, JudgeContext, JudgeModel, JudgedClass, JudgedCommand,
     NoPendingConfirm, NoPendingReview, PinnedApprovalGate, PinnedApprovals, PromptParking,
     Protected, ReaderProgram, ReaderSandbox, ReaderSandboxError, Risk, SCRATCH_MARKER, SafetyJudge,
-    SandboxError, SandboxInfo, SandboxPrograms, SandboxRequest, SandboxedCommand, ScopeError,
-    ScratchCap, SearchPath, SharedDirs, SpokenAnswer, Standing, StandingApprovals, Summary,
-    ToolSandbox, ToolsDisabled, Unattended, Verdict, VoiceGate, probe_sandbox,
+    SandboxError, SandboxInfo, SandboxPrograms, SandboxRequest, SandboxedCommand, SandboxedServer,
+    ScopeError, ScratchCap, SearchPath, ServerSandbox, ServerSandboxError, SharedDirs,
+    SpokenAnswer, Standing, StandingApprovals, Summary, ToolSandbox, ToolsDisabled, Unattended,
+    Verdict, VoiceGate, probe_sandbox,
 };
 pub use presentation::{OutputCap, PresentSpec};
 pub use quarantine::{Egress, Quarantine, QuarantineError};

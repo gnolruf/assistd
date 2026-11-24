@@ -1,8 +1,8 @@
 //! MCP errors and their rendering as model-facing tool error lines.
 
-use std::io::ErrorKind;
 use std::time::Duration;
 
+use assistd_tools::ServerSandboxError;
 use rmcp::service::{ClientInitializeError, ServiceError};
 use thiserror::Error;
 
@@ -12,12 +12,8 @@ use crate::streamable::transport_failure;
 /// renders each variant for the model.
 #[derive(Debug, Error)]
 pub enum McpError {
-    #[error("failed to spawn MCP server `{path}`: {source}")]
-    Spawn {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
+    #[error("failed to start the MCP server: {0}")]
+    Sandbox(#[from] ServerSandboxError),
 
     #[error("MCP initialize failed: {0}")]
     Initialize(#[source] Box<ClientInitializeError>),
@@ -76,16 +72,11 @@ pub enum McpError {
 }
 
 impl McpError {
-    /// Whether starting the server again unchanged would fail the same way: its command is
-    /// missing or cannot be executed, or it refuses the configured credentials.
+    /// Whether starting the server again unchanged would fail the same way: its sandbox
+    /// cannot be laid out as configured, or it refuses the configured credentials.
     pub(crate) fn is_permanent(&self) -> bool {
         match self {
-            Self::Spawn { source, .. } => {
-                matches!(
-                    source.kind(),
-                    ErrorKind::NotFound | ErrorKind::PermissionDenied
-                )
-            }
+            Self::Sandbox(error) => error.is_permanent(),
             Self::NeedsAuthorization { .. } | Self::RegistrationUnsupported => true,
             _ => false,
         }
@@ -113,9 +104,9 @@ impl From<ServiceError> for McpError {
 /// line native tool failures use.
 pub fn mcp_error_line(tool_name: &str, err: &McpError) -> String {
     match err {
-        McpError::Spawn { path, source } => format!(
-            "[error] {tool_name}: failed to spawn MCP server `{path}`: {source}. \
-             Check: the server command/args in config.toml\n"
+        McpError::Sandbox(source) => format!(
+            "[error] {tool_name}: failed to start the MCP server: {source}. \
+             Check: the server's command, read and write in config.toml\n"
         ),
         McpError::Initialize(source) => format!(
             "[error] {tool_name}: MCP initialize failed: {source}. \
@@ -201,10 +192,9 @@ mod tests {
         let cases: Vec<(&str, McpError)> = vec![
             (
                 "spawn",
-                McpError::Spawn {
-                    path: "/usr/bin/fake".into(),
-                    source: std::io::Error::new(ErrorKind::NotFound, "missing"),
-                },
+                McpError::Sandbox(ServerSandboxError::CommandHidden {
+                    program: "/opt/fake".into(),
+                }),
             ),
             (
                 "initialize",

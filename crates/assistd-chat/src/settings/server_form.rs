@@ -26,6 +26,9 @@ pub(crate) enum ServerField {
     Command,
     Args,
     Env,
+    Read,
+    Write,
+    Network,
     Url,
     Headers,
     Auth,
@@ -43,6 +46,9 @@ impl ServerField {
             Self::Command => "Command",
             Self::Args => "Arguments",
             Self::Env => "Environment",
+            Self::Read => "Readable paths",
+            Self::Write => "Writable paths",
+            Self::Network => "Network",
             Self::Url => "URL",
             Self::Headers => "Headers",
             Self::Auth => "Auth",
@@ -58,9 +64,12 @@ impl ServerField {
         match self {
             Self::Name => "the <name> in tool names mcp__<name>__<tool>: letters, digits, _ or -",
             Self::Transport => "stdio runs the server as a child process; HTTP reaches it by URL",
-            Self::Command => "the program to run; a bare name is looked up on PATH",
+            Self::Command => "the program to run, under /usr or a path granted below",
             Self::Args => "arguments for the command; put tokens and keys in the environment",
-            Self::Env => "NAME=value; the server inherits only PATH, HOME and a few basics",
+            Self::Env => "NAME=value; the server inherits only PATH, locale and a few basics",
+            Self::Read => "host paths the sandboxed server sees; by default only /usr and its home",
+            Self::Write => "host paths the sandboxed server may also change",
+            Self::Network => "off leaves the server no network but its own loopback",
             Self::Url => "https, or http to a loopback host",
             Self::Headers => "NAME=value headers sent with every request",
             Self::Auth => "oauth adds a bearer token; sign in with `assistd mcp login <name>`",
@@ -88,6 +97,9 @@ pub(crate) struct ServerFields {
     args: Vec<String>,
     /// `NAME=value` entries with distinct names, as are `headers`.
     env: Vec<String>,
+    read: Vec<String>,
+    write: Vec<String>,
+    network: bool,
     url: TextEditor,
     headers: Vec<String>,
     client_id: TextEditor,
@@ -128,6 +140,9 @@ impl ServerFields {
             command: text("command"),
             args: list("args"),
             env: pairs("env"),
+            read: list("read"),
+            write: list("write"),
+            network: value("network").and_then(toml::Value::as_bool) != Some(false),
             url: text("url"),
             headers: pairs("headers"),
             client_id: text("client_id"),
@@ -145,7 +160,14 @@ impl FormFields for ServerFields {
     /// The name and transport, the fields the transport takes, then the timeout.
     fn fields(&self) -> Vec<ServerField> {
         let transport: &[ServerField] = match (self.transport, self.oauth) {
-            (Transport::Stdio, _) => &[ServerField::Command, ServerField::Args, ServerField::Env],
+            (Transport::Stdio, _) => &[
+                ServerField::Command,
+                ServerField::Args,
+                ServerField::Env,
+                ServerField::Read,
+                ServerField::Write,
+                ServerField::Network,
+            ],
             (Transport::Http, false) => {
                 &[ServerField::Url, ServerField::Headers, ServerField::Auth]
             }
@@ -180,6 +202,9 @@ impl FormFields for ServerFields {
             ServerField::Command => FieldValue::Text(&self.command),
             ServerField::Args => list_value(&self.args, self.args.join(" ")),
             ServerField::Env => list_value(&self.env, pair_names(&self.env)),
+            ServerField::Read => list_value(&self.read, self.read.join(", ")),
+            ServerField::Write => list_value(&self.write, self.write.join(", ")),
+            ServerField::Network => FieldValue::Choice(if self.network { "on" } else { "off" }),
             ServerField::Url => FieldValue::Text(&self.url),
             ServerField::Headers => list_value(&self.headers, pair_names(&self.headers)),
             ServerField::Auth => FieldValue::Choice(if self.oauth { "oauth" } else { "none" }),
@@ -201,6 +226,9 @@ impl FormFields for ServerFields {
             ServerField::Transport
             | ServerField::Args
             | ServerField::Env
+            | ServerField::Read
+            | ServerField::Write
+            | ServerField::Network
             | ServerField::Headers
             | ServerField::Auth
             | ServerField::Scopes => None,
@@ -216,6 +244,7 @@ impl FormFields for ServerFields {
                 };
             }
             ServerField::Auth => self.oauth = !self.oauth,
+            ServerField::Network => self.network = !self.network,
             _ => {}
         }
     }
@@ -224,11 +253,14 @@ impl FormFields for ServerFields {
         match field {
             ServerField::Args => Some(&mut self.args),
             ServerField::Env => Some(&mut self.env),
+            ServerField::Read => Some(&mut self.read),
+            ServerField::Write => Some(&mut self.write),
             ServerField::Headers => Some(&mut self.headers),
             ServerField::Scopes => Some(&mut self.scopes),
             ServerField::Name
             | ServerField::Transport
             | ServerField::Command
+            | ServerField::Network
             | ServerField::Url
             | ServerField::Auth
             | ServerField::ClientId
@@ -259,6 +291,11 @@ impl FormFields for ServerFields {
                 entry.push(text_pair("command", required(&self.command, "command")?));
                 entry.extend(array_pair("args", &self.args));
                 entry.extend(table_pair("env", &self.env));
+                entry.extend(array_pair("read", &self.read));
+                entry.extend(array_pair("write", &self.write));
+                if !self.network {
+                    entry.push(("network".to_string(), toml::Value::Boolean(false)));
+                }
             }
             Transport::Http => {
                 entry.push(text_pair("url", required(&self.url, "URL")?));

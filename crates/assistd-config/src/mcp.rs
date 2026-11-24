@@ -16,7 +16,7 @@ use url::{Host, Url};
 use crate::defaults::nz64;
 use crate::errors::McpServerNameError;
 use crate::settings::{DescribeSettings, describe_fields};
-use crate::values::string_setting;
+use crate::values::{AbsoluteDir, string_setting};
 
 /// Model Context Protocol client settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -63,21 +63,31 @@ pub enum McpTransport {
     Http(McpHttpTransport),
 }
 
-/// A server run as a child process and spoken to with newline-delimited
-/// JSON-RPC over its stdin/stdout. `Debug` gives the arg count and env var
-/// names, never their values.
+/// A server run as a sandboxed child process and spoken to with
+/// newline-delimited JSON-RPC over its stdin/stdout. `Debug` gives the arg
+/// count and env var names, never their values.
 #[derive(Clone, Serialize, PartialEq, Eq)]
 pub struct McpStdioTransport {
-    /// Command to spawn; a bare name is resolved via `$PATH`.
+    /// Command to spawn; a bare name is resolved via `$PATH`. It must lie
+    /// under `/usr` or a path in `read` or `write`.
     pub command: PathBuf,
     /// Arguments passed to `command`. Logs show only their count; still,
     /// put tokens and keys in `env` rather than here.
     pub args: Vec<String>,
     /// Environment variables for the child, which inherits from the daemon
-    /// only `HOME`, `LANG`, `LANGUAGE`, `LC_*`, `LOGNAME`, `PATH`, `SHELL`,
-    /// `TERM`, `TMPDIR`, `TZ` and `USER`. Set credentials here, and keep the
-    /// config file mode `0600`.
+    /// only `LANG`, `LANGUAGE`, `LC_*`, `LOGNAME`, `PATH`, `SHELL`, `TERM`,
+    /// `TZ` and `USER`; `HOME` is always the server's own directory. Set
+    /// credentials here, and keep the config file mode `0600`.
     pub env: HashMap<String, String>,
+    /// Host files and directories the server sees read-only at their own
+    /// paths; each must exist and lie outside assistd's own directories.
+    /// Empty shows it only `/usr` and its own home.
+    pub read: Vec<AbsoluteDir>,
+    /// Host files and directories the server may also change, under the
+    /// same rules as `read`.
+    pub write: Vec<AbsoluteDir>,
+    /// `false` leaves the server no network but its own loopback.
+    pub network: bool,
 }
 
 /// A remote server spoken to over MCP Streamable HTTP.
@@ -141,6 +151,9 @@ struct RawMcpServerConfig {
     command: Option<PathBuf>,
     args: Option<Vec<String>>,
     env: Option<HashMap<String, String>>,
+    read: Option<Vec<AbsoluteDir>>,
+    write: Option<Vec<AbsoluteDir>>,
+    network: Option<bool>,
     url: Option<McpServerUrl>,
     headers: Option<McpHeaders>,
     auth: Option<McpAuthKind>,
@@ -174,7 +187,10 @@ enum McpEntryError {
          `client_secret` and `scopes` do not apply"
     )]
     HttpKeysOnStdio(McpServerName),
-    #[error("mcp server '{0}' connects to `url`, so `args` and `env` do not apply")]
+    #[error(
+        "mcp server '{0}' connects to `url`, so `args`, `env`, `read`, `write` and `network` \
+         do not apply"
+    )]
     StdioKeysOnHttp(McpServerName),
     #[error(
         "mcp server '{0}' sets `client_id`, `client_secret` or `scopes` without `auth = \"oauth\"`"
@@ -218,6 +234,9 @@ impl RawMcpServerConfig {
             command,
             args,
             env,
+            read,
+            write,
+            network,
             url,
             headers,
             auth,
@@ -231,13 +250,20 @@ impl RawMcpServerConfig {
             client_secret,
             scopes,
         };
-        let has_stdio_keys = args.is_some() || env.is_some();
+        let has_stdio_keys = args.is_some()
+            || env.is_some()
+            || read.is_some()
+            || write.is_some()
+            || network.is_some();
         let has_http_keys = headers.is_some() || auth.is_some() || oauth_keys.any_set();
         let transport = match (command, url) {
             (Some(command), None) if !has_http_keys => McpTransport::Stdio(McpStdioTransport {
                 command,
                 args: args.unwrap_or_default(),
                 env: env.unwrap_or_default(),
+                read: read.unwrap_or_default(),
+                write: write.unwrap_or_default(),
+                network: network.unwrap_or(true),
             }),
             (None, Some(url)) if !has_stdio_keys => McpTransport::Http(McpHttpTransport::new(
                 &name,
@@ -376,6 +402,9 @@ impl fmt::Debug for McpStdioTransport {
             .field("command", &self.command)
             .field("arg_count", &self.args.len())
             .field("env_names", &self.env.keys().collect::<BTreeSet<_>>())
+            .field("read", &self.read)
+            .field("write", &self.write)
+            .field("network", &self.network)
             .finish()
     }
 }
@@ -477,6 +506,8 @@ fn default_request_timeout_secs() -> NonZeroU64 {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn parse_server(entry: &str) -> Result<McpServerConfig, String> {
@@ -555,7 +586,22 @@ mod tests {
         let stdio = parse_server("command = \"npx\"\nargs = [\"-y\"]\n").unwrap();
         assert!(matches!(
             stdio.transport,
-            McpTransport::Stdio(McpStdioTransport { ref args, .. }) if args == &["-y"]
+            McpTransport::Stdio(McpStdioTransport { ref args, network: true, .. })
+                if args == &["-y"]
+        ));
+        let granted =
+            parse_server("command = \"npx\"\nread = [\"/srv/docs\"]\nnetwork = false\n").unwrap();
+        let reparsed = parse_server(
+            toml::to_string(&granted)
+                .unwrap()
+                .trim_start_matches("name = \"s\"\n"),
+        )
+        .unwrap();
+        assert_eq!(reparsed, granted);
+        assert!(matches!(
+            granted.transport,
+            McpTransport::Stdio(McpStdioTransport { ref read, network: false, .. })
+                if read[0].as_path() == Path::new("/srv/docs")
         ));
         for url in [
             "https://drivemcp.googleapis.com/mcp/v1",
@@ -587,6 +633,8 @@ mod tests {
                 "url = \"https://h/mcp\"\nenv = { A = \"b\" }\n",
                 "do not apply",
             ),
+            ("url = \"https://h/mcp\"\nnetwork = false\n", "do not apply"),
+            ("command = \"npx\"\nread = [\"docs\"]\n", "absolute path"),
             ("url = \"http://mcp.example.com/mcp\"\n", "loopback"),
             ("url = \"ftp://h/mcp\"\n", "https"),
             (
