@@ -14,18 +14,22 @@ use tracing::{debug, info, warn};
 
 use assistd_ipc::{PresenceState, TaskEvent, TaskId, TaskTrigger};
 use assistd_memory::TaskRecord;
+use assistd_tools::WatchedPath;
+use assistd_tools::policy::on_blocking_pool;
 
 use super::TaskService;
 use super::dispatch::unrequested_run_id;
 use super::event_triggers::{Occurrence, event_trigger, fires_on};
 
 /// Wakes the event watcher when a task changes, and holds when each task's event
-/// triggers last fired and why each trigger whose watch is retrying last stopped.
+/// triggers last fired, why each trigger whose watch is retrying last stopped, and what
+/// tells each path watch that a run of its task ended.
 #[derive(Debug, Default)]
 pub(super) struct TaskEvents {
     changed: Notify,
     last_fired: StdMutex<HashMap<TaskId, Instant>>,
     watch_failures: StdMutex<HashMap<(TaskId, TaskTrigger), String>>,
+    run_ends: StdMutex<HashMap<(TaskId, TaskTrigger), Arc<Notify>>>,
 }
 
 /// The watches running for enabled event triggers.
@@ -76,11 +80,29 @@ impl TaskEvents {
         self.watch_failures.lock().remove(&(task, trigger.clone()));
     }
 
-    /// Forget the failures of watches no longer in `watched`.
-    fn keep_watch_failures(&self, watched: &HashSet<(TaskId, TaskTrigger)>) {
+    /// Forget the failures and run-end signals of watches no longer in `watched`.
+    fn keep_watches(&self, watched: &HashSet<(TaskId, TaskTrigger)>) {
         self.watch_failures
             .lock()
             .retain(|failed, _| watched.contains(failed));
+        self.run_ends
+            .lock()
+            .retain(|watch, _| watched.contains(watch));
+    }
+
+    /// Notified once for each run of `task` that ends, for the watch of its `trigger`.
+    pub(super) fn run_ended(&self, task: TaskId, trigger: &TaskTrigger) -> Arc<Notify> {
+        let mut run_ends = self.run_ends.lock();
+        Arc::clone(run_ends.entry((task, trigger.clone())).or_default())
+    }
+
+    /// Have every path watch of `task` drop the changes it holds, which its run made.
+    pub(super) fn note_run_ended(&self, task: TaskId) {
+        for ((watching, _), run_ended) in self.run_ends.lock().iter() {
+            if *watching == task {
+                run_ended.notify_one();
+            }
+        }
     }
 }
 
@@ -188,7 +210,10 @@ impl TaskService {
         watches
             .paths
             .retain(|watched, watch| wanted.contains(watched) && !watch.is_finished());
-        self.events.keep_watch_failures(&wanted);
+        self.events.keep_watches(&wanted);
+        self.deps
+            .watched_paths
+            .replace(watched_paths(&tasks, &wanted).await);
         for watched in wanted {
             if let Entry::Vacant(slot) = watches.paths.entry(watched) {
                 let (task, trigger) = slot.key().clone();
@@ -247,4 +272,36 @@ impl TaskService {
             }
         }
     }
+}
+
+/// The paths `wanted` watches, canonical, each with the name its task has in `tasks`. A path
+/// that cannot be resolved is kept as written.
+async fn watched_paths(
+    tasks: &[TaskRecord],
+    wanted: &HashSet<(TaskId, TaskTrigger)>,
+) -> Vec<WatchedPath> {
+    let watched: Vec<WatchedPath> = wanted
+        .iter()
+        .filter_map(|(task, trigger)| {
+            let (TaskEvent::PathChanged { path, .. }, _) = event_trigger(trigger)? else {
+                return None;
+            };
+            let record = tasks.iter().find(|record| record.id == *task)?;
+            Some(WatchedPath {
+                task: *task,
+                task_name: record.spec.name.to_string(),
+                path: path.clone(),
+            })
+        })
+        .collect();
+    on_blocking_pool(move || {
+        watched
+            .into_iter()
+            .map(|watched| WatchedPath {
+                path: watched.path.canonicalize().unwrap_or(watched.path),
+                ..watched
+            })
+            .collect()
+    })
+    .await
 }

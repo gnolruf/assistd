@@ -110,6 +110,7 @@ fn probe_sandbox_with_path(
                         extra_args,
                         protected,
                         shared,
+                        watched: Arc::default(),
                         host_path: host_path(path_env),
                         unit_dirs: user_unit_dirs(path_env),
                         confined,

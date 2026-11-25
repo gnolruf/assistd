@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_ipc::{ConfirmSource, PlannedAction};
+use assistd_ipc::{ConfirmSource, PlannedAction, TaskId};
 
 use crate::TurnContext;
 use crate::chain::Word;
@@ -24,6 +24,7 @@ mod path_class;
 mod review;
 mod sandbox;
 mod shell;
+mod watched;
 
 pub use actions::{ActionCheck, StandingApprovals};
 use allowlist::ProgramApproval;
@@ -53,6 +54,7 @@ pub use sandbox::{
     ScopeError, ScratchCap, ServerSandbox, ServerSandboxError, SharedDirs, ToolSandbox,
     ToolsDisabled, probe_sandbox,
 };
+pub use watched::{LockedPaths, WatchedPath, WatchedPaths};
 
 /// Policy for the commands that spawn subprocesses: read-only scripts run unasked with `$HOME`
 /// read-only, edits ask unless the permission mode accepts them, and unvetted scripts ask.
@@ -89,6 +91,9 @@ pub(crate) struct ScriptReview {
     /// The files the script names to read, as written; a directory read throughout is
     /// left out.
     pub(crate) reads: Vec<String>,
+    /// Why the script may not run at all: it names, as something it changes, a path
+    /// another task watches.
+    pub(crate) watched: Option<String>,
 }
 
 /// The policy, sandbox and gate a command runs model-chosen argv under.
@@ -100,18 +105,24 @@ pub(crate) struct SubprocessPolicy {
 }
 
 impl SubprocessPolicy {
-    /// The path guards, then the script's class, with "always allow" approvals vetting the
-    /// programs they cover: an edit is checked against the edit scope, and an unvetted script
-    /// asks. Runs on the blocking pool, since both read the filesystem.
-    pub(crate) async fn review_script(&self, script: String) -> ScriptReview {
+    /// The path guards, then the script's class, with "always allow" approvals vetting their
+    /// programs: an edit is checked against the edit scope, an unvetted script asks, and only
+    /// a run of task `run_of` may change what that task watches. Runs on the blocking pool.
+    pub(crate) async fn review_script(
+        &self,
+        script: String,
+        run_of: Option<TaskId>,
+    ) -> ScriptReview {
         let cfg = Arc::clone(&self.cfg);
         let sandbox = Arc::clone(&self.sandbox);
         on_blocking_pool(move || {
             let guards = sandbox.path_guards();
             let analysis = analyze(&script, cfg.scratch.as_deref(), Some(&cfg.allowlist));
+            let locked = sandbox.watched.locked_for(run_of);
             ScriptReview {
                 home: home_access(&analysis),
                 reads: files_read(&analysis),
+                watched: guards.locked_change(&analysis.effects, &locked),
                 review: guarded_review(&guards, analysis, &cfg.edit_scope, &cfg.protected),
             }
         })
@@ -367,6 +378,16 @@ fn refused(op: &str, why: &str) -> CommandError {
         format_args!("{op} refused in every mode: it {why}"),
         Hint::Try,
         "deleting a specific subtree instead, such as a build or cache directory",
+    )
+}
+
+/// The refusal of `op` because of `why`, a [`WatchedPath::refusal`], with `recovery` to try.
+pub(crate) fn watched_refusal(op: &str, why: &str, recovery: &str) -> CommandError {
+    CommandError::new(
+        POLICY_DENIED_EXIT,
+        format_args!("{op} refused: {why}"),
+        Hint::Try,
+        recovery,
     )
 }
 

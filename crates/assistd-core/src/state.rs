@@ -240,6 +240,7 @@ impl AppState {
             presence: Arc::clone(&subsystems.presence),
             vision_revalidator: subsystems.vision_revalidator.clone(),
             tools: Arc::clone(&subsystems.tools),
+            watched_paths: Arc::clone(&subsystems.watched_paths),
             agents: agents.clone(),
             planner: Arc::clone(&planner),
             slot_stash: subsystems.slot_stash.clone(),

@@ -15,8 +15,12 @@ use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, U
 use crate::exec::{SCRATCH_FULL_EXIT, SPAWN_FAILED_EXIT, supervise};
 use crate::policy::{
     BashPolicyCfg, ConfirmationGate, Guarded, SandboxInfo, ScratchCap, ScriptReview,
-    SubprocessPolicy,
+    SubprocessPolicy, watched_refusal,
 };
+
+/// What a script refused for changing a watched path is told to try.
+const WATCHED_PATH_RECOVERY: &str =
+    "a path the task does not watch; with the user present, `write` may change it after asking";
 
 /// `bash SCRIPT`: run a policy-gated `bash -c <script>` subprocess. Policy
 /// refusals exit 126; a timeout kills the process group and exits 137.
@@ -122,17 +126,22 @@ pub(crate) async fn run_script(
     script: String,
     stdin: &[u8],
 ) -> Result<ScriptRun, CommandError> {
+    let run_of = turn.task_run();
     let ScriptReview {
         review,
         home,
         reads,
-    } = policy.review_script(script.clone()).await;
+        watched,
+    } = policy.review_script(script.clone(), run_of).await;
+    if let Some(why) = watched {
+        return Err(watched_refusal("command", &why, WATCHED_PATH_RECOVERY));
+    }
     policy
         .authorize(turn, tool, "command", &script, review)
         .await?;
     let sandboxed = policy
         .sandbox
-        .command("bash", vec!["-c".to_string(), script.clone()], home)
+        .command("bash", vec!["-c".to_string(), script.clone()], home, run_of)
         .await
         .map_err(|error| spawn_failed(&error))?;
     let private_dirs = display_list(&sandboxed.private_dirs_named(&script));
@@ -225,12 +234,17 @@ fn strip_dash_c(args: &[Word]) -> &[Word] {
 
 #[cfg(test)]
 mod tests {
+    use assistd_ipc::{ConfirmSource, PermissionMode, TaskId, TaskRunId};
+    use parking_lot::Mutex;
+
     use super::*;
     use crate::chain::{execute, parse_chain};
     use crate::command::CommandRegistry;
     use crate::command::run_rendered;
+    use crate::commands::test_support::RecordingParking;
     use crate::commands::{RecordingGate, test_sandbox};
     use crate::exec::POLICY_DENIED_EXIT;
+    use crate::policy::{Approval, ConfirmRouter, IpcConfirmationGate, WatchedPath};
     use crate::test_support::{DenyAllGate, bash_policy};
 
     /// Bash over a sandbox that starts nothing: a script the policy lets through exits
@@ -276,6 +290,61 @@ mod tests {
         let script = script_asked_about(&format!("bash touch {glob}")).await;
 
         assert_eq!(script, format!("touch {glob}"));
+    }
+
+    #[tokio::test]
+    async fn a_script_that_changes_a_watched_path_runs_only_in_its_tasks_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inbox = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
+        let sandbox = test_sandbox();
+        sandbox.watched.replace(vec![WatchedPath {
+            task: TaskId(1),
+            task_name: "sort inbox".into(),
+            path: inbox.clone(),
+        }]);
+        let cmd = BashCommand::new(
+            Arc::new(bash_policy()),
+            sandbox,
+            Arc::new(IpcConfirmationGate),
+        );
+        let script = format!("touch {}/note.txt", inbox.display());
+
+        let refused = run(&cmd, &script).await;
+        assert_eq!(refused.exit_code, POLICY_DENIED_EXIT, "{refused:?}");
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            stderr.contains("watched by the task \"sort inbox\""),
+            "{stderr}"
+        );
+
+        for (task, exit_code) in [
+            (TaskId(2), POLICY_DENIED_EXIT),
+            (TaskId(1), SPAWN_FAILED_EXIT),
+        ] {
+            let parking = Arc::new(RecordingParking {
+                parked: Mutex::new(Vec::new()),
+                answer: Approval::Once,
+            });
+            let router = ConfirmRouter::for_task_run(
+                "r".into(),
+                ConfirmSource::Task {
+                    task,
+                    run: TaskRunId(7),
+                },
+                PermissionMode::Manual,
+                None,
+                Vec::new(),
+                parking as _,
+            );
+            let input = CommandInput {
+                args: vec![Word::quoted(script.as_str())],
+                stdin: None,
+                scope: crate::FileScope::Host,
+                turn: TurnContext::answered_by(router),
+            };
+            let out = run_rendered(&cmd, input).await;
+            assert_eq!(out.exit_code, exit_code, "{task}: {out:?}");
+        }
     }
 
     #[tokio::test]

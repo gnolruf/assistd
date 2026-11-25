@@ -209,6 +209,21 @@ impl TaskStore {
             .map_err(missing_task_or("task queue_run", task))
     }
 
+    /// What started run `run`; [`MemoryError::TaskRunNotFound`] when there is none.
+    pub async fn run_trigger(&self, run: TaskRunId) -> Result<TaskTrigger> {
+        self.handle
+            .read("task run_trigger", move |c| {
+                c.query_row(
+                    "SELECT trigger FROM task_runs WHERE id = ?1",
+                    [run.0],
+                    |row| json_at(row, 0),
+                )
+                .optional()
+            })
+            .await?
+            .ok_or(MemoryError::TaskRunNotFound(run))
+    }
+
     /// Mark waiting run `run` as running in transcript session `session`;
     /// [`MemoryError::TaskRunNotFound`] unless it is queued or suspended.
     pub async fn start_run(&self, run: TaskRunId, session: SessionId) -> Result<()> {

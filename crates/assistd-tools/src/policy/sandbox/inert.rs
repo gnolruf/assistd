@@ -24,6 +24,7 @@ pub fn inert_sandbox(shared: SharedDirs) -> Arc<SandboxInfo> {
         extra_args: Vec::new(),
         protected: Protected::default(),
         shared,
+        watched: Arc::default(),
         host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
         unit_dirs: Vec::new(),
         confined: None,

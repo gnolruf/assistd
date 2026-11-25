@@ -38,6 +38,13 @@ pub enum TriggerError {
         source: io::Error,
     },
 
+    #[error(
+        "watching {} would leave {kept} read-only to every other task and to chat; watch a \
+         folder inside it instead",
+        path.display()
+    )]
+    LocksTooMuch { path: PathBuf, kept: &'static str },
+
     #[error("trigger waits on task {0}, which does not exist")]
     UnknownUpstream(TaskId),
 
