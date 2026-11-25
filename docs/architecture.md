@@ -670,10 +670,15 @@ the run is dropped with them. A run a `PathChanged` trigger started begins as
 having read this machine, since whoever wrote the file chose what the run
 reads. `TaskSave` refuses a path that is or holds `$HOME`, the daemon's
 working directory or the scratch directory, which would leave them read-only
-to every other turn. A watched file that has been deleted cannot be bound, and
-a stdio MCP server's writable grant is outside this rule. The cool-down stays
-as the bound on a loop through a program the daemon does not run, such as a
-sync client.
+to every other turn. A watched file that has been deleted cannot be bound. A
+stdio MCP server is one process shared by every turn, so it gets no exception
+for the watching task: `ServerSandbox` binds each watched path that exists
+under its home or a writable grant read-only, and the whole grant when the
+watch covers it. A server started under other watches than the ones that now
+lie where it can write is stopped as soon as they change, with any call in
+flight, and the next call starts it in a sandbox that matches. The cool-down
+stays as the bound on a loop through a program the daemon does not run, such
+as a sync client.
 
 An admitted run takes the request guard, as a query does, then opens an
 `isolated_backend`. That backend gets the main system prompt plus a
@@ -1588,7 +1593,9 @@ grant that resolves inside one is refused, and one that holds any gets a
 tmpfs over each directory and `/dev/null` over the socket, mounted after
 the grants and before the home, which lies in the data directory. A
 missing one under a writable grant is covered too, so the server cannot
-create the token file ahead of the daemon. The command is looked up on
+create the token file ahead of the daemon. Each grant's bind is followed by
+a read-only bind over every path in it that a task watches, as the home's
+is, since only a run of the watching task may change one. The command is looked up on
 the daemon's `PATH`, which the server keeps, and must lie under `/usr`,
 the home or a grant; nothing under the real `$HOME` is bound for it,
 since the directory of a command may be `$HOME` itself and a runtime

@@ -14,8 +14,8 @@ use assistd_mcp::{
 };
 use assistd_tools::test_support::{AlwaysAllowGate, DenyAllGate};
 use assistd_tools::{
-    PinnedApprovalGate, PinnedApprovals, ServerSandboxError, Tool, ToolCatalog, ToolRegistry,
-    TurnContext, VisionGate,
+    PinnedApprovalGate, PinnedApprovals, ServerLocks, ServerProcess, ServerSandboxError, Tool,
+    ToolCatalog, ToolRegistry, TurnContext, VisionGate,
 };
 use assistd_utils::backoff::MIN_HEALTHY_SECONDS;
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -41,6 +41,10 @@ fn fake_config(env: &[(&str, &Path)]) -> StdioConfig {
             .kill_on_drop(true)
             .process_group(0)
             .spawn()
+            .map(|child| ServerProcess {
+                child,
+                locks: ServerLocks::default(),
+            })
             .map_err(ServerSandboxError::Spawn);
         Box::pin(async move { spawned })
     });

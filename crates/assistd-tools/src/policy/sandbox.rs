@@ -41,7 +41,7 @@ pub use reader::{ReaderProgram, ReaderSandbox, ReaderSandboxError};
 pub use scope::ScopeError;
 pub(crate) use scratch_cap::Guarded;
 pub use scratch_cap::{SCRATCH_MARKER, ScratchCap};
-pub use server::{SandboxedServer, ServerSandbox, ServerSandboxError};
+pub use server::{SandboxedServer, ServerLocks, ServerProcess, ServerSandbox, ServerSandboxError};
 
 /// The `PATH` sandboxed commands run with, and the fallback when the
 /// daemon has no usable one.

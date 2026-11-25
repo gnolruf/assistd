@@ -15,7 +15,9 @@ use tokio::process::{Child, ChildStderr};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 
-use assistd_tools::{SandboxedServer, ServerSandbox, ServerSandboxError};
+use assistd_tools::{
+    SandboxedServer, ServerLocks, ServerProcess, ServerSandbox, ServerSandboxError,
+};
 use assistd_utils::log_lines::forward_lines;
 use assistd_utils::process_group::ProcessGroup;
 
@@ -29,7 +31,7 @@ const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Starts a server's process with its stdin, stdout and stderr piped, leading
 /// its own process group.
 pub type ServerSpawner =
-    Arc<dyn Fn() -> BoxFuture<'static, Result<Child, ServerSandboxError>> + Send + Sync>;
+    Arc<dyn Fn() -> BoxFuture<'static, Result<ServerProcess, ServerSandboxError>> + Send + Sync>;
 
 /// Per-server stdio transport configuration.
 #[derive(Clone)]
@@ -78,7 +80,7 @@ impl fmt::Debug for StdioConfig {
 /// Spawn the server in its own process group and run the initialize handshake.
 /// Errors if either fails; a failed handshake kills the child.
 pub(crate) async fn connect(cfg: &StdioConfig) -> Result<(McpPeer, ChildLifeline), McpError> {
-    let (mut child, group) = spawn_child(cfg).await?;
+    let (ServerProcess { mut child, locks }, group) = spawn_child(cfg).await?;
     let stdout = LineCappedReader::new(child.stdout.take().expect("stdout piped"));
     let stdin = child.stdin.take().expect("stdin piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -109,6 +111,7 @@ pub(crate) async fn connect(cfg: &StdioConfig) -> Result<(McpPeer, ChildLifeline
         label: cfg.label.clone(),
         child,
         group,
+        locks,
         service: OpenService::new(service),
         stderr_task,
     };
@@ -122,13 +125,15 @@ pub(crate) struct ChildLifeline {
     label: String,
     child: Child,
     group: ProcessGroup,
+    locks: ServerLocks,
     service: OpenService,
     stderr_task: AbortOnDropHandle<()>,
 }
 
 impl ChildLifeline {
-    /// Resolves when the child exits or its MCP session ends; a child
-    /// that can no longer answer counts as dead.
+    /// Resolves when the child exits, its MCP session ends, or its sandbox no longer
+    /// locks the paths tasks watch; a child that can no longer answer or could
+    /// start a task counts as dead.
     pub(crate) async fn wait_for_death(&mut self) {
         tokio::select! {
             status = self.group.reap_leader(&mut self.child) => debug!(
@@ -140,6 +145,12 @@ impl ChildLifeline {
                 target: "assistd::mcp",
                 server = %self.label,
                 "MCP session ended while the child was still alive",
+            ),
+            () = self.locks.outdated() => info!(
+                target: "assistd::mcp",
+                server = %self.label,
+                "the paths tasks watch changed where the MCP server can write; stopping it \
+                 so the next call starts it with them read-only",
             ),
         }
     }
@@ -153,6 +164,7 @@ impl ChildLifeline {
             group,
             service,
             stderr_task,
+            ..
         } = self;
         service.close(SESSION_CLOSE_TIMEOUT).await;
         let name = format!("MCP server {label}");
@@ -201,12 +213,12 @@ impl<R: AsyncRead + Unpin> AsyncRead for LineCappedReader<R> {
     }
 }
 
-async fn spawn_child(cfg: &StdioConfig) -> Result<(Child, ProcessGroup), McpError> {
-    let child = (cfg.spawner)().await?;
-    let group = ProcessGroup::led_by(&child).ok_or_else(|| {
+async fn spawn_child(cfg: &StdioConfig) -> Result<(ServerProcess, ProcessGroup), McpError> {
+    let process = (cfg.spawner)().await?;
+    let group = ProcessGroup::led_by(&process.child).ok_or_else(|| {
         ServerSandboxError::Spawn(io::Error::other("spawned child reported no pid"))
     })?;
-    Ok((child, group))
+    Ok((process, group))
 }
 
 /// SIGKILL the group of a child whose handshake failed, reap it, and

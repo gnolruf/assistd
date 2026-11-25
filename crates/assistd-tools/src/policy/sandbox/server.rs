@@ -17,6 +17,7 @@ use tokio::process::{Child, Command as ProcCommand};
 use tracing::warn;
 
 use super::super::on_blocking_pool;
+use super::super::watched::{LockedPaths, WatchedPaths};
 use super::command::{
     QUARANTINE_SYSTEM_LINKS, load_seccomp_filter, run_limited, scoped_bwrap, system_flags,
 };
@@ -115,22 +116,103 @@ impl fmt::Debug for SandboxedServer {
     }
 }
 
+/// A started server and the watched paths its sandbox keeps it from changing.
+#[derive(Debug)]
+pub struct ServerProcess {
+    pub child: Child,
+    pub locks: ServerLocks,
+}
+
+/// The watched paths bound read-only in one started server's sandbox. The default
+/// is those of a server that can write nowhere, which never go out of date.
+#[derive(Debug, Default)]
+pub struct ServerLocks {
+    watched: Arc<WatchedPaths>,
+    /// The server's home and writable grants, as they were bound.
+    writable: Vec<Grant>,
+}
+
+impl ServerLocks {
+    /// Resolves once tasks watch other paths the server could write than the ones
+    /// its sandbox binds read-only, so only a new sandbox follows the rule.
+    pub async fn outdated(&self) {
+        let mut changes = self.watched.changes();
+        loop {
+            let (writable, locked) = (self.writable.clone(), self.watched.locked_for(None));
+            let is_outdated = on_blocking_pool(move || {
+                writable
+                    .iter()
+                    .any(|grant| grant.locked != locked_in(&grant.source, &locked))
+            })
+            .await;
+            if is_outdated {
+                return;
+            }
+            if changes.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+        }
+    }
+}
+
 /// A host path a server was granted, bound from `source` at `at`.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Grant {
     /// The path as configured, where the server sees it.
     at: PathBuf,
     /// `at` with symlinks resolved.
     source: PathBuf,
     writable: bool,
+    /// What tasks watch of a writable grant, bound read-only: `source` itself, or the
+    /// watched paths that exist inside it. Sorted.
+    locked: Vec<PathBuf>,
+}
+
+impl Grant {
+    fn new(at: &Path, source: PathBuf, writable: bool, locked: &LockedPaths) -> Self {
+        let locked = if writable {
+            locked_in(&source, locked)
+        } else {
+            Vec::new()
+        };
+        Self {
+            at: at.to_path_buf(),
+            source,
+            writable,
+            locked,
+        }
+    }
+
+    /// The bind of the grant, then a read-only bind over each locked path in it.
+    fn bind_flags(&self) -> Vec<OsString> {
+        let bind = if self.writable { "--bind" } else { "--ro-bind" };
+        let mut flags = vec![
+            bind.into(),
+            self.source.clone().into(),
+            self.at.clone().into(),
+        ];
+        for lock in &self.locked {
+            let within = lock.strip_prefix(&self.source).unwrap_or(Path::new(""));
+            let at: PathBuf = self.at.iter().chain(within.iter()).collect();
+            flags.extend(["--ro-bind".into(), lock.clone().into(), at.into()]);
+        }
+        flags
+    }
+
+    /// Whether the server could create the missing host `path` inside the grant.
+    fn can_create(&self, path: &Path) -> bool {
+        self.writable && !self.locked.iter().any(|lock| path.starts_with(lock))
+    }
 }
 
 /// A bwrap sandbox showing a server none of the host but its programs, its own
 /// home and the paths it was granted, with no `AF_UNIX` sockets and the network
-/// only when granted. Servers run under the tool sandbox's scope and limits.
+/// only when granted. A path a task watches is read-only in it. Servers run under
+/// the tool sandbox's scope and limits.
 #[derive(Debug)]
 pub struct ServerSandbox {
     programs: SandboxPrograms,
+    watched: Arc<WatchedPaths>,
     /// The daemon's files, symlinks resolved, which no grant may show.
     own_files: Vec<PathBuf>,
     /// The daemon's `PATH`, which servers look their own programs up on.
@@ -155,6 +237,7 @@ impl ServerSandbox {
             .ok();
         Self {
             programs: sandbox.programs.clone(),
+            watched: Arc::clone(&sandbox.watched),
             own_files: own_files.iter().map(|path| resolved(path)).collect(),
             path_env: std::env::var_os("PATH").unwrap_or_else(|| SANDBOX_PATH.into()),
             confined,
@@ -166,33 +249,39 @@ impl ServerSandbox {
     pub async fn spawn(
         self: &Arc<Self>,
         server: &Arc<SandboxedServer>,
-    ) -> Result<Child, ServerSandboxError> {
+    ) -> Result<ServerProcess, ServerSandboxError> {
         let confined = match (server.network, &self.confined) {
             (true, None) => return Err(ServerSandboxError::AbstractSocketsReachable),
             (true, Some(confined)) => Some(confined),
             (false, _) => None,
         };
         let (sandbox, launched) = (Arc::clone(self), Arc::clone(server));
-        let mut cmd = on_blocking_pool(move || sandbox.command(&launched)).await?;
+        let (mut cmd, locks) = on_blocking_pool(move || sandbox.command(&launched)).await?;
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .process_group(0);
-        match confined {
+        let child = match confined {
             Some(confined) => confined.spawn(cmd).await,
             None => cmd.spawn(),
         }
-        .map_err(ServerSandboxError::Spawn)
+        .map_err(ServerSandboxError::Spawn)?;
+        Ok(ServerProcess { child, locks })
     }
 
-    /// The command that runs `server`. Flag order is load-bearing: grants, parents
-    /// first, then the mounts hiding the daemon's files in them, then the home.
-    /// Creates the home; blocks on the filesystem.
-    fn command(&self, server: &SandboxedServer) -> Result<ProcCommand, ServerSandboxError> {
-        let grants = self.grants(server)?;
+    /// The command that runs `server`, and the watched paths it binds read-only. Flag
+    /// order is load-bearing: grants, parents first, each followed by its locked paths,
+    /// then the mounts hiding the daemon's files in them, then the home. Creates the
+    /// home; blocks on the filesystem.
+    fn command(
+        &self,
+        server: &SandboxedServer,
+    ) -> Result<(ProcCommand, ServerLocks), ServerSandboxError> {
+        let locked = self.watched.locked_for(None);
+        let grants = self.grants(server, &locked)?;
         let program = visible_program(server, &grants, &self.path_env)?;
-        create_home(&server.home)?;
+        let home = created_home(&server.home, &locked)?;
         let mut cmd = scoped_bwrap(&self.programs);
         cmd.envs(std::env::var_os("SHELL").map(|shell| ("SHELL", shell)))
             .envs(
@@ -206,15 +295,10 @@ impl ServerSandbox {
             cmd.args(["--ro-bind-try", entry, entry]);
         }
         for grant in &grants {
-            let bind = if grant.writable {
-                "--bind"
-            } else {
-                "--ro-bind"
-            };
-            cmd.arg(bind).arg(&grant.source).arg(&grant.at);
+            cmd.args(grant.bind_flags());
         }
         cmd.args(self.hiding_flags(&grants));
-        cmd.arg("--bind").arg(&server.home).arg(&server.home);
+        cmd.args(home.bind_flags());
         cmd.args(["--setenv", "HOME"]).arg(&server.home);
         cmd.arg("--chdir").arg(&server.home);
         let path_env = server.env.get("PATH").map_or(&*self.path_env, OsStr::new);
@@ -225,23 +309,41 @@ impl ServerSandbox {
         let filter = load_seccomp_filter(&mut cmd).map_err(ServerSandboxError::Spawn)?;
         cmd.preserved_fds(vec![filter]);
         run_limited(&mut cmd, &self.programs, program, &server.args);
-        Ok(cmd)
+        let locks = ServerLocks {
+            watched: Arc::clone(&self.watched),
+            writable: grants
+                .into_iter()
+                .filter(|grant| grant.writable)
+                .chain([home])
+                .collect(),
+        };
+        Ok((cmd, locks))
     }
 
-    /// `server`'s grants with symlinks resolved, parents before what they hold.
-    /// Fails for one that does not exist or lies inside the daemon's own files.
-    fn grants(&self, server: &SandboxedServer) -> Result<Vec<Grant>, ServerSandboxError> {
+    /// `server`'s grants with symlinks resolved, parents before what they hold, the
+    /// writable ones read-only where `locked`. Fails for one that does not exist or
+    /// lies inside the daemon's own files.
+    fn grants(
+        &self,
+        server: &SandboxedServer,
+        locked: &LockedPaths,
+    ) -> Result<Vec<Grant>, ServerSandboxError> {
         let read = server.read.iter().map(|path| (path, false));
         let write = server.write.iter().map(|path| (path, true));
         let mut grants = read
             .chain(write)
-            .map(|(path, writable)| self.grant(path, writable))
+            .map(|(path, writable)| self.grant(path, writable, locked))
             .collect::<Result<Vec<_>, _>>()?;
         grants.sort();
         Ok(grants)
     }
 
-    fn grant(&self, path: &Path, writable: bool) -> Result<Grant, ServerSandboxError> {
+    fn grant(
+        &self,
+        path: &Path,
+        writable: bool,
+        locked: &LockedPaths,
+    ) -> Result<Grant, ServerSandboxError> {
         let source = std::fs::canonicalize(path).map_err(|source| ServerSandboxError::Grant {
             path: path.to_path_buf(),
             source,
@@ -251,17 +353,13 @@ impl ServerSandbox {
                 path: path.to_path_buf(),
                 own: own.clone(),
             }),
-            None => Ok(Grant {
-                at: path.to_path_buf(),
-                source,
-                writable,
-            }),
+            None => Ok(Grant::new(path, source, writable, locked)),
         }
     }
 
     /// The mounts that cover each of the daemon's files a grant holds: an empty
-    /// directory over a directory, or over a missing path a writable grant could
-    /// create, and `/dev/null` over anything else.
+    /// directory over a directory, or over a missing path the server could create
+    /// in a writable grant, and `/dev/null` over anything else.
     fn hiding_flags(&self, grants: &[Grant]) -> Vec<OsString> {
         let mut flags = Vec::new();
         for grant in grants {
@@ -270,7 +368,7 @@ impl ServerSandbox {
                     continue;
                 };
                 let at = grant.at.join(within).into_os_string();
-                if own.is_dir() || (grant.writable && !own.exists()) {
+                if own.is_dir() || (grant.can_create(own) && !own.exists()) {
                     flags.extend(["--tmpfs".into(), at]);
                 } else if own.exists() {
                     flags.extend(["--ro-bind".into(), "/dev/null".into(), at]);
@@ -312,19 +410,43 @@ fn visible_program(
     }
 }
 
-fn create_home(home: &Path) -> Result<(), ServerSandboxError> {
+/// `home` as a writable grant, read-only where `locked`, created owner-only when missing.
+fn created_home(home: &Path, locked: &LockedPaths) -> Result<Grant, ServerSandboxError> {
     DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(home)
+        .and_then(|()| std::fs::canonicalize(home))
+        .map(|source| Grant::new(home, source, true, locked))
         .map_err(|source| ServerSandboxError::Home {
             home: home.to_path_buf(),
             source,
         })
 }
 
+/// What `locked` keeps a server from changing in the writable host path `source`: all of
+/// it when a watch covers it, else each watched path that exists inside it. Sorted.
+fn locked_in(source: &Path, locked: &LockedPaths) -> Vec<PathBuf> {
+    if locked.over(source).is_some() {
+        return vec![source.to_path_buf()];
+    }
+    let mut inside: Vec<PathBuf> = locked
+        .paths()
+        .filter(|path| path.starts_with(source) && path.exists())
+        .map(Path::to_path_buf)
+        .collect();
+    inside.sort();
+    inside.dedup();
+    inside
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use assistd_ipc::TaskId;
+
+    use super::super::super::watched::WatchedPath;
     use super::super::scope::CommandScope;
     use super::*;
 
@@ -339,6 +461,7 @@ mod tests {
                     runtime_dir: OsString::from("/run/user/1000"),
                 },
             },
+            watched: Arc::default(),
             own_files: own_files.iter().map(|path| resolved(path)).collect(),
             path_env: OsString::from("/usr/bin"),
             confined: None,
@@ -392,7 +515,7 @@ mod tests {
             network: false,
             ..server_in(&home)
         };
-        let flags = flags_of(&sandbox.command(&read_only).expect("command"));
+        let flags = flags_of(&sandbox.command(&read_only).expect("command").0);
         let (host_path, data_path) = (path_of(&host_dir), path_of(&data));
         let (socket_path, home_path) = (path_of(&socket), path_of(&home));
         let granted = position_of(&flags, &["--ro-bind", &host_path, &host_path]);
@@ -412,7 +535,7 @@ mod tests {
             write: vec![host_dir.clone()],
             ..server_in(&home)
         };
-        let flags = flags_of(&sandbox.command(&writable).expect("command"));
+        let flags = flags_of(&sandbox.command(&writable).expect("command").0);
         position_of(&flags, &["--tmpfs", &path_of(&tokens)]);
         let unshared = position_of(&flags, &["--unshare-net"]);
         assert!(
@@ -471,5 +594,54 @@ mod tests {
             ..hidden_command
         };
         sandbox.command(&granted_command).expect("command granted");
+    }
+
+    #[tokio::test]
+    async fn a_watched_path_a_server_could_write_is_read_only_until_the_watches_change() {
+        let host = tempfile::tempdir().expect("tempdir");
+        let host_dir = std::fs::canonicalize(host.path()).expect("canonical");
+        let (projects, notes) = (host_dir.join("projects"), host_dir.join("notes"));
+        let (inbox, home) = (projects.join("inbox"), host_dir.join("home"));
+        std::fs::create_dir_all(&inbox).expect("inbox");
+        std::fs::create_dir_all(notes.join("daily")).expect("notes");
+        let path_of = |path: &Path| path.to_string_lossy().into_owned();
+        let watched_by_task_1 = |path: &Path| WatchedPath {
+            task: TaskId(1),
+            task_name: "sort inbox".into(),
+            path: path.to_path_buf(),
+        };
+        let sandbox = sandbox_hiding(&[]);
+        let watched = vec![
+            watched_by_task_1(&inbox),
+            watched_by_task_1(&notes),
+            watched_by_task_1(&projects.join("deleted")),
+        ];
+        sandbox.watched.replace(watched.clone());
+        let server = SandboxedServer {
+            write: vec![projects.clone(), notes.join("daily")],
+            ..server_in(&home)
+        };
+
+        let (cmd, locks) = sandbox.command(&server).expect("command");
+        let flags = flags_of(&cmd);
+        let (projects_path, inbox_path) = (path_of(&projects), path_of(&inbox));
+        let daily_path = path_of(&notes.join("daily"));
+        let granted = position_of(&flags, &["--bind", &projects_path, &projects_path]);
+        let inbox_locked = position_of(&flags, &["--ro-bind", &inbox_path, &inbox_path]);
+        assert!(granted < inbox_locked, "{flags:?}");
+        let daily_granted = position_of(&flags, &["--bind", &daily_path, &daily_path]);
+        let daily_locked = position_of(&flags, &["--ro-bind", &daily_path, &daily_path]);
+        assert!(daily_granted < daily_locked, "{flags:?}");
+        assert!(!flags.contains(&path_of(&projects.join("deleted"))));
+
+        let still_current = tokio::time::timeout(Duration::from_millis(50), locks.outdated());
+        still_current.await.expect_err("the same watches");
+        sandbox.watched.replace(watched.clone());
+        let still_current = tokio::time::timeout(Duration::from_millis(50), locks.outdated());
+        still_current.await.expect_err("the same watches again");
+        sandbox.watched.replace(watched[1..].to_vec());
+        tokio::time::timeout(Duration::from_secs(5), locks.outdated())
+            .await
+            .expect("the inbox is no longer watched");
     }
 }

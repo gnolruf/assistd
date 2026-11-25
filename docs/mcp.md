@@ -53,6 +53,14 @@ that points into one of them is refused. It cannot open Unix sockets, so
 it reaches no agent or session bus. Its environment is `PATH`, the
 locale and terminal variables and what `env` sets.
 
+A path that a task watches (a "when this path changes" trigger) is
+read-only to every server, even inside a `write` grant, so a server
+cannot start the task by writing there. This holds for a run of the
+watching task too: its own `write` and `bash` can change the path, a
+server it calls cannot. Saving, enabling, disabling or deleting such a
+task stops each running server the change affects, along with a call it
+is in the middle of; the next call starts it again.
+
 The command must itself be visible: under `/usr`, or under a granted
 path. One installed in your home is not, and `assistd mcp status` says
 so; grant the directory that holds it and whatever it loads:
