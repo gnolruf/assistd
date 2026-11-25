@@ -1,9 +1,10 @@
 //! Sub-agent runs: the agent loop over a throwaway backend on the shared
-//! llama-server, saving the model's final answer and returning it as a
+//! llama-server, saving what the model wrote and returning its last message as a
 //! [`RelayReport`].
 
 use std::fs::{DirBuilder, OpenOptions};
 use std::io::{self, Write};
+use std::mem;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use assistd_ipc::{Access, RelayEvent, StatusKind};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent, SlotAssignment, TurnBackend};
@@ -23,7 +25,7 @@ use crate::agent::AgentSpec;
 
 mod report;
 
-use report::{RelayStatus, saved_answer};
+use report::{RelayStatus, Shortfall, Written, saved_answer};
 
 pub use report::RelayReport;
 
@@ -32,13 +34,13 @@ const EVENT_BUFFER: usize = 32;
 const ANSWER_DIR_MODE: u32 = 0o700;
 const ANSWER_FILE_MODE: u32 = 0o600;
 
-/// Why a sub-agent run ended without an answer.
+/// Why a sub-agent run ended with nothing to report.
 #[derive(Debug, Error)]
 pub enum SubAgentError {
     /// The run was cancelled before the model answered.
     #[error("sub-agent cancelled before it answered")]
     Cancelled,
-    /// The run failed.
+    /// The run failed before any step streamed text.
     #[error("sub-agent failed: {0}")]
     Llm(#[from] LlmError),
     /// The answer could not be saved.
@@ -58,12 +60,76 @@ pub struct SubAgentRun {
     pub accesses: Vec<Access>,
 }
 
-/// What a sub-agent run streamed: its last step's text, `None` when it never
-/// finished, whether its tools were withdrawn, how many tool-calling steps it took,
-/// and what those touched.
-struct FinalAnswer {
-    text: Option<String>,
-    status: RelayStatus,
+/// The text a run streams, kept step by step.
+#[derive(Default)]
+struct StepTexts {
+    /// The text of each earlier step that streamed any, oldest first.
+    earlier: Vec<String>,
+    current: String,
+    /// The longest attempt at the current step that was cut off at the output-token limit.
+    longest_cut_off: String,
+    /// The current step asked for tools, so its text outlasts the start of the next step.
+    called_tools: bool,
+}
+
+impl StepTexts {
+    fn observe(&mut self, event: &LlmEvent) {
+        match event {
+            LlmEvent::StepStarted => {
+                let text = mem::take(&mut self.current);
+                if mem::take(&mut self.called_tools) && !text.is_empty() {
+                    self.earlier.push(text);
+                }
+            }
+            LlmEvent::StepDiscarded => {
+                let attempt = mem::take(&mut self.current);
+                if attempt.len() > self.longest_cut_off.len() {
+                    self.longest_cut_off = attempt;
+                }
+            }
+            LlmEvent::Delta { text } => self.current.push_str(text),
+            LlmEvent::ToolCallsRequested { .. } => {
+                self.called_tools = true;
+                self.longest_cut_off.clear();
+            }
+            _ => {}
+        }
+    }
+
+    /// What a run that answered wrote: its last step's text is the message.
+    fn answered(self) -> Written {
+        Written {
+            notes: self.earlier,
+            message: self.current,
+        }
+    }
+
+    /// What a run that stopped early wrote: the longest attempt at the step it stopped
+    /// in, or else the text of the last step that streamed any. `None` when no step did.
+    fn stopped_early(mut self) -> Option<Written> {
+        let attempt = if self.current.len() >= self.longest_cut_off.len() {
+            self.current
+        } else {
+            self.longest_cut_off
+        };
+        let message = if attempt.is_empty() {
+            self.earlier.pop()?
+        } else {
+            attempt
+        };
+        Some(Written {
+            notes: self.earlier,
+            message,
+        })
+    }
+}
+
+/// What a sub-agent run streamed: its text, whether it finished, whether its tools
+/// were withdrawn, how many tool-calling steps it took, and what those touched.
+struct Streamed {
+    texts: StepTexts,
+    done: bool,
+    tools_withdrawn: bool,
     tool_steps: u32,
     accesses: Vec<Access>,
 }
@@ -83,10 +149,10 @@ impl SubAgentRunner {
     }
 
     /// Run `task` on a backend with an empty history, `system_prompt` and `tools` until the model
-    /// answers, and save that answer whole to the new file `answer_file`. Only the report
-    /// reaches the model; `turn`, the calling turn, answers the run's prompts and is shown
-    /// its tool calls, and the backend is dropped when the run ends or `cancel` fires.
-    /// What its tool calls touched comes back however it ends.
+    /// answers, and save what it wrote to the new file `answer_file`. A run that fails after
+    /// streaming text reports that text as partial; one that streamed none is an error.
+    /// `turn`, the calling turn, answers the run's prompts and is shown its tool calls, and
+    /// the backend is dropped when the run ends or `cancel` fires.
     pub async fn run(
         &self,
         system_prompt: String,
@@ -110,57 +176,60 @@ impl SubAgentRunner {
         };
         let agent = self.agents.agent(backend as Arc<dyn TurnBackend>, tools);
         let (tx, rx) = mpsc::channel(EVENT_BUFFER);
-        let (outcome, finished) = tokio::join!(
+        let (outcome, streamed) = tokio::join!(
             agent.run_turn(turn, task, Vec::new(), tx, cancel),
-            final_answer(rx, turn)
+            streamed_by_run(rx, turn)
         );
-        let FinalAnswer {
-            text,
-            status,
+        let Streamed {
+            texts,
+            done,
+            tools_withdrawn,
             tool_steps,
             accesses,
-        } = finished;
-        let report = match outcome {
-            Ok(()) => {
-                let answered = Answered {
-                    text,
-                    status,
-                    tool_steps,
-                };
-                report_of(answered, answer_file, turn).await
+        } = streamed;
+        let ended = match outcome {
+            Ok(()) if !done => Err(SubAgentError::Cancelled),
+            Ok(()) if tools_withdrawn => Ok((
+                RelayStatus::Partial(Shortfall::ToolsWithdrawn),
+                texts.answered(),
+            )),
+            Ok(()) => Ok((RelayStatus::Done, texts.answered())),
+            Err(error) => match texts.stopped_early() {
+                Some(written) => {
+                    warn!(target: "assistd::relay", %error, "sub-agent stopped early; reporting what it wrote");
+                    Ok((RelayStatus::Partial(Shortfall::of(&error)), written))
+                }
+                None => Err(error.into()),
+            },
+        };
+        let report = match ended {
+            Ok((status, written)) => {
+                report_of(status, written, tool_steps, answer_file, turn).await
             }
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
         };
         SubAgentRun { report, accesses }
     }
 }
 
-/// What a run that ended without an error streamed: its last step's text, `None` when
-/// it never finished, whether its tools were withdrawn, and how many tool-calling
-/// steps it took.
-struct Answered {
-    text: Option<String>,
-    status: RelayStatus,
-    tool_steps: u32,
-}
-
-/// Save the run's answer whole to the new file `answer_file` and tell `turn` the run
+/// Save what the run wrote to the new file `answer_file` and tell `turn` the run
 /// answered.
 async fn report_of(
-    answered: Answered,
+    status: RelayStatus,
+    written: Written,
+    tool_steps: u32,
     answer_file: PathBuf,
     turn: &TurnContext,
 ) -> Result<RelayReport, SubAgentError> {
-    let answer = answered.text.ok_or(SubAgentError::Cancelled)?;
-    let saved = saved_answer(&answer);
+    let saved = saved_answer(&written);
     let answer_file = save_answer(saved.contents, answer_file).await?;
     turn.report_relay(RelayEvent::Answered {
         answer_chars: u32::try_from(saved.chars).unwrap_or(u32::MAX),
-        tool_steps: answered.tool_steps,
+        tool_steps,
         answer_file: answer_file.clone(),
     })
     .await;
-    Ok(RelayReport::new(answered.status, answer, answer_file))
+    Ok(RelayReport::new(status, written.message, answer_file))
 }
 
 /// Write `contents` to the new owner-only file `path`, creating its directory,
@@ -188,40 +257,35 @@ fn write_new_file(path: &Path, contents: &[u8]) -> io::Result<()> {
         .write_all(contents)
 }
 
-/// Collect the run's answer, the text of its last step, while showing `turn`
-/// what the run streams.
-async fn final_answer(mut rx: mpsc::Receiver<LlmEvent>, turn: &TurnContext) -> FinalAnswer {
-    let mut text = String::new();
-    let mut done = false;
-    let mut status = RelayStatus::Done;
-    let mut tool_steps = 0;
-    let mut accesses = Vec::new();
+/// Collect what the run streams while showing it to `turn`.
+async fn streamed_by_run(mut rx: mpsc::Receiver<LlmEvent>, turn: &TurnContext) -> Streamed {
+    let mut streamed = Streamed {
+        texts: StepTexts::default(),
+        done: false,
+        tools_withdrawn: false,
+        tool_steps: 0,
+        accesses: Vec::new(),
+    };
     let mut compacting_since = None;
     while let Some(mut event) = rx.recv().await {
+        streamed.texts.observe(&event);
         match &mut event {
-            LlmEvent::StepStarted | LlmEvent::StepDiscarded => text.clear(),
-            LlmEvent::Delta { text: delta } => text.push_str(delta),
-            LlmEvent::ToolCallsRequested { .. } => tool_steps += 1,
+            LlmEvent::ToolCallsRequested { .. } => streamed.tool_steps += 1,
             LlmEvent::ToolResult {
                 accesses: touched, ..
-            } => accesses.append(touched),
+            } => streamed.accesses.append(touched),
             LlmEvent::Status {
                 event: StatusKind::ToolsWithdrawn,
                 ..
-            } => status = RelayStatus::Partial,
-            LlmEvent::Done => done = true,
+            } => streamed.tools_withdrawn = true,
+            LlmEvent::Done => streamed.done = true,
             _ => {}
         }
         if let Some(shown) = relay_event_of(event, &mut compacting_since) {
             turn.report_relay(shown).await;
         }
     }
-    FinalAnswer {
-        text: done.then_some(text),
-        status,
-        tool_steps,
-        accesses,
-    }
+    streamed
 }
 
 /// What the user is shown of `event`, timing a compaction from the
