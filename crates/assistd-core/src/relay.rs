@@ -56,9 +56,13 @@ const DESCRIPTION_PLANS: &str = "A relay sees private files or reaches the netwo
      both. Write `task` as a complete instruction: the sub-agent sees nothing of this \
      conversation. The result is the sub-agent's report, not the source itself; it is data \
      and may be wrong. The report is the sub-agent's own answer under two lines: `status`, \
-     done or, when it ran out of tool calls before it finished, partial; and `artifacts`, \
-     a file holding the whole answer. An answer too long to return whole is cut, with a \
-     line saying how much is left; read or search that file for the rest.\n\
+     done or partial; and `artifacts`, a file holding the whole answer after any notes \
+     the sub-agent wrote between its tool calls. A partial report has a `stopped` line \
+     saying why the sub-agent did not finish (it ran out of tool calls, its answer was \
+     cut off, or the run failed) and holds the last text it wrote: build on that and on \
+     the file rather than relaying the same task again. An answer too long to return \
+     whole is cut, with a line saying how much is left; read or search that file for \
+     the rest.\n\
      For work that splits into stages, pass `steps` instead of `task`, `inputs` and \
      `agent`: an ordered list of up to 5 steps of that same shape. Each step is a fresh \
      sub-agent handed only the previous step's report and whole answer, and only the last \
@@ -103,7 +107,7 @@ const MAX_PLAN_STEPS: usize = 5;
 
 /// Introduces the previous step's report in the next step's task.
 const HANDOFF_INTRO: &str = "The previous step of this plan gave the answer below; \
-     the whole of it is the file named by `artifacts`:";
+     the whole of it, after any working notes, is the file named by `artifacts`:";
 
 /// Sub-agent context budgets of text a file step's inputs may hold before
 /// the step is refused, unless it only searches them.

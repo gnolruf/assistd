@@ -489,19 +489,27 @@ and pages in it ([how](search.md#how-hits-are-ranked)). It is not the record of
 whether a history has read this machine, which must err towards yes while
 this list may miss things; neither is derived from the other.
 
-A sub-agent's final answer is saved whole, with no length cap, to
+What a sub-agent wrote is saved whole, with no length cap, to
 `~/.local/share/assistd/relays/<session>/relay-<uuid>.txt`, written by the
 runner rather than the sub-agent so the file always exists and is complete.
+The file holds the text of every step that streamed any, in order: the text
+written between tool calls under a working-notes heading, then the last
+message under its own. A run with no such notes saves the message alone.
 It is sanitised first: control, bidi and format characters are stripped,
 chat-template tokens (`<|im_start|>`, `<tool_call>`, `[INST]`) are broken with
 a space, from the same token list the history uses for every other piece
 of untrusted text, and it is quoted under a header that labels it untrusted
-data. That final message is also the relay's result: the run generates nothing
+data. The last message is also the relay's result: the run generates nothing
 further. It comes back as a `RelayReport`, the restricted return channel:
 sanitised and quoted the same way, under a `status` line and an `artifacts`
-line naming the saved file. `status` is the harness's own reading of the run,
-`done` when it answered and `partial` when its tools were withdrawn first (a
-repeated call or the step ceiling); a run that fails is a failed tool result.
+line naming the saved file. `status` is the harness's own reading of the run:
+`done` when it answered, and `partial`, with a `stopped` line saying why,
+when it reported less than a finished answer. That is a run whose tools were
+withdrawn first (a repeated call or the step ceiling), one whose last step
+reached the output-token limit on every retry, whose message is then the
+longest of those attempts, and one that failed after some step streamed text,
+whose message is the text of the last step that did. A run that fails before
+any text is a failed tool result, as is one whose file cannot be saved.
 The message is shown up to a quarter of the history budget, counted in tokens
 by the history's own estimate. A longer one is cut at the end of a line and
 followed by a line saying how much is left and naming the saved file, so a

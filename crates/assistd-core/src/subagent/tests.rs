@@ -198,3 +198,92 @@ async fn run_at_its_step_ceiling_answers_partial_from_what_it_has() {
     assert!(rendered.contains("> status: partial\n"), "{rendered}");
     assert!(rendered.contains("> what I found so far\n"), "{rendered}");
 }
+
+/// A run of `steps` with no tools, saving to `answer_file`.
+async fn run_of(
+    steps: impl IntoIterator<Item = Step>,
+    answer_file: PathBuf,
+) -> Result<RelayReport, SubAgentError> {
+    let handed_out = Arc::new(ScriptedBackend::new(steps)) as Arc<dyn LlmBackend>;
+    let parent = Arc::new(ScriptedBackend::default().handing_out([handed_out]));
+    runner(parent)
+        .run(
+            "sub".into(),
+            "task".into(),
+            Arc::new(ToolRegistry::new()),
+            answer_file,
+            CancellationToken::new(),
+            &TurnContext::default(),
+        )
+        .await
+        .report
+}
+
+fn echo(id: &str) -> ToolCall {
+    ToolCall {
+        id: id.into(),
+        name: "run".into(),
+        arguments: serde_json::json!({ "command": "echo" }),
+    }
+}
+
+#[tokio::test]
+async fn answer_cut_off_on_every_retry_comes_back_partial_as_its_longest_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    let steps = [
+        Step::truncated().saying("The cause is a missing"),
+        Step::truncated().saying("The cause is a missing lock around the cache, which"),
+        Step::truncated().saying("The cause"),
+    ];
+
+    let report = run_of(steps, dir.path().join("relay-1.txt")).await.unwrap();
+
+    let rendered = report.render(1_000);
+    assert!(
+        rendered.contains("> status: partial\n> stopped: every attempt"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("> The cause is a missing lock around the cache, which\n"),
+        "{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn run_that_fails_after_two_steps_wrote_text_reports_the_last_and_saves_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let answer_file = dir.path().join("relay-1.txt");
+    let steps = [
+        Step::tool_calls([echo("c-1")]).saying("The parser is in lexer.rs."),
+        Step::tool_calls([echo("c-2")]).saying("Its error path drops the span."),
+        Step::error(LlmError::Unavailable("the server went away".into())),
+    ];
+
+    let report = run_of(steps, answer_file.clone()).await.unwrap();
+
+    let rendered = report.render(1_000);
+    assert!(
+        rendered.contains("> status: partial\n> stopped: ")
+            && rendered.contains("the server went away"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("> Its error path drops the span.\n") && !rendered.contains("lexer.rs"),
+        "{rendered}"
+    );
+    let saved = std::fs::read_to_string(&answer_file).unwrap();
+    let earlier = saved.find("> The parser is in lexer.rs.\n").expect(&saved);
+    let last = saved
+        .find("> Its error path drops the span.\n")
+        .expect(&saved);
+    assert!(earlier < last, "{saved}");
+}
+
+#[tokio::test]
+async fn run_that_fails_before_writing_anything_is_an_error() {
+    let steps = [Step::error(LlmError::Unavailable("down".into()))];
+
+    let result = run_of(steps, PathBuf::from("/nonexistent/answer.txt")).await;
+
+    assert!(matches!(result, Err(SubAgentError::Llm(_))), "{result:?}");
+}

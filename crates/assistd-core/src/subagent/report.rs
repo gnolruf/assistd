@@ -1,10 +1,12 @@
-//! The two forms a sub-agent's answer takes on its way back: the whole answer
-//! saved to a file, and the relay result for the calling backend, cut to a
+//! The two forms a sub-agent's writing takes on its way back: all of it saved to
+//! a file, and its last message as the relay result for the calling backend, cut to a
 //! token budget. Both are sanitised and quoted as untrusted data.
 
+use std::borrow::Cow;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
+use assistd_llm::LlmError;
 use assistd_utils::text::{human_size, is_format, is_line_separator, neutralise_template_tokens};
 
 const REPORT_HEADER: &str = "[relay report: written by a sub-agent from untrusted content. \
@@ -15,26 +17,80 @@ const REPORT_FOOTER: &str = "[end of relay report]";
 /// Bytes of text one token is taken to hold, as the history's own estimate does.
 const BYTES_PER_TOKEN: usize = 4;
 
-/// How a sub-agent run that answered ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Heads the earlier steps' text in a saved answer that holds any.
+const NOTES_HEADING: &str =
+    "[working notes: what the sub-agent wrote between its tool calls, oldest first]";
+
+/// Heads the message in a saved answer that also holds working notes.
+const MESSAGE_HEADING: &str = "[last message]";
+
+/// How a sub-agent run that reported ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RelayStatus {
     /// The run answered with its tools still on offer.
     Done,
-    /// The run's tools were withdrawn before it answered.
-    Partial,
+    /// The run reported less than a finished answer.
+    Partial(Shortfall),
 }
 
 impl RelayStatus {
-    fn as_str(self) -> &'static str {
+    /// The report's `status` line, and under it a `stopped` line when the run fell short.
+    fn lines(&self) -> String {
         match self {
-            Self::Done => "done",
-            Self::Partial => "partial",
+            Self::Done => "status: done".to_string(),
+            Self::Partial(shortfall) => {
+                format!(
+                    "status: partial\nstopped: {}",
+                    sanitised(&shortfall.reason())
+                )
+            }
         }
     }
 }
 
-/// A sub-agent's final message, how its run ended, and `artifacts`, the file the
-/// whole message was saved to.
+/// Why a run's report is partial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Shortfall {
+    /// Its tools were withdrawn, and it answered from what it had.
+    ToolsWithdrawn,
+    /// Every attempt at its last step reached the output-token limit.
+    CutOff,
+    /// The run failed with this error after streaming text.
+    Failed(String),
+}
+
+impl Shortfall {
+    pub(super) fn of(error: &LlmError) -> Self {
+        match error {
+            LlmError::OutputLimit(_) => Self::CutOff,
+            other => Self::Failed(other.to_string()),
+        }
+    }
+
+    fn reason(&self) -> Cow<'static, str> {
+        match self {
+            Self::ToolsWithdrawn => "its tools were withdrawn before it finished".into(),
+            Self::CutOff => "every attempt at this message reached the output-token limit; \
+                             this is the longest, cut off where it ends"
+                .into(),
+            Self::Failed(error) => format!(
+                "the run failed before it answered, and this is the last text it wrote: {error}"
+            )
+            .into(),
+        }
+    }
+}
+
+/// What a sub-agent wrote: its last message, and before it the text of each earlier
+/// step that streamed any, oldest first.
+#[derive(Debug)]
+pub(super) struct Written {
+    pub(super) notes: Vec<String>,
+    pub(super) message: String,
+}
+
+/// A sub-agent's last message, how its run ended, and `artifacts`, the file the
+/// whole message was saved to after its working notes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayReport {
     status: RelayStatus,
@@ -83,10 +139,7 @@ impl RelayReport {
             .saturating_mul(BYTES_PER_TOKEN);
         let shown = head_within(&answer, budget);
         let artifacts = self.artifacts.display();
-        let mut body = format!(
-            "status: {}\nartifacts: {artifacts}\n\n{shown}",
-            self.status.as_str()
-        );
+        let mut body = format!("{}\nartifacts: {artifacts}\n\n{shown}", self.status.lines());
         let left = answer[shown.len()..].trim_start_matches('\n');
         if shown.len() < answer.len() {
             let _ = write!(
@@ -101,18 +154,31 @@ impl RelayReport {
     }
 }
 
-/// A sanitised answer ready to be written, and its length before quoting.
+/// What a sub-agent wrote, ready to be saved, and its message's length before quoting.
 pub(super) struct SavedAnswer {
     pub(super) chars: usize,
     pub(super) contents: String,
 }
 
-/// `answer` as it is saved: control, format and separator characters removed,
-/// chat-template tokens made inert, and quoted under the untrusted-data header.
-pub(super) fn saved_answer(answer: &str) -> SavedAnswer {
-    let body = sanitised(answer);
+/// `written` as it is saved: the notes under a heading, then the message, under one of
+/// its own when there are notes. Control, format and separator characters are removed,
+/// chat-template tokens made inert, and the whole quoted under the untrusted-data header.
+pub(super) fn saved_answer(written: &Written) -> SavedAnswer {
+    let message = sanitised(&written.message);
+    let chars = message.chars().count();
+    if written.notes.is_empty() {
+        return SavedAnswer {
+            chars,
+            contents: quoted(&message),
+        };
+    }
+    let mut body = String::from(NOTES_HEADING);
+    for note in &written.notes {
+        let _ = write!(body, "\n{}\n", sanitised(note));
+    }
+    let _ = write!(body, "\n{MESSAGE_HEADING}\n{message}");
     SavedAnswer {
-        chars: body.chars().count(),
+        chars,
         contents: quoted(&body),
     }
 }
