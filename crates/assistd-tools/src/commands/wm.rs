@@ -144,8 +144,7 @@ impl WmCommand {
                 workspace_phrase(args.workspace.as_ref()),
                 caution
                     .as_deref()
-                    .map(|caution| format!(". {caution}"))
-                    .unwrap_or_default()
+                    .map_or_default(|caution| format!(". {caution}"))
             ),
             summary: launch_summary(launch, args),
             always_allow: approval.iter().cloned().collect(),
