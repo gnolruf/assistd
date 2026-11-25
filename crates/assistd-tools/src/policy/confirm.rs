@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use assistd_config::defaults::CONFIRMATION_PROMPT_SECS;
 use assistd_ipc::{
-    ConfirmSource, Event, EventBody, HostName, PermissionMode, PlanVerdict, PlannedAction,
+    ConfirmSource, Event, EventBody, HostName, PermissionMode, PlanVerdict, PlannedAction, TaskId,
 };
 
 use super::grant::{TurnGrant, spoken_needs};
@@ -504,6 +504,14 @@ impl ConfirmRouter {
         matches!(self.answerer, Answerer::Voice(_))
     }
 
+    /// The saved task the turn is a run of; `None` for any other turn.
+    pub fn task_run(&self) -> Option<TaskId> {
+        match &self.main_source {
+            Some(ConfirmSource::Task { task, .. }) => Some(*task),
+            Some(ConfirmSource::Main | ConfirmSource::Relay { .. }) | None => None,
+        }
+    }
+
     /// Ask the user of a headless turn out loud whether the work `summary` describes may go
     /// ahead with `actions` approved; a yes grants them for the rest of the turn and nothing
     /// for good, and a plan with no actions is agreed to unasked. `None` when this router's
@@ -960,7 +968,7 @@ impl ConfirmationGate for IpcConfirmationGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::test_support::FixedJudge;
+    use crate::commands::test_support::{FixedJudge, RecordingParking};
     use PermissionMode::{AcceptEdits, Auto, Manual};
 
     fn sample_request() -> ConfirmationRequest {
@@ -1147,21 +1155,6 @@ mod tests {
             Answer::from_wire(true, false, Some("  ")),
             Approval::Once.into()
         );
-    }
-
-    /// Records every prompt parked on it and answers each with `answer`.
-    #[derive(Debug)]
-    struct RecordingParking {
-        parked: Mutex<Vec<String>>,
-        answer: Approval,
-    }
-
-    #[async_trait]
-    impl PromptParking for RecordingParking {
-        async fn park(&self, req: ConfirmationRequest) -> Answer {
-            self.parked.lock().push(req.script);
-            self.answer.into()
-        }
     }
 
     #[tokio::test]

@@ -10,12 +10,12 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, info_span, warn};
 
 use assistd_config::Config;
-use assistd_ipc::{ConfirmSource, EventBody, TaskId, TaskRunId, TaskTrigger};
+use assistd_ipc::{ConfirmSource, EventBody, TaskEvent, TaskId, TaskRunId, TaskTrigger};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent, SlotHolder};
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
 };
-use assistd_tools::{ConfirmRouter, TurnContext};
+use assistd_tools::{ConfirmRouter, HostReads, TurnContext};
 
 use super::announce::TaskReply;
 use super::confirms::TaskRunParking;
@@ -126,10 +126,11 @@ impl TaskService {
         reply
     }
 
-    /// Record how the run ended, then fire the triggers waiting on its task finishing
-    /// unless it was cancelled.
+    /// Have the task's path watches drop the run's own changes, record how the run ended,
+    /// then fire the triggers waiting on its task finishing unless it was cancelled.
     async fn record_run_end(&self, turn: &TaskRunTurn, end: TaskRunEnd) {
         info!(target: "assistd::tasks", end = ?end, "task run ended");
+        self.events.note_run_ended(turn.task.id);
         let succeeded = match &end {
             TaskRunEnd::Succeeded { .. } => Some(true),
             TaskRunEnd::Failed { .. } => Some(false),
@@ -196,8 +197,16 @@ impl TaskService {
             cancel: cancel.clone(),
         });
         let persist = self.open_task_run_session(turn).await;
+        let host_reads = self.host_reads_at_start(turn.run).await;
         let outcome = self
-            .unattended_turn(turn, backend, Arc::clone(&lane), persist, cancel)
+            .unattended_turn(
+                turn,
+                backend,
+                Arc::clone(&lane),
+                persist,
+                host_reads,
+                cancel,
+            )
             .await;
         self.end_run_backend(holder, lane.on_main_lane()).await;
         outcome
@@ -280,18 +289,45 @@ impl TaskService {
         }
     }
 
+    /// What run `run`'s history counts as having read before its first step: this machine
+    /// when a changed path started it, since whoever wrote there chose what the run reads,
+    /// and when what started it cannot be told.
+    async fn host_reads_at_start(&self, run: TaskRunId) -> HostReads {
+        let started_by_path = match self.deps.store.run_trigger(run).await {
+            Ok(trigger) => matches!(
+                trigger,
+                TaskTrigger::Event {
+                    event: TaskEvent::PathChanged { .. },
+                    ..
+                }
+            ),
+            Err(e) => {
+                warn!(
+                    target: "assistd::tasks",
+                    error = %e,
+                    "reading what started the run failed; treating it as started by a changed path"
+                );
+                true
+            }
+        };
+        HostReads::known(started_by_path)
+    }
+
     /// Run the task's prompt over `backend` on `lane`, persisting to `persist`, with
-    /// nothing sent to a client or spoken; returns the final reply once the turn finished.
+    /// nothing sent to a client or spoken and its history starting from `host_reads`;
+    /// returns the final reply once the turn finished.
     async fn unattended_turn(
         &self,
         turn: &TaskRunTurn,
         backend: Arc<dyn LlmBackend>,
         lane: Arc<RunLane>,
         persist: Option<PersistTarget>,
+        host_reads: HostReads,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, TaskError> {
         let (llm_tx, llm_rx) = mpsc::channel(EVENT_BUFFER);
-        let agent_task = self.spawn_task_agent(turn, backend, lane, llm_tx, cancel.clone());
+        let agent_task =
+            self.spawn_task_agent(turn, backend, lane, host_reads, llm_tx, cancel.clone());
         let transcript = Arc::clone(&self.deps.transcript);
         let unheard = EventSink::discarding();
         let reply = TurnDriver::new(turn.id.clone(), transcript, persist, unheard)
@@ -304,14 +340,15 @@ impl TaskService {
         }
     }
 
-    /// The main agent's tools over `backend`, each model step giving way to the user's
-    /// interaction on `lane`, with every confirmation labelled as the run's and approved by
-    /// the task's mode or hosts, or parked until answered.
+    /// The main agent's tools over `backend`, its history starting from `host_reads`, each
+    /// model step giving way to the user's interaction on `lane`, every confirmation labelled
+    /// as the run's and approved by the task's mode or hosts, or parked until answered.
     fn spawn_task_agent(
         &self,
         turn: &TaskRunTurn,
         backend: Arc<dyn LlmBackend>,
         lane: Arc<RunLane>,
+        host_reads: HostReads,
         llm_tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> AbortOnDropHandle<Result<(), LlmError>> {
@@ -338,7 +375,9 @@ impl TaskService {
             spec.allowed_hosts.clone(),
             Arc::new(parking),
         );
-        let context = TurnContext::answered_by(router).on_lane(lane);
+        let context = TurnContext::answered_by(router)
+            .on_lane(lane)
+            .reading_into(host_reads);
         let agent_turn = async move {
             agent
                 .run_turn(&context, prompt, Vec::new(), llm_tx, cancel)

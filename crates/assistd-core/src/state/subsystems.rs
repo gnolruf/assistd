@@ -8,7 +8,7 @@ use parking_lot::RwLock;
 use assistd_documents::Extractor;
 use assistd_ipc::{ComponentReadiness, McpServerState, McpTransportKind};
 use assistd_llm::{LlmBackend, SlotStash};
-use assistd_tools::{ToolCatalog, ToolRegistry, ToolsDisabled};
+use assistd_tools::{ToolCatalog, ToolRegistry, ToolsDisabled, WatchedPaths};
 use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::readiness::{Readiness, ReadinessCell};
 use assistd_voice::VoiceManager;
@@ -84,6 +84,8 @@ pub struct Subsystems {
     /// Where an index pass is asked for, and what the last ones did.
     pub document_index: Arc<DocumentIndex>,
     pub tools_disabled: Option<ToolsDisabled>,
+    /// The paths saved tasks watch, as the tool sandbox reads them.
+    pub watched_paths: Arc<WatchedPaths>,
     /// Keeps each holder's slot state while another uses the slot.
     pub slot_stash: Option<Arc<SlotStash>>,
 }
@@ -113,8 +115,15 @@ impl Subsystems {
             documents: Arc::new(Extractor::unavailable("not configured")),
             document_index: Arc::default(),
             tools_disabled: None,
+            watched_paths: Arc::default(),
             slot_stash: None,
         }
+    }
+
+    /// Report the paths saved tasks watch to `watched_paths`, which the tool sandbox reads.
+    pub fn with_watched_paths(mut self, watched_paths: Arc<WatchedPaths>) -> Self {
+        self.watched_paths = watched_paths;
+        self
     }
 
     /// Give planning turns `planning`.

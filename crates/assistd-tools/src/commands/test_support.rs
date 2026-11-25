@@ -22,9 +22,9 @@ use super::{
 use crate::TurnContext;
 use crate::command::CommandRegistry;
 use crate::policy::{
-    Approval, ApprovalGate, Approvals, ConfirmRouter, ConfirmationGate, ConfirmationRequest,
-    JudgeModel, Protected, SafetyJudge, SandboxInfo, SandboxRequest, SharedDirs, ToolSandbox,
-    probe_sandbox,
+    Answer, Approval, ApprovalGate, Approvals, ConfirmRouter, ConfirmationGate,
+    ConfirmationRequest, JudgeModel, PromptParking, Protected, SafetyJudge, SandboxInfo,
+    SandboxRequest, SharedDirs, ToolSandbox, probe_sandbox,
 };
 use crate::test_support::{AlwaysAllowGate, bash_policy, inert_sandbox};
 use crate::vision::VisionGate;
@@ -200,6 +200,21 @@ impl ConfirmationGate for RecordingGate {
     async fn confirm(&self, _turn: &TurnContext, req: ConfirmationRequest) -> Approval {
         self.requests.lock().push(req);
         self.answer
+    }
+}
+
+/// Records every prompt parked on it and answers each with `answer`.
+#[derive(Debug)]
+pub(crate) struct RecordingParking {
+    pub(crate) parked: Mutex<Vec<String>>,
+    pub(crate) answer: Approval,
+}
+
+#[async_trait]
+impl PromptParking for RecordingParking {
+    async fn park(&self, req: ConfirmationRequest) -> Answer {
+        self.parked.lock().push(req.script);
+        self.answer.into()
     }
 }
 

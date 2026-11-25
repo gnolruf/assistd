@@ -12,7 +12,7 @@ use assistd_ipc::{
 use assistd_memory::TaskRecord;
 use assistd_tools::Answer;
 
-use super::event_triggers::{check_chain, resolve_watched_paths};
+use super::event_triggers::{KeptWritable, check_chain, resolve_watched_paths};
 use super::fire_times::{check_triggers, next_fire, upcoming_fires};
 use super::{FailedStep, TaskError, TaskService};
 use crate::bus::EventSink;
@@ -200,7 +200,8 @@ impl TaskService {
         let now = Local::now();
         let mut triggers = [trigger];
         check_triggers(&triggers, &stored, &now)?;
-        resolve_watched_paths(&mut triggers).await?;
+        let kept_writable = KeptWritable::dirs(&self.deps.config.tools.scratch).await;
+        resolve_watched_paths(&mut triggers, &kept_writable).await?;
         check_chain(task, &triggers, &self.deps.store.list().await?)?;
         Ok(upcoming_fires(&triggers[0], &now, CHECKED_FIRES))
     }
@@ -236,7 +237,7 @@ impl TaskService {
     /// Save `spec` as task `task`, or as a new task, once its mode is one the daemon allows and
     /// its triggers pass
     /// [`check_triggers`] against those it replaces and [`check_chain`], with its
-    /// watched paths tilde-expanded.
+    /// watched paths tilde-expanded and none holding a directory every turn writes in.
     async fn save_task(
         &self,
         task: Option<TaskId>,
@@ -250,7 +251,8 @@ impl TaskService {
             None => Vec::new(),
         };
         check_triggers(&spec.triggers, &stored, &Local::now())?;
-        resolve_watched_paths(&mut spec.triggers).await?;
+        let kept_writable = KeptWritable::dirs(&self.deps.config.tools.scratch).await;
+        resolve_watched_paths(&mut spec.triggers, &kept_writable).await?;
         check_chain(task, &spec.triggers, &self.deps.store.list().await?)?;
         Ok(self.deps.store.save(task, spec).await?)
     }

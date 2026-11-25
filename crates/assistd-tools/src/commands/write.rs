@@ -17,8 +17,8 @@ use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, U
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
     Action, Analysis, Approval, Class, Confirmation, ConfirmationGate, ConfirmationRequest, Effect,
-    PathGuards, Review, Risk, SandboxInfo, Summary, Unattended, admits_edit, guarded_review,
-    on_blocking_pool, spoken_path,
+    PathGuards, Review, Risk, SandboxInfo, Summary, Unattended, WatchedPath, admits_edit,
+    guarded_review, on_blocking_pool, spoken_path, watched_refusal,
 };
 
 /// Leading characters of the content shown when asking to confirm a write.
@@ -111,7 +111,8 @@ impl WriteCommand {
     }
 
     /// The path to write once the write may go ahead: it lands in the shared scratch, the
-    /// review clears it, or the gate approves. `Err` holds the refusal or cancellation.
+    /// review clears it, or the gate approves; a path another task watches goes through
+    /// [`Self::authorized_to_start`] instead. `Err` holds the refusal or cancellation.
     async fn authorized(
         &self,
         turn: &TurnContext,
@@ -119,6 +120,12 @@ impl WriteCommand {
         content: &[u8],
         raw_path: &str,
     ) -> Result<PathBuf, CommandError> {
+        let locked = self.sandbox.watched.locked_for(turn.task_run());
+        if let Some(watch) = locked.over(&target.path) {
+            return self
+                .authorized_to_start(turn, target, watch, content, raw_path)
+                .await;
+        }
         if self
             .scratch()
             .is_some_and(|dir| target.path.starts_with(dir))
@@ -137,6 +144,41 @@ impl WriteCommand {
                     Ok(target.path)
                 }
             }
+        }
+    }
+
+    /// The path to write once the user agreed to a write that starts a run of `watch`'s task,
+    /// asked in every mode with no "always allow"; refused in a task run, where nobody is
+    /// present to start another task.
+    async fn authorized_to_start(
+        &self,
+        turn: &TurnContext,
+        target: WriteTarget,
+        watch: &WatchedPath,
+        content: &[u8],
+        raw_path: &str,
+    ) -> Result<PathBuf, CommandError> {
+        if turn.task_run().is_some() {
+            let why = watch.refusal(raw_path);
+            return Err(watched_refusal(
+                "write",
+                &why,
+                "a path the task does not watch",
+            ));
+        }
+        let confirmation = match target.review {
+            Review::Refuse(why) => return Err(write_refused(raw_path, &why)),
+            Review::Ask(confirmation, _) => confirmation,
+            Review::Clear => Confirmation::Edit(vec![raw_path.to_string()]),
+        };
+        let request = starting_task(
+            confirmation_request(&target.path, content, &confirmation, Unattended::Never),
+            watch,
+        );
+        if self.gate.confirm(turn, request).await == Approval::Deny {
+            Err(self.write_cancelled(raw_path))
+        } else {
+            Ok(target.path)
         }
     }
 
@@ -198,7 +240,9 @@ impl Command for WriteCommand {
          depth below a prefix, are refused. Writes outside the shared scratch \
          directory ask the user first unless the permission mode accepts edits; \
          credentials, startup files, shell profiles and directories on PATH \
-         always ask. A file under /tmp \
+         always ask, and so does a path a saved task watches, since the write \
+         starts that task; a task run may write only where its own task watches. \
+         A file under /tmp \
          or /run is not visible to `bash` scripts, which get empty ones of \
          their own; for a file they must see, use {sharing_hint}. \
          Tilde expansion is supported. Exit 126 on policy denial or a \
@@ -489,6 +533,22 @@ fn confirmation_request(
     }
 }
 
+/// `request` for a write under `watch`, which starts a run of its task: said so, and asked
+/// in every mode.
+fn starting_task(request: ConfirmationRequest, watch: &WatchedPath) -> ConfirmationRequest {
+    let starts = format!(
+        "changes a path the task \"{}\" watches, which starts a run of it",
+        watch.task_name
+    );
+    ConfirmationRequest {
+        matched_pattern: format!("{}; it {starts}", request.matched_pattern),
+        summary: Summary::of(request.summary.what).because(format!("It {starts}.")),
+        risk: Risk::Elevated,
+        unattended: Unattended::Never,
+        ..request
+    }
+}
+
 /// A write of `text` to `path` that asks because of `confirmation`, in a sentence.
 fn write_summary(path: &Path, text: &str, confirmation: &Confirmation) -> Summary {
     let lines = match text.lines().count() {
@@ -518,14 +578,15 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use assistd_ipc::PermissionMode;
+    use assistd_ipc::{PermissionMode, TaskId, TaskRunId};
+    use parking_lot::Mutex;
 
     use super::*;
     use crate::TurnContext;
     use crate::command::CommandRegistry;
     use crate::command::run_rendered;
-    use crate::commands::test_support::{RecordingGate, router_in, test_sandbox};
-    use crate::policy::{GuardRoots, IpcConfirmationGate, SharedDirs};
+    use crate::commands::test_support::{RecordingGate, RecordingParking, router_in, test_sandbox};
+    use crate::policy::{ConfirmRouter, GuardRoots, IpcConfirmationGate, SharedDirs};
     use crate::test_support::{AlwaysAllowGate, DenyAllGate, inert_sandbox};
 
     fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
@@ -1067,6 +1128,67 @@ mod tests {
             let out = run_rendered(&cmd, asking).await;
             assert_eq!(rx.try_recv().is_ok(), asks, "{mode:?}");
             assert_eq!(target.exists(), !asks, "{mode:?}: {out:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_watched_path_takes_a_write_from_its_tasks_run_or_once_the_user_is_asked() {
+        let dir = tempdir().expect("tempdir");
+        let inbox = std::fs::canonicalize(dir.path())
+            .expect("canonical tempdir")
+            .join("inbox");
+        std::fs::create_dir(&inbox).expect("inbox");
+        let sandbox = test_sandbox();
+        sandbox.watched.replace(vec![WatchedPath {
+            task: TaskId(1),
+            task_name: "sort inbox".into(),
+            path: inbox.clone(),
+        }]);
+        let cmd = WriteCommand::new(
+            cfg_from(&[dir.path()]),
+            Arc::new(IpcConfirmationGate),
+            sandbox,
+        );
+        let target = inbox.join("note.txt");
+
+        let (router, mut rx) = router_in(PermissionMode::AcceptEdits);
+        let asking = CommandInput {
+            turn: TurnContext::answered_by(router),
+            ..args_writing(&target)
+        };
+        run_rendered(&cmd, asking).await;
+        let asked = rx.try_recv().expect("the user was not asked");
+        assert!(format!("{asked:?}").contains("sort inbox"), "{asked:?}");
+        assert!(!target.exists());
+
+        for (task, writes) in [(TaskId(2), false), (TaskId(1), true)] {
+            let parking = Arc::new(RecordingParking {
+                parked: Mutex::new(Vec::new()),
+                answer: Approval::Once,
+            });
+            let router = ConfirmRouter::for_task_run(
+                "r".into(),
+                ConfirmSource::Task {
+                    task,
+                    run: TaskRunId(7),
+                },
+                PermissionMode::AcceptEdits,
+                None,
+                Vec::new(),
+                Arc::clone(&parking) as _,
+            );
+            let run = CommandInput {
+                turn: TurnContext::answered_by(router),
+                ..args_writing(&target)
+            };
+            let out = run_rendered(&cmd, run).await;
+            assert_eq!(target.exists(), writes, "{task}: {out:?}");
+            assert!(parking.parked.lock().is_empty(), "{task}");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stderr).contains("watched by the task"),
+                !writes,
+                "{task}: {out:?}"
+            );
         }
     }
 

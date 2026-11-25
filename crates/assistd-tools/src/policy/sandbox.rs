@@ -6,6 +6,7 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use assistd_ipc::TaskId;
 use assistd_utils::program::ProgramError;
 use tokio::process::Command as ProcCommand;
 
@@ -16,6 +17,7 @@ use self::scope::CommandScope;
 use super::allowlist::SearchPath;
 use super::on_blocking_pool;
 use super::path_class::{GuardRoots, PathGuards};
+use super::watched::{LockedPaths, WatchedPaths};
 
 mod command;
 mod confined;
@@ -110,6 +112,8 @@ pub struct SandboxInfo {
     pub extra_args: Vec<String>,
     pub protected: Protected,
     pub shared: SharedDirs,
+    /// The paths saved tasks watch, read-only to every command but a run of their task's.
+    pub watched: Arc<WatchedPaths>,
     /// Absolute directories host shells look programs up in.
     host_path: Vec<PathBuf>,
     /// Directories systemd loads user units from, as `systemd-analyze`
@@ -201,6 +205,7 @@ impl SandboxInfo {
                 scratch_cap: None,
                 read_only,
             },
+            watched: Arc::default(),
             host_path: self.host_path.clone(),
             unit_dirs: self.unit_dirs.clone(),
             confined: None,
@@ -257,9 +262,7 @@ impl SandboxInfo {
                 ..roots
             },
             Profile::Host => GuardRoots {
-                cwd: Layout::host(self, host_home.clone(), HomeAccess::Writable)
-                    .mounts
-                    .working_dir,
+                cwd: self.host_working_dir(host_home.clone()),
                 home: host_home.map(PathBuf::from),
                 config_home: std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
                 data_home: std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
@@ -285,24 +288,31 @@ impl SandboxInfo {
     pub async fn private_dir_hiding(self: &Arc<Self>, path: PathBuf) -> Option<PathBuf> {
         let info = Arc::clone(self);
         on_blocking_pool(move || {
-            let mounts = info.layout(HomeAccess::Writable).mounts;
+            let mounts = info
+                .layout(HomeAccess::Writable, &LockedPaths::default())
+                .mounts;
             mounts.private_dir_of(&path).cloned()
         })
         .await
     }
 
-    /// `program` with `args` set up to run in bubblewrap, with `home` as its access to `$HOME`.
-    /// Fails when the seccomp filter cannot be written, or a quarantine input's descriptor
-    /// cannot be duplicated for the command.
+    /// `program` with `args` set up to run in bubblewrap, with `home` as its access to `$HOME`
+    /// and every watched path read-only but those only `run_of`'s task watches. Fails when the
+    /// seccomp filter cannot be written or a quarantine input's descriptor duplicated.
     pub async fn command(
         self: &Arc<Self>,
         program: &str,
         args: Vec<String>,
         home: HomeAccess,
+        run_of: Option<TaskId>,
     ) -> io::Result<SandboxedCommand> {
         let info = Arc::clone(self);
         let program = program.to_owned();
-        on_blocking_pool(move || info.build_command(&program, args, home)).await
+        on_blocking_pool(move || {
+            let locked = info.watched.locked_for(run_of);
+            info.build_command(&program, args, home, &locked)
+        })
+        .await
     }
 
     /// Blocks on the filesystem, which the layout is read from.
@@ -311,12 +321,13 @@ impl SandboxInfo {
         program: &str,
         args: I,
         access: HomeAccess,
+        locked: &LockedPaths,
     ) -> io::Result<SandboxedCommand>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let layout = self.layout(access);
+        let layout = self.layout(access, locked);
         let command = sandboxed_command(&self.programs, &layout, program, args)?;
         Ok(SandboxedCommand {
             command,
@@ -324,13 +335,20 @@ impl SandboxInfo {
         })
     }
 
-    /// What a command with `access` to `$HOME` gets mounted. Reads `$HOME` and the command
-    /// directories, so it blocks on the filesystem.
-    fn layout(&self, access: HomeAccess) -> Layout<'_> {
+    /// What a command with `access` to `$HOME` gets mounted, `locked` read-only in a host
+    /// profile. Reads `$HOME` and the command directories, so it blocks on the filesystem.
+    fn layout(&self, access: HomeAccess, locked: &LockedPaths) -> Layout<'_> {
         match &self.profile {
-            Profile::Host => Layout::host(self, std::env::var("HOME").ok(), access),
+            Profile::Host => Layout::host(self, std::env::var("HOME").ok(), access, locked),
             Profile::Quarantine(quarantine) => Layout::quarantine(self, quarantine),
         }
+    }
+
+    /// The directory a host-profile command starts in. Blocks on the filesystem.
+    fn host_working_dir(&self, home: Option<String>) -> Option<PathBuf> {
+        Layout::host(self, home, HomeAccess::Writable, &LockedPaths::default())
+            .mounts
+            .working_dir
     }
 }
 

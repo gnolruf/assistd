@@ -654,6 +654,27 @@ service on the `TaskRunner` keeps one watch per enabled trigger that needs one
 saved tasks after every save, enable, disable or delete. Event fires queue
 through the same coalescing as time triggers.
 
+A watched path is writable only by a run of the task that watches it. inotify
+does not say who wrote a file, so the daemon decides who may write instead. The
+same service reports the enabled `PathChanged` paths to `WatchedPaths`, which
+the tool sandbox owns. For every turn but a run of the watching task, each
+watched path that exists is bound read-only in the `bash` sandbox, after
+`bwrap_extra_args`, and a script that names one as something it changes is
+refused before it starts. `write` to one is refused in a task run. In a turn
+with a user it asks every time, in every permission mode, names the task the
+write will start, and offers no "always allow". Two tasks that watch
+overlapping paths each lock the other out. When a run ends, the watches of its
+task drop the changes they hold before the end is recorded, so what the run
+wrote there does not fire it again; a change someone else made there during
+the run is dropped with them. A run a `PathChanged` trigger started begins as
+having read this machine, since whoever wrote the file chose what the run
+reads. `TaskSave` refuses a path that is or holds `$HOME`, the daemon's
+working directory or the scratch directory, which would leave them read-only
+to every other turn. A watched file that has been deleted cannot be bound, and
+a stdio MCP server's writable grant is outside this rule. The cool-down stays
+as the bound on a loop through a program the daemon does not run, such as a
+sync client.
+
 An admitted run takes the request guard, as a query does, then opens an
 `isolated_backend`. That backend gets the main system prompt plus a
 short preamble saying no user is present, and the main agent's full tool

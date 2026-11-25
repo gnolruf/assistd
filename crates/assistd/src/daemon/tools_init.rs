@@ -11,7 +11,7 @@ use assistd_core::{BuildToolsDeps, McpServerStatus, RelayDeps};
 use assistd_memory::SessionId;
 use assistd_tools::{
     ConfirmationGate, IpcConfirmationGate, MemoryOps, PinnedApprovalGate, SandboxInfo,
-    ToolRegistry, ToolSandbox, ToolsDisabled, VisionGate,
+    ToolRegistry, ToolSandbox, ToolsDisabled, VisionGate, WatchedPaths,
 };
 use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::readiness::ReadinessCell;
@@ -32,6 +32,15 @@ pub(super) struct ToolsSubsystem {
     pub mcp_fleet: Option<Arc<McpFleet>>,
     /// The sandbox the tools run in; without one the registry is empty.
     pub sandbox: Result<Arc<SandboxInfo>, ToolsDisabled>,
+}
+
+impl ToolsSubsystem {
+    /// The watched paths the sandbox reads; with no sandbox, a set nothing reads.
+    pub(super) fn watched_paths(&self) -> Arc<WatchedPaths> {
+        self.sandbox
+            .as_ref()
+            .map_or_else(|_| Arc::default(), |sandbox| Arc::clone(&sandbox.watched))
+    }
 }
 
 /// The subsystems the tools reach.

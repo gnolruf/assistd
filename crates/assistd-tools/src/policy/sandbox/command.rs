@@ -17,6 +17,7 @@ use super::{
     HomeAccess, InputBind, Protected, QuarantineProfile, SANDBOX_PATH, SandboxInfo,
     SandboxPrograms, SharedDirs, scope, seccomp,
 };
+use crate::policy::watched::LockedPaths;
 
 /// The caps every sandboxed command runs under, as `prlimit` flags: tasks,
 /// threads included, in the sandbox's own user namespace; bytes of a
@@ -82,8 +83,13 @@ pub(super) struct Layout<'info> {
 impl<'info> Layout<'info> {
     /// A host-profile command's sandbox with `home` as `$HOME`. Flag order is load-bearing: profile,
     /// ancestor self-binds, shared directories, read-only mounts over `home`'s command directories
-    /// and protections, then `extra_args` past the seccomp filter. Blocks on the filesystem.
-    pub(super) fn host(info: &SandboxInfo, home: Option<String>, access: HomeAccess) -> Self {
+    /// and protections, then past the seccomp filter `extra_args` and `locked`. Blocks on the filesystem.
+    pub(super) fn host(
+        info: &SandboxInfo,
+        home: Option<String>,
+        access: HomeAccess,
+        locked: &LockedPaths,
+    ) -> Self {
         let home = SandboxHome::read(home);
         let command_dirs = home.as_ref().map_or_default(|home| {
             home.locked_command_dirs(access, &info.host_path, &info.protected.dirs)
@@ -96,6 +102,7 @@ impl<'info> Layout<'info> {
         flags.extend(os_strings(protection_flags(&info.protected, &writable)));
         let mut late_flags = os_strings(extra_args_for(&info.extra_args, access));
         let mut mounts = Mounts::of(&as_os_strs(flags.iter().chain(&late_flags)));
+        late_flags.extend(os_strings(lock_flags(locked, &mounts)));
         let home_dir = home.as_ref().map(|home| Path::new(&home.dir));
         if let Some(dir) = host_working_dir(std::env::current_dir().ok(), &mounts, home_dir) {
             late_flags.extend(["--chdir".into(), dir.clone().into_os_string()]);
@@ -316,6 +323,22 @@ fn protection_flags(protected: &Protected, writable: &[PathBuf]) -> Vec<PathBuf>
     dirs.chain(sockets).collect()
 }
 
+/// Read-only binds over the `locked` paths that exist outside `mounts`' private
+/// directories, where a bind would show a host path the sandbox hides.
+fn lock_flags(locked: &LockedPaths, mounts: &Mounts) -> Vec<PathBuf> {
+    locked
+        .paths()
+        .filter(|path| mounts.private_dir_of(path).is_none() && path.exists())
+        .flat_map(|path| {
+            [
+                PathBuf::from("--ro-bind"),
+                path.to_path_buf(),
+                path.to_path_buf(),
+            ]
+        })
+        .collect()
+}
+
 /// `extra_args` as a command with `access` gets them: as they are, or
 /// [`read_only_extra_args`] under a read-only home.
 fn extra_args_for(extra_args: &[String], access: HomeAccess) -> Vec<&str> {
@@ -367,9 +390,12 @@ fn host_working_dir(cwd: Option<PathBuf>, mounts: &Mounts, home: Option<&Path>) 
 mod tests {
     use std::sync::Arc;
 
+    use assistd_ipc::TaskId;
+
     use super::super::Profile;
     use super::super::scope::CommandScope;
     use super::*;
+    use crate::policy::watched::WatchedPath;
 
     fn programs() -> SandboxPrograms {
         SandboxPrograms {
@@ -389,6 +415,7 @@ mod tests {
             extra_args,
             protected: Protected::default(),
             shared: SharedDirs::default(),
+            watched: Arc::default(),
             host_path: Vec::new(),
             unit_dirs: Vec::new(),
             confined: None,
@@ -418,7 +445,7 @@ mod tests {
         program: &str,
         args: &[&str],
     ) -> ProcCommand {
-        let layout = Layout::host(info, home, access);
+        let layout = Layout::host(info, home, access, &LockedPaths::default());
         sandboxed_command(&info.programs, &layout, program, args).expect("bwrap command")
     }
 
@@ -514,7 +541,12 @@ mod tests {
         ];
         let argv = argv_of(
             &info
-                .build_command("true", [""; 0], HomeAccess::Writable)
+                .build_command(
+                    "true",
+                    [""; 0],
+                    HomeAccess::Writable,
+                    &LockedPaths::default(),
+                )
                 .expect("command")
                 .command,
         );
@@ -537,10 +569,58 @@ mod tests {
     }
 
     #[test]
+    fn a_watched_path_is_read_only_to_every_command_but_a_run_of_its_task() {
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
+        let inbox = home.join("inbox");
+        std::fs::create_dir(&inbox).expect("inbox");
+        let inbox = inbox.to_string_lossy().into_owned();
+        let user_bind = ["--bind", inbox.as_str(), inbox.as_str()];
+        let lock = ["--ro-bind", inbox.as_str(), inbox.as_str()];
+        let info = bwrap_info(user_bind.map(String::from).into());
+        let watched_by_task_1 = |path: &str| WatchedPath {
+            task: TaskId(1),
+            task_name: "sort inbox".into(),
+            path: PathBuf::from(path),
+        };
+        info.watched
+            .replace(vec![watched_by_task_1(&inbox), watched_by_task_1("/tmp")]);
+
+        for (run_of, locked) in [
+            (None, true),
+            (Some(TaskId(2)), true),
+            (Some(TaskId(1)), false),
+        ] {
+            let layout = Layout::host(
+                &info,
+                Some(home.to_string_lossy().into_owned()),
+                HomeAccess::Writable,
+                &info.watched.locked_for(run_of),
+            );
+            let argv = argv_of(
+                &sandboxed_command(&info.programs, &layout, "true", [""; 0]).expect("command"),
+            );
+            let position_of = |bind: [&str; 3]| argv.windows(3).position(|w| w == bind);
+            let bound = position_of(user_bind).expect("the user's bind");
+            assert_eq!(
+                position_of(lock).is_some_and(|lock| lock > bound),
+                locked,
+                "{run_of:?}: {argv:?}"
+            );
+            assert_eq!(position_of(["--ro-bind", "/tmp", "/tmp"]), None, "{argv:?}");
+        }
+    }
+
+    #[test]
     fn bwrap_process_starts_from_a_cleared_environment() {
         let info = bwrap_info(Vec::new());
         let cmd = info
-            .build_command("true", Vec::<String>::new(), HomeAccess::Writable)
+            .build_command(
+                "true",
+                Vec::<String>::new(),
+                HomeAccess::Writable,
+                &LockedPaths::default(),
+            )
             .expect("command")
             .command;
         let runtime_dir = (OsString::from("XDG_RUNTIME_DIR"), "/run/user/1000".into());

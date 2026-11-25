@@ -8,7 +8,7 @@ use tokio::task::JoinError;
 use assistd_config::Config;
 use assistd_llm::{LlmBackend, LlmError, SlotStash};
 use assistd_memory::{MemoryError, TaskStore};
-use assistd_tools::ToolCatalog;
+use assistd_tools::{ToolCatalog, WatchedPaths};
 use assistd_voice::VoiceManager;
 
 use self::confirms::TaskConfirms;
@@ -112,6 +112,8 @@ pub(crate) struct TaskDeps {
     pub(crate) presence: Arc<PresenceManager>,
     pub(crate) vision_revalidator: Option<Arc<VisionRevalidator>>,
     pub(crate) tools: Arc<ToolCatalog>,
+    /// Told which paths enabled tasks watch, so only a run of the watching task may change one.
+    pub(crate) watched_paths: Arc<WatchedPaths>,
     pub(crate) agents: AgentSpec,
     pub(crate) planner: Arc<Planner>,
     pub(crate) slot_stash: Option<Arc<SlotStash>>,

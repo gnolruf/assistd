@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use assistd_utils::path::{canonical_existing, expand_tilde, lexical_clean, tilde_remainder};
 
 use super::review::{Action, Analysis, Class, Effect};
+use super::watched::LockedPaths;
 
 /// Credentials and identity, below `$HOME`.
 const HOME_CREDENTIALS: &[&str] = &[".gnupg", ".netrc", ".ssh"];
@@ -306,6 +307,18 @@ impl PathGuards {
             }
         }
         Some(outside)
+    }
+
+    /// Why the first of `effects` to change a path `locked` holds is refused. Blocks on the
+    /// filesystem.
+    pub(crate) fn locked_change(&self, effects: &[Effect], locked: &LockedPaths) -> Option<String> {
+        effects
+            .iter()
+            .filter(|effect| effect.action != Action::Read)
+            .find_map(|effect| {
+                let path = self.resolve(effect)?;
+                Some(locked.over(&path)?.refusal(&effect.path))
+            })
     }
 
     /// The canonical path `effect` lands on, following a final symlink unless it deletes the

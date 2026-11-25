@@ -122,7 +122,8 @@ impl TaskService {
     }
 
     /// Fire `trigger` of `task` once per burst of changes under `path` until the watch
-    /// on it fails or is lost.
+    /// on it fails or is lost. The changes held when a run of `task` ends are the run's
+    /// own, and fire nothing.
     async fn watch_until_lost(
         &self,
         task: TaskId,
@@ -135,10 +136,15 @@ impl TaskService {
             Err(reason) => return WatchEnd::Failed(reason),
         };
         self.events.clear_watch_failure(task, trigger);
+        let run_ended = self.events.run_ended(task, trigger);
         loop {
-            watch.settled(debounce).await;
+            let fires = tokio::select! {
+                biased;
+                () = run_ended.notified() => false,
+                () = watch.settled(debounce) => true,
+            };
             let Report { changes, lost, .. } = watch.take();
-            if changes {
+            if fires && changes {
                 self.fire_watched_trigger(task, trigger).await;
             }
             if let Some(reason) = lost {

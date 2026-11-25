@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 use tracing::warn;
 
-use assistd_ipc::RelayEvent;
+use assistd_ipc::{RelayEvent, TaskId};
 
 use crate::policy::{Answer, Approval, ConfirmRouter, ConfirmationRequest};
 
@@ -174,6 +174,11 @@ impl TurnContext {
     /// The lane the turn gives up on request; `None` when it never has to.
     pub fn lane(&self) -> Option<&Arc<dyn YieldableLane>> {
         self.lane.as_ref()
+    }
+
+    /// The saved task the turn is a run of, with no user present; `None` for any other turn.
+    pub fn task_run(&self) -> Option<TaskId> {
+        self.router.as_ref().and_then(|router| router.task_run())
     }
 
     /// Whether the turn's prompts are asked out loud.

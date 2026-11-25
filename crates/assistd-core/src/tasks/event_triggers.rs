@@ -5,8 +5,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use assistd_config::ToolsScratchConfig;
 use assistd_ipc::{FinishOutcome, TaskEvent, TaskId, TaskTrigger};
 use assistd_memory::TaskRecord;
+use assistd_tools::policy::on_blocking_pool;
 use assistd_utils::path::expand_tilde_from_env;
 
 use super::fire_times::TriggerError;
@@ -21,6 +23,43 @@ pub(super) enum Occurrence {
         task: TaskId,
         succeeded: bool,
     },
+}
+
+/// A directory every turn writes in, which no task may watch, alone or as part of a
+/// larger tree, since a watched path is writable only by that task's runs.
+#[derive(Debug)]
+pub(super) struct KeptWritable {
+    /// Canonical.
+    dir: PathBuf,
+    what: &'static str,
+}
+
+impl KeptWritable {
+    /// `$HOME`, the daemon's working directory and the scratch directory of `scratch`,
+    /// leaving out any that cannot be resolved.
+    pub(super) async fn dirs(scratch: &ToolsScratchConfig) -> Vec<Self> {
+        let scratch = scratch.resolved_dir().ok();
+        on_blocking_pool(move || {
+            [
+                (
+                    std::env::var_os("HOME").map(PathBuf::from),
+                    "your home folder",
+                ),
+                (
+                    std::env::current_dir().ok(),
+                    "the daemon's working directory",
+                ),
+                (scratch, "the scratch directory"),
+            ]
+            .into_iter()
+            .filter_map(|(dir, what)| {
+                let dir = dir?.canonicalize().ok()?;
+                Some(Self { dir, what })
+            })
+            .collect()
+        })
+        .await
+    }
 }
 
 /// `trigger`'s event and cool-down when it is an event trigger.
@@ -57,10 +96,11 @@ pub(super) fn fires_on(event: &TaskEvent, occurrence: Occurrence) -> bool {
     }
 }
 
-/// Tilde-expand every watched path in `triggers`, refusing one that is relative or
-/// cannot be read.
+/// Tilde-expand every watched path in `triggers`, refusing one that is relative, cannot be
+/// read, or holds one of `kept_writable`.
 pub(super) async fn resolve_watched_paths(
     triggers: &mut [TaskTrigger],
+    kept_writable: &[KeptWritable],
 ) -> Result<(), TriggerError> {
     for trigger in triggers {
         let TaskTrigger::Event {
@@ -74,12 +114,22 @@ pub(super) async fn resolve_watched_paths(
         if !path.is_absolute() {
             return Err(TriggerError::RelativePath(path.clone()));
         }
-        tokio::fs::metadata(&*path)
-            .await
-            .map_err(|source| TriggerError::MissingPath {
+        let watched =
+            tokio::fs::canonicalize(&*path)
+                .await
+                .map_err(|source| TriggerError::MissingPath {
+                    path: path.clone(),
+                    source,
+                })?;
+        if let Some(kept) = kept_writable
+            .iter()
+            .find(|kept| kept.dir.starts_with(&watched))
+        {
+            return Err(TriggerError::LocksTooMuch {
                 path: path.clone(),
-                source,
-            })?;
+                kept: kept.what,
+            });
+        }
     }
     Ok(())
 }
@@ -166,6 +216,34 @@ mod tests {
                 kept_runs: None,
             },
             next_fire: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_watch_over_a_directory_every_turn_writes_in_is_refused() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path().canonicalize().unwrap();
+        let inbox = home.join("inbox");
+        std::fs::create_dir(&inbox).unwrap();
+        let kept_writable = [KeptWritable {
+            dir: home.clone(),
+            what: "your home folder",
+        }];
+        let parent = home.parent().unwrap().to_path_buf();
+        for (path, refused) in [(home, true), (parent, true), (inbox, false)] {
+            let mut triggers = [TaskTrigger::Event {
+                event: TaskEvent::PathChanged {
+                    path: path.clone(),
+                    debounce_secs: 2,
+                },
+                cooldown_secs: 60,
+            }];
+            let checked = resolve_watched_paths(&mut triggers, &kept_writable).await;
+            assert_eq!(
+                matches!(checked, Err(TriggerError::LocksTooMuch { .. })),
+                refused,
+                "{path:?}: {checked:?}"
+            );
         }
     }
 
