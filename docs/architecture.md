@@ -891,7 +891,15 @@ read from the shared MIME database, `mimeapps.list` and
 detail that does not suit speech in a file and open it this way. Entries under a visible
 `$HOME` entry, where sandboxed commands can write, are refused; the user
 confirms each launch unless they chose "always allow" for that entry,
-and one with files or URLs is never approved for good; `write` restricts targets to a
+and one with files or URLs is never approved for good. The approval is kept
+with the canonical path of the program the entry's `Exec` line runs, found
+through `PATH` as the compositor's shell would, and holds only while the
+entry still runs it. When that program, another absolute path on the `Exec`
+line, or the terminal emulator a `Terminal=true` entry runs in lies under a
+visible `$HOME` entry, the launch asks every time, in every mode, with a
+prompt that says the program can be changed from inside the sandbox; a
+program that cannot be found is never approved for good either. What a
+program outside the sandbox's reach goes on to load is not seen; `write` restricts targets to a
 configured allowlist, refuses dot entries at any depth below it, and puts each
 target through the same path guards as `bash`, asking before writing outside
 `tools.scratch.dir`; `web fetch` asks before fetching from a host not

@@ -2,7 +2,10 @@
 //! describe.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+
+use assistd_utils::program::find_program;
 
 use crate::policy::is_within_visible_home_entry;
 
@@ -35,8 +38,55 @@ pub(super) struct DesktopEntry {
     /// Listed in the `TerminalEmulator` category.
     pub(super) is_terminal_emulator: bool,
     icon: Option<String>,
-    /// `Exec` split into arguments, quoting removed and field codes kept.
-    exec: Vec<String>,
+    /// The first word of `Exec`, quoting removed.
+    program: String,
+    /// The other words of `Exec`, quoting removed and field codes kept.
+    arguments: Vec<String>,
+}
+
+/// What a launch runs, as far as its command line says, and whether an approval can be
+/// pinned to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Executable {
+    /// The canonical path of the program, which sandboxed commands cannot write, like
+    /// every other path the command line names.
+    Pinned(PathBuf),
+    /// A path the command line names that sandboxed commands can write.
+    Writable(PathBuf),
+    /// Why the program could not be found from here.
+    Unresolved(String),
+}
+
+impl Executable {
+    /// The same verdict for a launch that also runs `program`.
+    pub(super) fn running_also(self, program: &Path) -> Self {
+        match (self, writable_by_sandbox(program)) {
+            (Self::Pinned(_), Some(writable)) => Self::Writable(writable),
+            (verdict, _) => verdict,
+        }
+    }
+
+    /// The program an approval for good is pinned to, when one can be.
+    pub(super) fn pinned(&self) -> Option<&Path> {
+        match self {
+            Self::Pinned(program) => Some(program),
+            Self::Writable(_) | Self::Unresolved(_) => None,
+        }
+    }
+
+    /// Why no approval can be pinned, as a sentence for the prompt.
+    pub(super) fn caution(&self) -> Option<String> {
+        match self {
+            Self::Pinned(_) => None,
+            Self::Writable(path) => Some(format!(
+                "It runs {}, which can be changed from inside the sandbox.",
+                path.display()
+            )),
+            Self::Unresolved(why) => Some(format!(
+                "The program it runs could not be found, so it cannot be approved for good: {why}."
+            )),
+        }
+    }
 }
 
 /// Why no launchable entry was found.
@@ -90,10 +140,11 @@ impl DesktopEntry {
         } else {
             None
         };
-        let exec = key("Exec")
-            .and_then(split_exec)
-            .filter(|exec| !exec.is_empty());
-        let (None, Some(exec)) = (why, exec) else {
+        let exec = key("Exec").and_then(split_exec).and_then(|words| {
+            let mut words = words.into_iter();
+            Some((words.next()?, words.collect()))
+        });
+        let (None, Some((program, arguments))) = (why, exec) else {
             let why = why.unwrap_or("its Exec line is missing or malformed");
             return Err(EntryError::NotLaunchable { path, why });
         };
@@ -103,7 +154,8 @@ impl DesktopEntry {
             is_terminal_emulator: key("Categories")
                 .is_some_and(|categories| categories.split(';').any(|c| c == "TerminalEmulator")),
             icon: key("Icon").map(str::to_string),
-            exec,
+            program,
+            arguments,
             path,
         })
     }
@@ -112,8 +164,7 @@ impl DesktopEntry {
     /// one.
     pub(super) fn targets(&self) -> Targets {
         let has = |code| {
-            self.exec
-                .iter()
+            self.exec()
                 .any(|arg| field_codes(arg).any(|found| found == code))
         };
         match ['U', 'u', 'F', 'f'].into_iter().find(|code| has(*code)) {
@@ -127,10 +178,36 @@ impl DesktopEntry {
 
     /// `Exec` with its field codes expanded for `targets`.
     pub(super) fn command_line(&self, targets: &[String]) -> Vec<String> {
-        self.exec
-            .iter()
+        self.exec()
             .flat_map(|arg| self.expand(arg, targets))
             .collect()
+    }
+
+    /// What `Exec` runs: its first word, found through `path_env` as a shell would unless
+    /// it is absolute, and any other word that is an absolute path. Blocks on the
+    /// filesystem.
+    pub(super) fn executable(&self, path_env: &OsStr) -> Executable {
+        let program = Path::new(&self.program);
+        if program.is_relative() && self.program.contains('/') {
+            return Executable::Unresolved(format!("`{}` is a relative path", self.program));
+        }
+        let found = find_program(program, path_env)
+            .map_err(|e| e.to_string())
+            .and_then(|found| std::fs::canonicalize(found).map_err(|e| e.to_string()));
+        match found {
+            Ok(real) if is_writable_by_sandbox(&real) => Executable::Writable(real),
+            Ok(real) => self
+                .arguments
+                .iter()
+                .map(Path::new)
+                .filter(|word| word.is_absolute())
+                .fold(Executable::Pinned(real), Executable::running_also),
+            Err(why) => Executable::Unresolved(format!("`{}`: {why}", self.program)),
+        }
+    }
+
+    fn exec(&self) -> impl Iterator<Item = &String> {
+        std::iter::once(&self.program).chain(&self.arguments)
     }
 
     /// `%F` and `%U` become every target and `%i` the icon option; an
@@ -235,6 +312,12 @@ fn is_writable_by_sandbox(real: &Path) -> bool {
     std::env::var_os("HOME")
         .and_then(|home| std::fs::canonicalize(home).ok())
         .is_some_and(|home| is_within_visible_home_entry(real, &home))
+}
+
+/// `path`, resolved when it exists, if sandboxed commands can write it.
+fn writable_by_sandbox(path: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    is_writable_by_sandbox(&real).then_some(real)
 }
 
 /// The keys of the `[Desktop Entry]` group, values unescaped; a repeated
@@ -394,6 +477,35 @@ mod tests {
             let entry = entry(exec);
             assert_eq!(entry.command_line(targets), expected, "{exec}");
             assert_eq!(entry.targets(), accepts, "{exec}");
+        }
+    }
+
+    #[test]
+    fn an_exec_line_is_pinned_only_when_nothing_it_names_is_writable_by_the_sandbox() {
+        let Some(home) = std::env::var_os("HOME").and_then(|home| std::fs::canonicalize(home).ok())
+        else {
+            return;
+        };
+        let planted = home.join("assistd-absent-dir/start.sh");
+        let path_env = OsStr::new("/usr/bin:/bin");
+        let executable = |exec: &str| entry(exec).executable(path_env);
+
+        assert!(executable("sh -c true /etc/profile").pinned().is_some());
+        for exec in [
+            format!("sh {}", planted.display()),
+            format!("env X=1 {} %U", planted.display()),
+        ] {
+            assert_eq!(
+                executable(&exec),
+                Executable::Writable(planted.clone()),
+                "{exec}"
+            );
+        }
+        for exec in ["assistd-absent-program", "bin/relative", "/assistd-absent"] {
+            assert!(
+                matches!(executable(exec), Executable::Unresolved(_)),
+                "{exec}"
+            );
         }
     }
 

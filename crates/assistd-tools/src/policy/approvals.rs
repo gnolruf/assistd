@@ -19,7 +19,7 @@ use crate::TurnContext;
 pub const APPROVED_HOSTS_FILE: &str = "approved_hosts.toml";
 
 /// File, beside the config file, that keeps the desktop entries `wm open`
-/// launches without confirmation.
+/// launches without confirmation, each with the program it runs.
 pub const APPROVED_APPS_FILE: &str = "approved_apps.toml";
 
 /// File, beside the config file, that keeps the MCP tools that run without

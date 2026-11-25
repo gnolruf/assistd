@@ -2,12 +2,13 @@
 //! the user, through the compositor, to open a file when none is named.
 
 use std::borrow::Cow;
+use std::path::Path;
 
 use assistd_utils::path::expand_tilde_from_env;
 use assistd_wm::{ExecCommand, UnquotableCommand, WorkspaceId};
 
 use super::default_app::{DefaultAppError, default_app};
-use super::desktop_entry::{DesktopEntry, EntryError, Targets};
+use super::desktop_entry::{DesktopEntry, EntryError, Executable, Targets};
 use crate::chain::Word;
 use crate::command::Hint;
 
@@ -172,6 +173,8 @@ impl OpenError {
 pub(super) struct PreparedLaunch {
     pub(super) entry: DesktopEntry,
     pub(super) command: ExecCommand,
+    /// What the command line runs, a terminal emulator included.
+    pub(super) executable: Executable,
     /// Whether an entry that takes URLs is handed a target, which it may fetch or, when a
     /// local file, load and follow to any host.
     pub(super) opens_url: bool,
@@ -185,16 +188,27 @@ impl PreparedLaunch {
             Subject::App(id) => DesktopEntry::find(id)?,
             Subject::File(file) => default_app(&expand_tilde_from_env(file))?,
         };
-        Self::new(entry, args)
+        let path_env = std::env::var_os("PATH").unwrap_or_default();
+        let executable = entry.executable(&path_env);
+        Self::new(entry, executable, args)
     }
 
-    /// The shell command line that runs `entry` as `args` asks.
-    pub(super) fn new(entry: DesktopEntry, args: &OpenArgs) -> Result<Self, OpenError> {
+    /// The shell command line that runs `entry`, whose `Exec` runs `executable`, as `args`
+    /// asks.
+    pub(super) fn new(
+        entry: DesktopEntry,
+        mut executable: Executable,
+        args: &OpenArgs,
+    ) -> Result<Self, OpenError> {
         let targets = resolve_targets(&entry, &args.targets)?;
         let opens_url = !targets.is_empty() && matches!(entry.targets(), Targets::Urls { .. });
         let mut argv = entry.command_line(&targets);
         if entry.terminal {
-            argv.splice(0..0, terminal_prefix(&entry.name)?);
+            let terminal = terminal_prefix(&entry.name)?;
+            if let Some(program) = terminal.first() {
+                executable = executable.running_also(Path::new(program));
+            }
+            argv.splice(0..0, terminal);
         }
         let exec = format!("exec {}", shell_words(&argv));
         let line = match &args.cwd {
@@ -205,6 +219,7 @@ impl PreparedLaunch {
         Ok(Self {
             entry,
             command,
+            executable,
             opens_url,
         })
     }

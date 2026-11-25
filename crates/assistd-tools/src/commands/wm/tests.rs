@@ -7,7 +7,7 @@ use assistd_wm::{
 };
 use parking_lot::Mutex;
 
-use super::desktop_entry::DesktopEntry;
+use super::desktop_entry::{DesktopEntry, Executable};
 use super::*;
 use crate::TurnContext;
 use crate::command::run_rendered;
@@ -155,6 +155,10 @@ fn viewer(exec: &str) -> DesktopEntry {
     .expect("launchable entry")
 }
 
+fn pinned() -> Executable {
+    Executable::Pinned(PathBuf::from("/usr/bin/viewer"))
+}
+
 fn open_args(args: &[&str]) -> OpenArgs {
     let args: Vec<Word> = args.iter().copied().map(Word::bare).collect();
     OpenArgs::parse(&args).expect("parsable")
@@ -163,7 +167,7 @@ fn open_args(args: &[&str]) -> OpenArgs {
 #[test]
 fn launch_lines_keep_each_target_one_word_and_refuse_option_like_ones() {
     let launch = |exec: &str, args: &[&str]| {
-        PreparedLaunch::new(viewer(exec), &open_args(args))
+        PreparedLaunch::new(viewer(exec), pinned(), &open_args(args))
             .map(|launch| launch.command.as_str().to_string())
     };
     assert_eq!(
@@ -232,7 +236,7 @@ async fn a_file_in_place_of_the_application_always_asks_and_is_named_in_the_prom
     }
 
     let args = open_args(&["/tmp/report.md"]);
-    let launch = PreparedLaunch::new(viewer("viewer %F"), &args).expect("launchable");
+    let launch = PreparedLaunch::new(viewer("viewer %F"), pinned(), &args).expect("launchable");
     assert_eq!(launch.command.as_str(), "exec viewer /tmp/report.md");
     assert!(cmd.confirmed(&TurnContext::default(), &args, &launch).await);
     let [request] = &gate.requests()[..] else {
@@ -248,13 +252,13 @@ async fn approved_apps_skip_the_prompt_only_when_launched_without_targets_or_cwd
     let gate = RecordingGate::new(false);
     let approved = Arc::new(Approvals::unsaved());
     approved
-        .approve("/usr/share/applications/viewer.desktop")
+        .approve("/usr/share/applications/viewer.desktop -> /usr/bin/viewer")
         .await
         .expect("unsaved approvals never fail");
     let cmd = WmCommand::new(Arc::new(StubWm::default()), gate.clone(), approved);
     let confirmed = async |args: &[&str]| {
         let args = open_args(args);
-        let launch = PreparedLaunch::new(viewer("viewer %F"), &args).expect("launchable");
+        let launch = PreparedLaunch::new(viewer("viewer %F"), pinned(), &args).expect("launchable");
         cmd.confirmed(&TurnContext::default(), &args, &launch).await
     };
     assert!(confirmed(&["viewer"]).await);
@@ -275,6 +279,57 @@ async fn approved_apps_skip_the_prompt_only_when_launched_without_targets_or_cwd
 }
 
 #[tokio::test]
+async fn an_approval_holds_only_for_the_program_it_was_given_with() {
+    let gate = RecordingGate::new(false);
+    let approved = Arc::new(Approvals::unsaved());
+    for key in [
+        "/usr/share/applications/viewer.desktop",
+        "/usr/share/applications/viewer.desktop -> /usr/bin/viewer",
+    ] {
+        approved.approve(key).await.expect("unsaved");
+    }
+    let cmd = WmCommand::new(Arc::new(StubWm::default()), gate.clone(), approved);
+    let args = open_args(&["viewer"]);
+    let writable = PathBuf::from("/home/me/bin/viewer");
+    for (executable, always_allow, unattended_never) in [
+        (
+            Executable::Pinned(PathBuf::from("/usr/local/bin/viewer")),
+            vec!["/usr/share/applications/viewer.desktop -> /usr/local/bin/viewer".to_string()],
+            false,
+        ),
+        (Executable::Writable(writable.clone()), Vec::new(), true),
+        (
+            Executable::Unresolved("`viewer`: not found on PATH".to_string()),
+            Vec::new(),
+            false,
+        ),
+    ] {
+        let before = gate.requests().len();
+        let launch = PreparedLaunch::new(viewer("viewer"), executable, &args).expect("launchable");
+        assert!(!cmd.confirmed(&TurnContext::default(), &args, &launch).await);
+        let requests = gate.requests();
+        let [request] = &requests[before..] else {
+            panic!("one prompt expected for {:?}", launch.executable);
+        };
+        assert_eq!(request.always_allow, always_allow, "{request:?}");
+        assert_eq!(
+            request.unattended == Unattended::Never,
+            unattended_never,
+            "{request:?}"
+        );
+    }
+    let [.., asked_about_writable, _] = &gate.requests()[..] else {
+        panic!("three prompts expected");
+    };
+    assert_eq!(
+        asked_about_writable.matched_pattern,
+        "opens Viewer (/usr/share/applications/viewer.desktop) on the focused workspace as you, \
+         outside the sandbox. It runs /home/me/bin/viewer, which can be changed from inside the \
+         sandbox."
+    );
+}
+
+#[tokio::test]
 async fn a_target_for_an_app_that_takes_urls_asks_even_in_auto_mode() {
     let cmd = WmCommand::new(
         Arc::new(StubWm::default()),
@@ -288,7 +343,7 @@ async fn a_target_for_an_app_that_takes_urls_asks_even_in_auto_mode() {
     ] {
         let (router, mut rx) = router_in(PermissionMode::Auto);
         let args = open_args(&["viewer", target]);
-        let launch = PreparedLaunch::new(viewer(exec), &args).expect("launchable");
+        let launch = PreparedLaunch::new(viewer(exec), pinned(), &args).expect("launchable");
         let confirmed = cmd
             .confirmed(&TurnContext::answered_by(router), &args, &launch)
             .await;

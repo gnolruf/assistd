@@ -22,7 +22,7 @@ mod default_app;
 mod desktop_entry;
 mod open;
 
-use desktop_entry::DesktopEntry;
+use desktop_entry::{DesktopEntry, Executable};
 use open::{OpenArgs, OpenError, PreparedLaunch, Subject};
 
 const NAME: &str = "wm";
@@ -61,7 +61,8 @@ const OPEN_HELP: &str = "usage: wm open [--workspace <ws>] [--cwd <dir>] <app|fi
     \n\
     The application runs as the user, outside the sandbox, so the user \
     confirms the launch unless they chose \"always allow\" for that \
-    application; a launch with files or URLs always asks. It starts in the \
+    application; a launch with files or URLs always asks, and so does one \
+    whose program sandboxed commands can write. It starts in the \
     background: success means the compositor accepted the launch, not that a \
     window appeared, so check with `wm list`.\n";
 
@@ -82,7 +83,7 @@ const LAYOUT_HELP: &str = "usage: wm layout <default|tabbed|stacking|splith|spli
 pub struct WmCommand {
     wm: Arc<dyn WindowManager>,
     gate: Arc<dyn ConfirmationGate>,
-    /// Desktop entries, by path, that `wm open` launches without asking.
+    /// Desktop entries, each with the program it runs, that `wm open` launches without asking.
     apps: ApprovalGate,
 }
 
@@ -121,8 +122,9 @@ impl WmCommand {
     }
 
     /// Whether the user, or in auto mode the safety judge, lets `launch` run. Approvals cover a
-    /// launch with no files, URLs, or `--cwd`; one with any of them is never approved for good,
-    /// and one that opens a URL always asks.
+    /// launch with no files, URLs, or `--cwd` of an entry while it runs the program it was
+    /// approved with; any other launch is never approved for good, and one that opens a URL
+    /// or runs what sandboxed commands can write always asks.
     async fn confirmed(
         &self,
         turn: &TurnContext,
@@ -130,34 +132,33 @@ impl WmCommand {
         launch: &PreparedLaunch,
     ) -> bool {
         let entry = &launch.entry;
-        let key = entry.path.to_string_lossy().into_owned();
-        let has_targets = args.has_targets_or_cwd();
+        let approval = approval_key(launch, args);
+        let caution = launch.executable.caution();
         let request = || ConfirmationRequest {
             tool: NAME.to_string(),
             script: launch.command.as_str().to_string(),
             matched_pattern: format!(
-                "opens {} ({key}) {} as you, outside the sandbox",
+                "opens {} ({}) {} as you, outside the sandbox{}",
                 entry.name,
-                workspace_phrase(args.workspace.as_ref())
+                entry.path.display(),
+                workspace_phrase(args.workspace.as_ref()),
+                caution
+                    .as_deref()
+                    .map_or_default(|caution| format!(". {caution}"))
             ),
-            summary: launch_summary(&entry.name, args),
-            always_allow: if has_targets {
-                Vec::new()
-            } else {
-                vec![key.clone()]
-            },
-            risk: if has_targets {
-                Risk::Elevated
-            } else {
+            summary: launch_summary(launch, args),
+            always_allow: approval.iter().cloned().collect(),
+            risk: if approval.is_some() {
                 Risk::Routine
+            } else {
+                Risk::Elevated
             },
-            unattended: unattended_launch(launch, &key, args),
+            unattended: unattended_launch(launch, args),
             source: ConfirmSource::Main,
         };
-        if has_targets {
-            self.gate.confirm(turn, request()).await != Approval::Deny
-        } else {
-            self.apps.confirm(turn, &key, request).await
+        match &approval {
+            Some(key) => self.apps.confirm(turn, key, request).await,
+            None => self.gate.confirm(turn, request()).await != Approval::Deny,
         }
     }
 }
@@ -428,13 +429,22 @@ async fn layout(wm: &dyn WindowManager, args: &[Word]) -> Result<CommandOutput, 
     Ok(CommandOutput::ok(Vec::new()))
 }
 
-/// Opening a URL is egress, which no mode approves; the safety judge may settle any other launch.
-fn unattended_launch(launch: &PreparedLaunch, key: &str, args: &OpenArgs) -> Unattended {
-    if launch.opens_url {
+/// The name `launch` is approved for good under: its entry and the program the entry runs.
+/// None for a launch handed files, URLs or `--cwd`, or whose program cannot be pinned.
+fn approval_key(launch: &PreparedLaunch, args: &OpenArgs) -> Option<String> {
+    let program = launch.executable.pinned()?;
+    (!args.has_targets_or_cwd())
+        .then(|| format!("{} -> {}", launch.entry.path.display(), program.display()))
+}
+
+/// Opening a URL is egress, and a program sandboxed commands can write may have been replaced,
+/// so no mode approves either; the safety judge may settle any other launch.
+fn unattended_launch(launch: &PreparedLaunch, args: &OpenArgs) -> Unattended {
+    if launch.opens_url || matches!(launch.executable, Executable::Writable(_)) {
         return Unattended::Never;
     }
     let grantable = match &args.subject {
-        Subject::App(id) if !args.has_targets_or_cwd() => vec![PlannedAction::App {
+        Subject::App(id) if approval_key(launch, args).is_some() => vec![PlannedAction::App {
             desktop_entry: id.clone(),
         }],
         _ => Vec::new(),
@@ -443,9 +453,10 @@ fn unattended_launch(launch: &PreparedLaunch, key: &str, args: &OpenArgs) -> Una
         class: JudgedClass::Launch,
         cwd: None,
         why: format!(
-            "it launches {} ({key}) as the user, outside the sandbox, and the launch is not yet \
+            "it launches {} ({}) as the user, outside the sandbox, and the launch is not yet \
              approved",
-            launch.entry.name
+            launch.entry.name,
+            launch.entry.path.display()
         ),
         grantable,
     })
@@ -461,18 +472,23 @@ fn opened(launch: &PreparedLaunch, workspace: Option<&WorkspaceId>) -> CommandOu
     CommandOutput::ok(line.into_bytes())
 }
 
-/// A launch of the app named `name` as `args` asks, in a sentence that names the file it is
-/// to show, or else says that it is handed files, URLs or a working directory.
-fn launch_summary(name: &str, args: &OpenArgs) -> Summary {
+/// `launch` as `args` asks, in a sentence that names the file it is to show, with why its
+/// program cannot be pinned, or else that it is handed files, URLs or a working directory.
+fn launch_summary(launch: &PreparedLaunch, args: &OpenArgs) -> Summary {
+    let name = &launch.entry.name;
     let shown = match &args.subject {
         Subject::File(file) => Path::new(file).file_name(),
         Subject::App(_) => None,
     };
-    match shown {
-        Some(file) => Summary::of(format!("opening {} in {name}", file.to_string_lossy())),
-        None if args.has_targets_or_cwd() => Summary::of(format!("opening {name}"))
-            .because("It is handed files, addresses or a folder to open."),
-        None => Summary::of(format!("opening {name}")),
+    let what = match shown {
+        Some(file) => format!("opening {} in {name}", file.to_string_lossy()),
+        None => format!("opening {name}"),
+    };
+    let handed_targets = (shown.is_none() && args.has_targets_or_cwd())
+        .then(|| "It is handed files, addresses or a folder to open.".to_string());
+    Summary {
+        what,
+        why: launch.executable.caution().or(handed_targets),
     }
 }
 
