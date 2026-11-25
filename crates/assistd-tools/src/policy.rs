@@ -51,8 +51,8 @@ pub(crate) use sandbox::{ConfinedSpawner, Guarded, InputBind, is_within_visible_
 pub use sandbox::{
     HomeAccess, Protected, ReaderProgram, ReaderSandbox, ReaderSandboxError, SCRATCH_MARKER,
     SandboxError, SandboxInfo, SandboxPrograms, SandboxRequest, SandboxedCommand, SandboxedServer,
-    ScopeError, ScratchCap, ServerSandbox, ServerSandboxError, SharedDirs, ToolSandbox,
-    ToolsDisabled, probe_sandbox,
+    ScopeError, ScratchCap, ServerLocks, ServerProcess, ServerSandbox, ServerSandboxError,
+    SharedDirs, ToolSandbox, ToolsDisabled, probe_sandbox,
 };
 pub use watched::{LockedPaths, WatchedPath, WatchedPaths};
 

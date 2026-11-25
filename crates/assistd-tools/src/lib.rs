@@ -42,10 +42,10 @@ pub use policy::{
     LockedPaths, NoPendingConfirm, NoPendingReview, PinnedApprovalGate, PinnedApprovals,
     PromptParking, Protected, ReaderProgram, ReaderSandbox, ReaderSandboxError, Risk,
     SCRATCH_MARKER, SafetyJudge, SandboxError, SandboxInfo, SandboxPrograms, SandboxRequest,
-    SandboxedCommand, SandboxedServer, ScopeError, ScratchCap, SearchPath, ServerSandbox,
-    ServerSandboxError, SharedDirs, SpokenAnswer, Standing, StandingApprovals, Summary,
-    ToolSandbox, ToolsDisabled, Unattended, Verdict, VoiceGate, WatchedPath, WatchedPaths,
-    probe_sandbox,
+    SandboxedCommand, SandboxedServer, ScopeError, ScratchCap, SearchPath, ServerLocks,
+    ServerProcess, ServerSandbox, ServerSandboxError, SharedDirs, SpokenAnswer, Standing,
+    StandingApprovals, Summary, ToolSandbox, ToolsDisabled, Unattended, Verdict, VoiceGate,
+    WatchedPath, WatchedPaths, probe_sandbox,
 };
 pub use presentation::{OutputCap, PresentSpec};
 pub use quarantine::{Egress, Quarantine, QuarantineError};

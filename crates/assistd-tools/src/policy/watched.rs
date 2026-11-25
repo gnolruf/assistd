@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use parking_lot::RwLock;
+use tokio::sync::watch;
 
 use assistd_ipc::TaskId;
 
@@ -28,18 +28,23 @@ impl WatchedPath {
 /// The paths enabled tasks watch, which a turn may change only as a run of the task
 /// watching them.
 #[derive(Debug, Default)]
-pub struct WatchedPaths(RwLock<Vec<WatchedPath>>);
+pub struct WatchedPaths(watch::Sender<Vec<WatchedPath>>);
 
 impl WatchedPaths {
     /// Watch `watched` and nothing else.
     pub fn replace(&self, watched: Vec<WatchedPath>) {
-        *self.0.write() = watched;
+        self.0.send_replace(watched);
+    }
+
+    /// Marks every later [`WatchedPaths::replace`] as a change.
+    pub(crate) fn changes(&self) -> watch::Receiver<Vec<WatchedPath>> {
+        self.0.subscribe()
     }
 
     /// What a run of task `run_of`, or with `None` any other turn, may not change: every
     /// path another task watches, also where its own task watches the same place.
     pub fn locked_for(&self, run_of: Option<TaskId>) -> LockedPaths {
-        let watched = self.0.read();
+        let watched = self.0.borrow();
         LockedPaths(
             watched
                 .iter()
