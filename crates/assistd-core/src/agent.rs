@@ -35,7 +35,7 @@ const REPLAY_WAIT_BUDGET: Duration = Duration::from_secs(75);
 const DUPLICATE_CALL_LIMIT: usize = 3;
 
 /// Ceiling on tool-calling steps per turn that keep making different calls.
-const MAX_TOOL_STEPS: u32 = 200;
+pub(crate) const MAX_TOOL_STEPS: u32 = 200;
 
 /// Consecutive retries of a step cut off at the output-token limit before
 /// the turn fails.

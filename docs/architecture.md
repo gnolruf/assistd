@@ -456,8 +456,14 @@ never leaves it. The summary request continues the history with its
 tools offered, so the server reuses the cached prompt; a reply that calls a
 tool or is empty is asked for again without tools, and only when that also
 fails does compaction fall back to dropping old steps without a summary. Its
-tool-call ceiling is the main turn's too: after 200 tool-calling steps, or a
-call repeated three times in a row, its tools are withdrawn and it is asked to
+system prompt gives its final message a shape it can check as it writes: the
+answer in one short paragraph, at most ten bullets of sourced facts, about 400
+words, and anything more after those, where the saved file keeps it. The cut a
+relay result makes is far above that and is not mentioned. The prompt also
+states how many tool steps it has, and tells it to keep notes in a file in its
+home as it goes, so compaction and a cut-off run lose less.
+Its step ceiling is the main turn's: after 200 tool-calling steps, or a call
+repeated three times in a row, its tools are withdrawn and it is asked to
 answer from what it has, so a long task ends in a partial report rather than
 an error. While a relay runs, its plan, then each sub-agent's text, reasoning,
 context size, tool calls, results and compactions reach the client as
