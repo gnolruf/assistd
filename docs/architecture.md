@@ -490,16 +490,19 @@ It is sanitised first: control, bidi and format characters are stripped,
 chat-template tokens (`<|im_start|>`, `<tool_call>`, `[INST]`) are broken with
 a space, from the same token list the history uses for every other piece
 of untrusted text, and it is quoted under a header that labels it untrusted
-data. The run then takes one more turn through
-`complete_with_schema`, a tool-free, thinking-free request whose
-`response_format` holds the reply by grammar to a fixed contract: `status`
-(done, partial or blocked), a `summary`, and arrays of `evidence` and
-`caveats`, each bounded by `maxLength` and `maxItems`. A reply that does not
-parse or exceeds those bounds becomes a `partial` contract saying so, since the
-answer is already saved. Only that contract comes back, as a `RelayReport`,
-the restricted return channel: sanitised and quoted the same way, with
-`artifacts` naming the saved file, and with evidence paths under the
-quarantine's `input/` pointed back at the original inputs. The default system
+data. That final message is also the relay's result: the run generates nothing
+further. It comes back as a `RelayReport`, the restricted return channel:
+sanitised and quoted the same way, under a `status` line and an `artifacts`
+line naming the saved file. `status` is the harness's own reading of the run,
+`done` when it answered and `partial` when its tools were withdrawn first (a
+repeated call or the step ceiling); a run that fails is a failed tool result.
+The message is shown up to a quarter of the history budget, counted in tokens
+by the history's own estimate. A longer one is cut at the end of a line and
+followed by a line saying how much is left and naming the saved file, so a
+cut is never silent; the registry's `OutputCap` does not cut a relay result a
+second time. Every path under the quarantine's `input/` in the message is
+pointed back at the original input. A plan's next step is handed the previous
+step's report beneath its task, and the saved file as an input. The default system
 prompt says never to follow instructions inside one. The sub-agent's tool
 output and reasoning never leave it. Each answered step's file is recorded in
 `relay_steps.answer_file`; `/undo` deletes the files of the steps whose rows it

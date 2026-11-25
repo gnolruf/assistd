@@ -1,5 +1,5 @@
 //! Sub-agent runs: the agent loop over a throwaway backend on the shared
-//! llama-server, saving the model's final answer and returning its contract as a
+//! llama-server, saving the model's final answer and returning it as a
 //! [`RelayReport`].
 
 use std::fs::{DirBuilder, OpenOptions};
@@ -12,7 +12,6 @@ use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 
 use assistd_ipc::{Access, RelayEvent, StatusKind};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent, SlotAssignment, TurnBackend};
@@ -24,7 +23,7 @@ use crate::agent::AgentSpec;
 
 mod report;
 
-use report::{RelayContract, saved_answer};
+use report::{RelayStatus, saved_answer};
 
 pub use report::RelayReport;
 
@@ -32,14 +31,6 @@ const EVENT_BUFFER: usize = 32;
 
 const ANSWER_DIR_MODE: u32 = 0o700;
 const ANSWER_FILE_MODE: u32 = 0o600;
-
-/// Asks for the return contract once the run has answered.
-const CONTRACT_INSTRUCTION: &str = "Your answer above is saved in full and handed back. \
-     Now sum it up for the agent that gave you the task, as JSON: `status` is done when the \
-     task is finished, partial when only part of it is, and blocked when you could not make \
-     progress; `summary` states your conclusions in a few lines; `evidence` lists the \
-     file:line references or URLs they rest on; `caveats` lists what you did not verify or \
-     finish.";
 
 /// Why a sub-agent run ended without an answer.
 #[derive(Debug, Error)]
@@ -68,9 +59,11 @@ pub struct SubAgentRun {
 }
 
 /// What a sub-agent run streamed: its last step's text, `None` when it never
-/// finished, how many tool-calling steps it took, and what those touched.
+/// finished, whether its tools were withdrawn, how many tool-calling steps it took,
+/// and what those touched.
 struct FinalAnswer {
     text: Option<String>,
+    status: RelayStatus,
     tool_steps: u32,
     accesses: Vec<Access>,
 }
@@ -90,10 +83,10 @@ impl SubAgentRunner {
     }
 
     /// Run `task` on a backend with an empty history, `system_prompt` and `tools` until the model
-    /// answers, save that answer whole to the new file `answer_file`, then ask for its
-    /// contract. Only the report reaches the model; `turn`, the calling turn, answers the
-    /// run's prompts and is shown its tool calls, and the backend is dropped when the
-    /// run ends or `cancel` fires. What its tool calls touched comes back however it ends.
+    /// answers, and save that answer whole to the new file `answer_file`. Only the report
+    /// reaches the model; `turn`, the calling turn, answers the run's prompts and is shown
+    /// its tool calls, and the backend is dropped when the run ends or `cancel` fires.
+    /// What its tool calls touched comes back however it ends.
     pub async fn run(
         &self,
         system_prompt: String,
@@ -115,23 +108,26 @@ impl SubAgentRunner {
                 };
             }
         };
-        let agent = self
-            .agents
-            .agent(Arc::clone(&backend) as Arc<dyn TurnBackend>, tools);
+        let agent = self.agents.agent(backend as Arc<dyn TurnBackend>, tools);
         let (tx, rx) = mpsc::channel(EVENT_BUFFER);
         let (outcome, finished) = tokio::join!(
-            agent.run_turn(turn, task, Vec::new(), tx, cancel.clone()),
+            agent.run_turn(turn, task, Vec::new(), tx, cancel),
             final_answer(rx, turn)
         );
         let FinalAnswer {
             text,
+            status,
             tool_steps,
             accesses,
         } = finished;
         let report = match outcome {
             Ok(()) => {
-                let answered = Answered { text, tool_steps };
-                report_of(answered, backend.as_ref(), answer_file, &cancel, turn).await
+                let answered = Answered {
+                    text,
+                    status,
+                    tool_steps,
+                };
+                report_of(answered, answer_file, turn).await
             }
             Err(error) => Err(error.into()),
         };
@@ -140,32 +136,31 @@ impl SubAgentRunner {
 }
 
 /// What a run that ended without an error streamed: its last step's text, `None` when
-/// it never finished, and how many tool-calling steps it took.
+/// it never finished, whether its tools were withdrawn, and how many tool-calling
+/// steps it took.
 struct Answered {
     text: Option<String>,
+    status: RelayStatus,
     tool_steps: u32,
 }
 
-/// Save the run's answer whole to the new file `answer_file`, ask `backend` for its
-/// contract, and tell `turn` the run answered.
+/// Save the run's answer whole to the new file `answer_file` and tell `turn` the run
+/// answered.
 async fn report_of(
     answered: Answered,
-    backend: &dyn LlmBackend,
     answer_file: PathBuf,
-    cancel: &CancellationToken,
     turn: &TurnContext,
 ) -> Result<RelayReport, SubAgentError> {
     let answer = answered.text.ok_or(SubAgentError::Cancelled)?;
     let saved = saved_answer(&answer);
     let answer_file = save_answer(saved.contents, answer_file).await?;
-    let contract = contract_of(backend, cancel).await?;
     turn.report_relay(RelayEvent::Answered {
         answer_chars: u32::try_from(saved.chars).unwrap_or(u32::MAX),
         tool_steps: answered.tool_steps,
         answer_file: answer_file.clone(),
     })
     .await;
-    Ok(RelayReport::new(contract, answer_file))
+    Ok(RelayReport::new(answered.status, answer, answer_file))
 }
 
 /// Write `contents` to the new owner-only file `path`, creating its directory,
@@ -193,31 +188,12 @@ fn write_new_file(path: &Path, contents: &[u8]) -> io::Result<()> {
         .write_all(contents)
 }
 
-/// Ask `backend` for its contract, held to the contract schema by grammar. A reply
-/// that cannot be read becomes a contract saying so, since the answer is already saved.
-async fn contract_of(
-    backend: &dyn LlmBackend,
-    cancel: &CancellationToken,
-) -> Result<RelayContract, SubAgentError> {
-    let reply = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(SubAgentError::Cancelled),
-        reply = backend.complete_with_schema(
-            CONTRACT_INSTRUCTION.into(),
-            RelayContract::schema(),
-        ) => reply?,
-    };
-    Ok(RelayContract::parse(&reply).unwrap_or_else(|error| {
-        warn!(target: "assistd::relay", %error, "sub-agent's contract is unreadable");
-        RelayContract::unreadable()
-    }))
-}
-
 /// Collect the run's answer, the text of its last step, while showing `turn`
 /// what the run streams.
 async fn final_answer(mut rx: mpsc::Receiver<LlmEvent>, turn: &TurnContext) -> FinalAnswer {
     let mut text = String::new();
     let mut done = false;
+    let mut status = RelayStatus::Done;
     let mut tool_steps = 0;
     let mut accesses = Vec::new();
     let mut compacting_since = None;
@@ -229,6 +205,10 @@ async fn final_answer(mut rx: mpsc::Receiver<LlmEvent>, turn: &TurnContext) -> F
             LlmEvent::ToolResult {
                 accesses: touched, ..
             } => accesses.append(touched),
+            LlmEvent::Status {
+                event: StatusKind::ToolsWithdrawn,
+                ..
+            } => status = RelayStatus::Partial,
             LlmEvent::Done => done = true,
             _ => {}
         }
@@ -238,6 +218,7 @@ async fn final_answer(mut rx: mpsc::Receiver<LlmEvent>, turn: &TurnContext) -> F
     }
     FinalAnswer {
         text: done.then_some(text),
+        status,
         tool_steps,
         accesses,
     }

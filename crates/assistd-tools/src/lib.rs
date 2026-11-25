@@ -89,6 +89,12 @@ pub trait Tool: fmt::Debug + Send + Sync + 'static {
         true
     }
 
+    /// Whether the registry cuts the result to its [`OutputCap`]. `false` only for
+    /// tools that bound their own result.
+    fn held_to_output_cap(&self) -> bool {
+        true
+    }
+
     /// Whether a call with `args` can put data from this machine in its result. `false` only
     /// when the result holds nothing but what the model sent or the web returned.
     fn reads_host(&self, _args: &Value) -> bool {
@@ -105,8 +111,9 @@ pub trait Tool: fmt::Debug + Send + Sync + 'static {
     async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError>;
 }
 
-/// Lookup table of registered tools; cloning shares the tools. Every
-/// tool's [`ToolOutput::output`] is held to the registry's [`OutputCap`].
+/// Lookup table of registered tools; cloning shares the tools. A tool's
+/// [`ToolOutput::output`] is held to the registry's [`OutputCap`] unless the
+/// tool bounds its own.
 #[derive(Debug, Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
@@ -220,12 +227,19 @@ impl Tool for CappedTool {
         self.inner.bounded_by_tool_deadline()
     }
 
+    fn held_to_output_cap(&self) -> bool {
+        self.inner.held_to_output_cap()
+    }
+
     fn reads_host(&self, args: &Value) -> bool {
         self.inner.reads_host(args)
     }
 
     async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
         let mut result = self.inner.invoke(turn, args).await?;
+        if !self.inner.held_to_output_cap() {
+            return Ok(result);
+        }
         let cut = self
             .output_cap
             .cap(self.inner.name(), std::mem::take(&mut result.output));
