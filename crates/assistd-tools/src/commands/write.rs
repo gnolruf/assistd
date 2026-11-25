@@ -21,9 +21,10 @@ use crate::policy::{
     guarded_review, on_blocking_pool, spoken_path, watched_refusal,
 };
 
-/// Leading characters of the content shown when asking to confirm a write.
+/// Leading characters of the content shown when asking to confirm a write; bytes when the
+/// content is not UTF-8.
 const PREVIEW_HEAD_CHARS: usize = 8192;
-/// Trailing characters shown after the head when the content is longer.
+/// Trailing characters shown after the head when the content is longer; bytes likewise.
 const PREVIEW_TAIL_CHARS: usize = 2048;
 
 /// Writable-path allowlist of canonical prefixes, non-empty by construction.
@@ -391,6 +392,75 @@ impl From<Errno> for WriteFailure {
     }
 }
 
+/// A write's content as the confirmation prompt shows it.
+#[derive(Debug)]
+struct Preview {
+    shown: String,
+    /// How much is written, worded to follow "a write of".
+    amount: String,
+    /// Why the user cannot read the content off `shown` as it will be written, if they cannot.
+    caveat: Option<&'static str>,
+}
+
+impl Preview {
+    /// `content` as text when it is UTF-8, and as escaped bytes otherwise, so that different
+    /// contents never show the same.
+    fn of(content: &[u8]) -> Self {
+        match std::str::from_utf8(content) {
+            Ok(text) => Self::text(text),
+            Err(_) => Self::escaped_bytes(content),
+        }
+    }
+
+    fn text(text: &str) -> Self {
+        let total = text.chars().count();
+        let (shown, caveat) = match total.checked_sub(PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS) {
+            None | Some(0) => (text.to_string(), None),
+            Some(omitted) => {
+                let mut shown: String = text.chars().take(PREVIEW_HEAD_CHARS).collect();
+                shown.push_str(&format!("\n… {omitted} characters not shown …\n"));
+                shown.extend(text.chars().skip(PREVIEW_HEAD_CHARS + omitted));
+                (shown, Some("content too long to show in full"))
+            }
+        };
+        Self {
+            shown,
+            amount: counted(text.lines().count(), "line"),
+            caveat,
+        }
+    }
+
+    fn escaped_bytes(content: &[u8]) -> Self {
+        let invalid = content
+            .utf8_chunks()
+            .map(|chunk| chunk.invalid().len())
+            .sum();
+        let mut shown = format!(
+            "not UTF-8 ({}), shown as escaped bytes:\n",
+            counted(invalid, "invalid byte")
+        );
+        match content
+            .len()
+            .checked_sub(PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS)
+        {
+            None | Some(0) => shown.push_str(&content.escape_ascii().to_string()),
+            Some(omitted) => {
+                let (head, rest) = content.split_at(PREVIEW_HEAD_CHARS);
+                shown.push_str(&format!(
+                    "{}\n… {omitted} bytes not shown …\n{}",
+                    head.escape_ascii(),
+                    rest[omitted..].escape_ascii()
+                ));
+            }
+        }
+        Self {
+            shown,
+            amount: format!("{} that are not UTF-8 text", counted(content.len(), "byte")),
+            caveat: Some("content that is not UTF-8"),
+        }
+    }
+}
+
 async fn write_without_symlinks(path: PathBuf, content: Vec<u8>) -> Result<(), WriteFailure> {
     let open = tokio::task::spawn_blocking(move || open_without_symlinks(&path));
     let mut file = tokio::fs::File::from_std(open.await.map_err(std::io::Error::other)??);
@@ -493,39 +563,32 @@ fn review_write(guards: &PathGuards, path: &Path, cfg: &WritePolicyCfg) -> Revie
 }
 
 /// The target, size and content (head and tail only when long) for the user to confirm. Content
-/// too long to show in full is [`Risk::Elevated`] and never runs unasked.
+/// too long to show in full, or not UTF-8, is [`Risk::Elevated`] and never runs unasked.
 fn confirmation_request(
     path: &Path,
     content: &[u8],
     confirmation: &Confirmation,
     unattended: Unattended,
 ) -> ConfirmationRequest {
-    let text = String::from_utf8_lossy(content);
-    let mut script = format!(
-        "write {path:?} ({})\n",
-        human_size(u64::try_from(content.len()).unwrap_or(u64::MAX))
+    let preview = Preview::of(content);
+    let script = format!(
+        "write {path:?} ({})\n{}",
+        human_size(u64::try_from(content.len()).unwrap_or(u64::MAX)),
+        preview.shown
     );
-    let total = text.chars().count();
-    let fully_shown = total <= PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS;
-    let (risk, unattended, matched_pattern) = if fully_shown {
-        script.push_str(&text);
-        (confirmation.risk(), unattended, confirmation.to_string())
-    } else {
-        let omitted = total - PREVIEW_HEAD_CHARS - PREVIEW_TAIL_CHARS;
-        script.extend(text.chars().take(PREVIEW_HEAD_CHARS));
-        script.push_str(&format!("\n… {omitted} characters not shown …\n"));
-        script.extend(text.chars().skip(PREVIEW_HEAD_CHARS + omitted));
-        (
+    let (risk, unattended, matched_pattern) = match preview.caveat {
+        None => (confirmation.risk(), unattended, confirmation.to_string()),
+        Some(caveat) => (
             Risk::Elevated,
             Unattended::Never,
-            format!("{confirmation}, with content too long to show in full"),
-        )
+            format!("{confirmation}, with {caveat}"),
+        ),
     };
     ConfirmationRequest {
         tool: "write".to_string(),
         script,
         matched_pattern,
-        summary: write_summary(path, &text, confirmation),
+        summary: write_summary(path, &preview.amount, confirmation),
         always_allow: Vec::new(),
         risk,
         unattended,
@@ -549,16 +612,20 @@ fn starting_task(request: ConfirmationRequest, watch: &WatchedPath) -> Confirmat
     }
 }
 
-/// A write of `text` to `path` that asks because of `confirmation`, in a sentence.
-fn write_summary(path: &Path, text: &str, confirmation: &Confirmation) -> Summary {
-    let lines = match text.lines().count() {
-        1 => "1 line".to_string(),
-        count => format!("{count} lines"),
-    };
-    let summary = Summary::of(format!("a write of {lines} to {}", spoken_path(path)));
+/// A write of `amount` to `path` that asks because of `confirmation`, in a sentence.
+fn write_summary(path: &Path, amount: &str, confirmation: &Confirmation) -> Summary {
+    let summary = Summary::of(format!("a write of {amount} to {}", spoken_path(path)));
     match confirmation {
         Confirmation::Sensitive(why) => summary.because(format!("It {why}.")),
         Confirmation::Unvetted { .. } | Confirmation::Edit(_) => summary,
+    }
+}
+
+/// `count` of `noun`, which takes an "s" unless there is one.
+fn counted(count: usize, noun: &str) -> String {
+    match count {
+        1 => format!("1 {noun}"),
+        _ => format!("{count} {noun}s"),
     }
 }
 
@@ -1077,6 +1144,34 @@ mod tests {
                 .script
                 .contains(&format!("… {omitted} characters not shown …"))
         );
+    }
+
+    #[test]
+    fn content_that_is_not_utf8_is_shown_escaped_and_always_asks_at_elevated_risk() {
+        let confirmation = Confirmation::Edit(vec!["/home/u/x".into()]);
+        let asked = |content: &[u8]| {
+            confirmation_request(
+                Path::new("/home/u/x"),
+                content,
+                &confirmation,
+                Unattended::ScopedEdit,
+            )
+        };
+        let request = asked(b"a\xff\nb\xc3");
+        assert_eq!(
+            request.script,
+            "write \"/home/u/x\" (5B)\nnot UTF-8 (2 invalid bytes), shown as escaped bytes:\n\
+             a\\xff\\nb\\xc3"
+        );
+        assert_eq!(request.risk, Risk::Elevated);
+        assert_eq!(request.unattended, Unattended::Never);
+        assert_ne!(request.script, asked(b"a\xfe\nb\xc3").script);
+
+        let mut long = vec![0xff; PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS + 7];
+        long.extend_from_slice(b"tail");
+        let script = asked(&long).script;
+        assert!(script.contains("\n… 11 bytes not shown …\n"), "{script}");
+        assert!(script.ends_with("\\xfftail"), "{script}");
     }
 
     #[tokio::test]
