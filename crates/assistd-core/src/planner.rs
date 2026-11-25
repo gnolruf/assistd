@@ -401,6 +401,10 @@ impl<T: Tool> Tool for PlanModeTool<T> {
         self.inner.bounded_by_tool_deadline()
     }
 
+    fn held_to_output_cap(&self) -> bool {
+        self.inner.held_to_output_cap()
+    }
+
     fn reads_host(&self, args: &Value) -> bool {
         self.inner.reads_host(args)
     }
