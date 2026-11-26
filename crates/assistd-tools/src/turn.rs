@@ -11,6 +11,7 @@ use tracing::warn;
 
 use assistd_ipc::{AgentId, LlmEvent, TaskId};
 
+use crate::ToolRegistry;
 use crate::policy::{Answer, Approval, ConfirmRouter, ConfirmationRequest};
 
 /// The model lane a task run's turn holds, which the user's interaction may ask for.
@@ -55,11 +56,12 @@ struct DeclineMessages(Arc<Mutex<Vec<String>>>);
 #[derive(Debug, Clone, Default)]
 struct AgentIds(Arc<AtomicU32>);
 
-/// The tool call in flight on its agent's event stream.
+/// The tool call in flight on its agent's event stream, and the tools that agent is offered.
 #[derive(Debug, Clone)]
 struct CallStream {
     events: mpsc::Sender<LlmEvent>,
     call_id: String,
+    offered: Arc<ToolRegistry>,
 }
 
 /// The turn a tool call belongs to: who answers its prompts, its agent's event stream, the lane
@@ -72,7 +74,8 @@ pub struct TurnContext {
     agent_ids: AgentIds,
     call: Option<CallStream>,
     lane: Option<Arc<dyn YieldableLane>>,
-    /// `None` in a quarantine, whose reads are not recorded.
+    /// `None` in a quarantine that holds nothing of this machine's, whose reads are not
+    /// recorded.
     host_reads: Option<HostReads>,
 }
 
@@ -111,11 +114,12 @@ impl TurnContext {
         self
     }
 
-    /// The same turn for a sub-agent in a quarantine, which reaches files or the web but
-    /// never both, so its reads are not recorded.
-    pub fn quarantined(&self) -> Self {
+    /// The same turn for a sub-agent in a quarantine, whose history is its own: its reads
+    /// are recorded in `host_reads`, and not at all when its quarantine holds nothing of
+    /// this machine's.
+    pub fn quarantined(&self, host_reads: Option<HostReads>) -> Self {
         Self {
-            host_reads: None,
+            host_reads,
             ..self.clone()
         }
     }
@@ -130,12 +134,19 @@ impl TurnContext {
         self
     }
 
-    /// The same turn for tool call `call_id` of the agent that streams on `events`.
-    pub fn in_call(&self, events: mpsc::Sender<LlmEvent>, call_id: &str) -> Self {
+    /// The same turn for tool call `call_id` of the agent that streams on `events` and is
+    /// offered `offered`.
+    pub fn in_call(
+        &self,
+        events: mpsc::Sender<LlmEvent>,
+        call_id: &str,
+        offered: Arc<ToolRegistry>,
+    ) -> Self {
         Self {
             call: Some(CallStream {
                 events,
                 call_id: call_id.to_owned(),
+                offered,
             }),
             ..self.clone()
         }
@@ -233,6 +244,11 @@ impl TurnContext {
     /// Watch whether one of the turn's prompts waits for a later answer; `None` when none can.
     pub fn parked(&self) -> Option<watch::Receiver<bool>> {
         self.router.as_ref().map(|router| router.parked())
+    }
+
+    /// The tools the calling agent is offered; `None` outside a tool call.
+    pub fn offered_tools(&self) -> Option<&Arc<ToolRegistry>> {
+        self.call.as_ref().map(|call| &call.offered)
     }
 
     /// The id of the next sub-agent a tool call of this agent's loop starts.

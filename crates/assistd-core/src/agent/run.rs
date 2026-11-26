@@ -235,7 +235,8 @@ impl Turn {
 
     /// The turn's context for tool call `call`, whose sub-agents stream on the turn's events.
     pub(super) fn call_context(&self, call: &ToolCall) -> TurnContext {
-        self.context.in_call(self.tx.clone(), &call.id)
+        self.context
+            .in_call(self.tx.clone(), &call.id, Arc::clone(&self.tools))
     }
 
     /// How a turn whose model has just answered ended.

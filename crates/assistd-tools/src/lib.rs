@@ -153,6 +153,12 @@ impl ToolRegistry {
         }));
     }
 
+    /// Register each tool of `other` whose name `wanted` accepts, capped as `other` caps it.
+    pub fn adopt(&mut self, other: &Self, wanted: impl Fn(&str) -> bool) {
+        let adopted = other.tools.iter().filter(|tool| wanted(tool.name()));
+        self.tools.extend(adopted.cloned());
+    }
+
     /// Drop every tool whose name `keep` rejects.
     pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
         self.tools.retain(|tool| keep(tool.name()));

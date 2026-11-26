@@ -13,7 +13,7 @@ mod outcome;
 mod recovery;
 mod run;
 
-pub use definition::{AgentDefinition, AgentLimits};
+pub use definition::{AgentDefinition, AgentLimits, McpAccess, Permissions};
 pub use outcome::{AgentEnd, AgentOutcome, Written};
 
 /// Where the daemon's agents run: the backend whose server they share, the probe a step

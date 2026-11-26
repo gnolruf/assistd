@@ -26,7 +26,8 @@ mod vram;
 
 pub use admission::activity::Work;
 pub use agent::{
-    Agent, AgentDefinition, AgentEnd, AgentHost, AgentLimits, AgentOutcome, AgentTask, Written,
+    Agent, AgentDefinition, AgentEnd, AgentHost, AgentLimits, AgentOutcome, AgentTask, McpAccess,
+    Permissions, Written,
 };
 pub use build_tools::{
     BuildToolsDeps, BuildToolsError, BuiltTools, build_tools, mcp_tool_approvals,
