@@ -17,7 +17,6 @@ mod relay;
 mod scratch;
 pub mod socket;
 pub mod state;
-pub mod subagent;
 pub mod tasks;
 mod transcript;
 mod turn_driver;
@@ -26,7 +25,9 @@ mod voice_gate;
 mod vram;
 
 pub use admission::activity::Work;
-pub use agent::{Agent, AgentSpec};
+pub use agent::{
+    Agent, AgentDefinition, AgentEnd, AgentHost, AgentLimits, AgentOutcome, AgentTask, Written,
+};
 pub use build_tools::{
     BuildToolsDeps, BuildToolsError, BuiltTools, build_tools, mcp_tool_approvals,
     probe_tool_sandbox,
@@ -52,7 +53,6 @@ pub use state::{
     McpHost, McpLogin, McpServerStatus, McpService, MemoryStack, Query, Requester, StatusService,
     Subsystems, TurnOrigin, TurnService, VoiceService, branch_replay,
 };
-pub use subagent::{RelayReport, SubAgentError, SubAgentRun, SubAgentRunner};
 pub use tasks::{TaskError, TaskRunner, TaskService};
 pub use transcript::SessionContext;
 pub use vision::VisionRevalidator;

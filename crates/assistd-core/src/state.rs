@@ -28,7 +28,7 @@ use self::voice_handlers::HeardPrompt;
 use crate::PresenceError;
 use crate::admission::TurnAdmission;
 use crate::admission::activity::Work;
-use crate::agent::AgentSpec;
+use crate::agent::AgentHost;
 use crate::bus::{EventBus, EventSink};
 use crate::judge::{BackendJudgeModel, safety_judge};
 use crate::planner::Planner;
@@ -227,7 +227,7 @@ impl AppState {
             Arc::clone(&memory.transcripts),
             Arc::clone(&session_ctx),
         ));
-        let agents = agent_spec(&config, &subsystems);
+        let agents = agent_host(&config, &subsystems);
         let planner = Arc::new(planner(&config, &subsystems, agents.clone()));
         let tasks = TaskService::new(TaskDeps {
             config: Arc::clone(&config),
@@ -533,20 +533,21 @@ impl AppState {
     }
 }
 
-/// What every agent in the daemon is built with: replays wait on the presence manager's
-/// llama-server, and a tool call gets `timeouts.tool_call_secs`.
-fn agent_spec(config: &Config, subsystems: &Subsystems) -> AgentSpec {
+/// Where every agent in the daemon runs: on the main backend's server, replays waiting
+/// on the presence manager's llama-server, a tool call given `timeouts.tool_call_secs`.
+fn agent_host(config: &Config, subsystems: &Subsystems) -> AgentHost {
     let health: Arc<dyn LlmHealthProbe> = Arc::new(PresenceLlmHealthProbe::new(Arc::clone(
         &subsystems.presence,
     )));
-    AgentSpec {
-        health: Some(health),
-        tool_deadline: Duration::from_secs(config.timeouts.tool_call_secs),
-    }
+    AgentHost::new(
+        Arc::clone(&subsystems.llm),
+        Some(health),
+        Duration::from_secs(config.timeouts.tool_call_secs),
+    )
 }
 
 /// The planner every planning turn and task refine goes through.
-fn planner(config: &Config, subsystems: &Subsystems, agents: AgentSpec) -> Planner {
+fn planner(config: &Config, subsystems: &Subsystems, agents: AgentHost) -> Planner {
     Planner::new(
         subsystems.planning.clone(),
         Arc::clone(&subsystems.tools),

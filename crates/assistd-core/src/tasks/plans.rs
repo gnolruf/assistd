@@ -1,8 +1,6 @@
 //! The handler for `TaskRefine`: a task prompt explored on a backend of its own,
 //! rewritten as a brief for an unattended run, and revised there on feedback.
 
-use std::sync::Arc;
-
 use parking_lot::Mutex as StdMutex;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -10,10 +8,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use assistd_ipc::{EventBody, HostName, PermissionMode, TaskPrompt};
-use assistd_llm::{LlmBackend, SlotAssignment, SlotHolder};
+use assistd_llm::SlotHolder;
 
 use super::runs::task_system_prompt;
 use super::{FailedStep, TaskError, TaskService};
+use crate::agent::Agent;
 use crate::bus::EventSink;
 use crate::planner::{PlanAsk, PlanError, Refinement, WorkPermissions};
 
@@ -35,16 +34,16 @@ pub(super) struct RefineAsk {
     pub feedback: Option<String>,
 }
 
-/// The planning backend of the latest refine since the daemon started.
+/// The planning agent of the latest refine since the daemon started.
 #[derive(Debug, Default)]
 pub(super) struct TaskPlans {
     latest: StdMutex<Option<PlanningSession>>,
 }
 
-/// A planning backend, the prompt it explored, and its last rewrite of that prompt.
+/// A planning agent, the prompt it explored, and its last rewrite of that prompt.
 #[derive(Debug, Clone)]
 struct PlanningSession {
-    backend: Arc<dyn LlmBackend>,
+    agent: Agent,
     prompt: TaskPrompt,
     rewrite: Option<TaskPrompt>,
 }
@@ -121,7 +120,7 @@ impl TaskService {
         let (llm_tx, mut planning_events) = mpsc::channel(EVENT_BUFFER);
         let planner = &self.deps.planner;
         let planning = planner.refine(
-            Arc::clone(&session.backend),
+            &session.agent,
             plan_ask,
             permissions,
             id.to_string(),
@@ -160,13 +159,13 @@ impl TaskService {
             return Ok((session, PlanAsk::Revise { shown, feedback }));
         }
         self.end_planning_backend().await;
-        let backend = self.deps.llm.isolated_backend(
-            task_system_prompt(&self.deps.config),
-            SlotAssignment::Shared(SlotHolder::TaskRefine),
-        )?;
+        let agent = self
+            .deps
+            .planner
+            .refining_agent(task_system_prompt(&self.deps.config))?;
         let ask = PlanAsk::Work(prompt.as_str().to_string());
         let session = PlanningSession {
-            backend,
+            agent,
             prompt,
             rewrite: None,
         };

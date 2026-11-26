@@ -16,7 +16,7 @@ use self::events::TaskEvents;
 use self::plans::TaskPlans;
 use self::scheduler::TaskScheduler;
 use crate::admission::TurnAdmission;
-use crate::agent::AgentSpec;
+use crate::agent::AgentHost;
 use crate::bus::EventBus;
 use crate::planner::{PlanError, Planner};
 use crate::presence::{PresenceError, PresenceManager};
@@ -114,7 +114,7 @@ pub(crate) struct TaskDeps {
     pub(crate) tools: Arc<ToolCatalog>,
     /// Told which paths enabled tasks watch, so only a run of the watching task may change one.
     pub(crate) watched_paths: Arc<WatchedPaths>,
-    pub(crate) agents: AgentSpec,
+    pub(crate) agents: AgentHost,
     pub(crate) planner: Arc<Planner>,
     pub(crate) slot_stash: Option<Arc<SlotStash>>,
     pub(crate) voice: Arc<VoiceManager>,

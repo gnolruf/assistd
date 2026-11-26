@@ -2,6 +2,7 @@
 //! quarantine, save its whole answer, and return that answer up to a token budget.
 
 use std::borrow::Cow;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,7 +17,7 @@ use uuid::Uuid;
 
 use assistd_config::ToolsOutputConfig;
 use assistd_ipc::{Access, HostName, RelayEvent, RelayStepPlan};
-use assistd_llm::SlotStash;
+use assistd_llm::{SlotAssignment, SlotStash};
 use assistd_memory::SessionId;
 use assistd_search::SearxngClient;
 use assistd_tools::commands::BashPolicyCfg;
@@ -28,14 +29,17 @@ use assistd_tools::{
 };
 use assistd_utils::path::expand_tilde_from_env;
 
-use crate::agent::MAX_TOOL_STEPS;
-use crate::subagent::{RelayReport, SubAgentError, SubAgentRun, SubAgentRunner};
+use crate::agent::{AgentDefinition, AgentHost, AgentLimits};
 
+use report::RelayReport;
 use role::{Reach, Role, Roles};
+use subagent::{SubAgentError, report_of, run_shown};
 
 mod answers;
+mod report;
 mod role;
 mod sizing;
+mod subagent;
 
 pub(crate) use answers::delete_answer_files;
 pub use answers::sweep_relay_answers;
@@ -124,7 +128,8 @@ const RESULT_PERCENT: u64 = 25;
 /// What a relay needs beyond the policy the main tools are built with.
 #[derive(Debug)]
 pub struct RelayDeps {
-    pub runner: SubAgentRunner,
+    /// Where each sub-agent is started, on a history of its own.
+    pub host: AgentHost,
     /// Keeps the calling backend's slot state across each relay.
     pub slot_stash: Arc<SlotStash>,
     /// The directory each relay's quarantine is created in.
@@ -342,12 +347,9 @@ impl RelayTool {
         let quarantine =
             Quarantine::create(&self.deps.dir, &self.policy.sandbox, inputs.clone(), egress)
                 .await?;
-        let prompt = subagent_prompt(
-            &step.role,
-            &quarantine,
-            &step.sites,
-            turn.granted_hosts().is_some(),
-        );
+        let spoken = turn.granted_hosts().is_some();
+        let definition =
+            self.subagent_definition(&step.role, &quarantine, &step.sites, gate, spoken);
         let task = match previous {
             Some(report) => {
                 let handed = report.relocated(mounted_path(&quarantine, report.artifacts()));
@@ -356,27 +358,44 @@ impl RelayTool {
             }
             None => step.task,
         };
-        let SubAgentRun { report, accesses } = self
+        let answer_file = self.answer_file();
+        let turn = turn.quarantined();
+        let child = self
             .deps
-            .runner
-            .run(
-                prompt,
-                task,
-                self.subagent_tools(&quarantine, gate),
-                self.answer_file(),
-                CancellationToken::new(),
-                &turn.quarantined(),
-            )
-            .await;
+            .host
+            .child(definition)
+            .map_err(SubAgentError::from)?;
+        let mut outcome = run_shown(child, task, CancellationToken::new(), &turn).await;
         let input_dir = quarantine.input_dir();
         touched.extend(
-            accesses
+            mem::take(&mut outcome.accesses)
                 .into_iter()
                 .filter_map(|access| outside_quarantine(access, &input_dir, &inputs)),
         );
-        let mut report = report?;
+        let mut report = report_of(outcome, answer_file, &turn).await?;
         report.map_inputs(&input_dir, &inputs);
         Ok(report)
+    }
+
+    /// What a sub-agent in `role` is: a prompt naming what `quarantine` shows it and the
+    /// `sites` it was handed, the quarantine's `run` tool alone, so it starts no sub-agent
+    /// of its own, and whichever slot the server picks.
+    fn subagent_definition(
+        &self,
+        role: &Role,
+        quarantine: &Quarantine,
+        sites: &[HostName],
+        gate: Arc<dyn ConfirmationGate>,
+        spoken: bool,
+    ) -> AgentDefinition {
+        let limits = AgentLimits::default();
+        AgentDefinition {
+            system_prompt: subagent_prompt(role, quarantine, sites, spoken, limits),
+            tools: self.subagent_tools(quarantine, gate),
+            planning_tools: None,
+            limits,
+            slot: SlotAssignment::Unassigned,
+        }
     }
 
     /// The most tokens of a sub-agent's answer a relay result shows.
@@ -847,6 +866,7 @@ fn subagent_prompt(
     quarantine: &Quarantine,
     sites: &[HostName],
     spoken: bool,
+    limits: AgentLimits,
 ) -> String {
     let world = match role.reach {
         Reach::Web => format!(
@@ -865,12 +885,13 @@ fn subagent_prompt(
         "{SUBAGENT_PROMPT} {} {world} Your home directory {} is yours to write in.\n{}",
         role.brief,
         quarantine.home_dir().display(),
-        budgets_note()
+        budgets_note(limits)
     )
 }
 
 /// What a sub-agent is told of the shape its answer takes and the limits it works within.
-fn budgets_note() -> String {
+fn budgets_note(limits: AgentLimits) -> String {
+    let tool_steps = limits.tool_steps;
     format!(
         "Your budgets:\n\
          - Final message: it is all the caller sees of your work, so it must stand alone. \
@@ -879,7 +900,7 @@ fn budgets_note() -> String {
          400 words. If the task needs more than that, put it after the bullets: the whole \
          message is saved to a file the caller can open, but only its start is sure to be \
          read.\n\
-         - Tool steps: {MAX_TOOL_STEPS}. After the last your tools are withdrawn and you \
+         - Tool steps: {tool_steps}. After the last your tools are withdrawn and you \
          must answer from what you have.\n\
          - Context: when your history grows long it is compacted and loses detail each \
          time. Keep notes of what you find in a file in your home directory as you go, and \
@@ -941,19 +962,16 @@ mod tests {
     use assistd_tools::{Approvals, SharedDirs};
 
     use super::*;
-    use crate::agent::AgentSpec;
 
     /// A relay tool whose sub-agents would run beside `parent`, which has none to hand out.
     fn relay_tool(parent: &Arc<ScriptedBackend>, dir: &Path) -> RelayTool {
         let gate = Arc::new(DenyAllGate);
         RelayTool::new(
             RelayDeps {
-                runner: SubAgentRunner::new(
+                host: AgentHost::new(
                     Arc::clone(parent) as Arc<dyn LlmBackend>,
-                    AgentSpec {
-                        health: None,
-                        tool_deadline: Duration::from_secs(60),
-                    },
+                    None,
+                    Duration::from_secs(60),
                 ),
                 slot_stash: Arc::new(
                     SlotStash::new(
