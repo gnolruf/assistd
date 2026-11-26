@@ -11,7 +11,10 @@ use ratatui_image::protocol::StatefulProtocol;
 use serde_json::Value;
 use textwrap::core::display_width;
 
-use assistd_ipc::{RelayEvent, RelayStepPlan, RelayStepRecord};
+use assistd_ipc::{
+    AgentId, Component, EventBody, RelayStepEnd, RelayStepPlan, RelayStepRecord, StatusKind,
+    StatusSeverity,
+};
 use assistd_utils::terminal_text::escape_bidi_controls;
 
 use super::markdown::{last_block_boundary, render_markdown};
@@ -355,21 +358,94 @@ impl OutputPane {
         }));
     }
 
+    /// Draw `body`, one event of an agent's turn; an event that is not an agent's output
+    /// is ignored.
+    pub(super) fn apply_agent_event(&mut self, body: EventBody) {
+        match body {
+            EventBody::Delta { text } => {
+                self.finish_thinking();
+                self.append_assistant(&text);
+            }
+            EventBody::ReasoningDelta { text } => self.append_thinking(&text),
+            EventBody::StepDiscarded => self.discard_step(),
+            EventBody::ToolCall { name, args } => {
+                self.finish_thinking();
+                self.begin_tool_block(tool_block_label(name, Some(&args)));
+            }
+            EventBody::ToolResult { result, .. } => {
+                self.finish_tool_block(result.output, result.exit_code, result.duration_ms);
+            }
+            EventBody::RelayPlanned { steps } => self.begin_relay(steps),
+            EventBody::RelayStepStarted { step, sub_agent } => {
+                self.update_relay(|run| run.start(step, sub_agent));
+            }
+            EventBody::RelayStepEnded { step, end } => self.end_relay_step(step, end),
+            EventBody::Status {
+                severity,
+                component,
+                event,
+                message,
+            } => self.show_status(severity, component, event, &message),
+            _ => {}
+        }
+    }
+
+    /// Draw `body` as sub-agent `agent` of the running relay streamed it.
+    pub(super) fn apply_sub_agent_event(&mut self, agent: AgentId, body: EventBody) {
+        self.update_relay(|run| run.apply(agent, body));
+    }
+
+    /// Draw what a status event says about the agent's turn, if anything.
+    pub(super) fn show_status(
+        &mut self,
+        severity: StatusSeverity,
+        component: Component,
+        event: StatusKind,
+        message: &str,
+    ) {
+        match event {
+            StatusKind::CompactingHistory => self.begin_compaction(),
+            StatusKind::HistoryCompacted => self.finish_compaction(),
+            StatusKind::Restarting => self.push_info(&format!("[{component} restarting…]")),
+            StatusKind::OutputTruncated => self.push_info(&format!(
+                "[{component} response hit the token limit; retrying…]"
+            )),
+            _ if severity == StatusSeverity::Error => {
+                self.push_info(&format!("[{component}: {message}]"));
+            }
+            _ => {}
+        }
+    }
+
+    /// Drop the reply text and thinking of the model step in flight, which trail every
+    /// other item.
+    fn discard_step(&mut self) {
+        while let Some(OutputItem::Assistant(_) | OutputItem::Thinking(_)) = self.items.last() {
+            self.items.pop();
+        }
+        self.wrap.truncate(self.items.len());
+        self.open_assistant = None;
+    }
+
     /// Turn the running tool block into a relay of `plan`'s steps. No-op,
     /// like every relay update, when no tool block is running.
-    pub(super) fn begin_relay(&mut self, plan: Vec<RelayStepPlan>) {
+    fn begin_relay(&mut self, plan: Vec<RelayStepPlan>) {
         if let Some((idx, block)) = self.running_tool() {
             block.relay = Some(RelayRun::planned(plan));
             self.wrap.invalidate(idx);
         }
     }
 
-    /// Apply `event` to the running relay.
-    pub(super) fn apply_relay(&mut self, event: RelayEvent) {
+    fn end_relay_step(&mut self, step: u32, end: RelayStepEnd) {
+        self.update_relay(|run| run.end_step(step, end));
+    }
+
+    /// Apply `update` to the running relay.
+    fn update_relay(&mut self, update: impl FnOnce(&mut RelayRun)) {
         if let Some((idx, block)) = self.running_tool()
             && let Some(run) = block.relay.as_mut()
         {
-            run.apply(event);
+            update(run);
             self.wrap.invalidate(idx);
         }
     }

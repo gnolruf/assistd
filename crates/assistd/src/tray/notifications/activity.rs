@@ -150,7 +150,14 @@ impl ActivityTracker {
     /// Apply `ev`. The body comes only from `LastDelta`, which carries
     /// the whole reply; `Delta` never appends.
     pub(super) fn ingest(&mut self, ev: &Event) {
-        let Event { id, body } = ev;
+        let Event {
+            id,
+            agent: None,
+            body,
+        } = ev
+        else {
+            return;
+        };
         match body {
             EventBody::Delta { .. } => self.activate_turn(id).start_streaming(),
             EventBody::LastDelta { text } => {

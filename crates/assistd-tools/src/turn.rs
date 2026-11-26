@@ -2,23 +2,16 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::warn;
 
-use assistd_ipc::{RelayEvent, TaskId};
+use assistd_ipc::{AgentId, LlmEvent, TaskId};
 
 use crate::policy::{Answer, Approval, ConfirmRouter, ConfirmationRequest};
-
-/// Is shown what a relay running inside a tool call does.
-#[async_trait]
-pub trait RelayObserver: fmt::Debug + Send + Sync + 'static {
-    /// Show `event`; an observer whose turn has ended drops it.
-    async fn report(&self, event: RelayEvent);
-}
 
 /// The model lane a task run's turn holds, which the user's interaction may ask for.
 #[async_trait]
@@ -58,14 +51,26 @@ impl HostReads {
 #[derive(Debug, Clone, Default)]
 struct DeclineMessages(Arc<Mutex<Vec<String>>>);
 
-/// The turn a tool call belongs to: who answers its prompts, who watches its relays, the lane
+/// The ids an agent's loop gives the sub-agents its tool calls start. Clones share the count.
+#[derive(Debug, Clone, Default)]
+struct AgentIds(Arc<AtomicU32>);
+
+/// The tool call in flight on its agent's event stream.
+#[derive(Debug, Clone)]
+struct CallStream {
+    events: mpsc::Sender<LlmEvent>,
+    call_id: String,
+}
+
+/// The turn a tool call belongs to: who answers its prompts, its agent's event stream, the lane
 /// it may have to give up, and what its history has read from this machine. The default belongs
-/// to no turn: prompts are denied, nobody watches, it holds no lane, and its history is new.
+/// to no turn: prompts are denied, events go nowhere, it holds no lane, and its history is new.
 #[derive(Debug, Clone)]
 pub struct TurnContext {
     router: Option<Arc<ConfirmRouter>>,
     decline_messages: DeclineMessages,
-    relay_observer: Option<Arc<dyn RelayObserver>>,
+    agent_ids: AgentIds,
+    call: Option<CallStream>,
     lane: Option<Arc<dyn YieldableLane>>,
     /// `None` in a quarantine, whose reads are not recorded.
     host_reads: Option<HostReads>,
@@ -76,7 +81,8 @@ impl Default for TurnContext {
         Self {
             router: None,
             decline_messages: DeclineMessages::default(),
-            relay_observer: None,
+            agent_ids: AgentIds::default(),
+            call: None,
             lane: None,
             host_reads: Some(HostReads::default()),
         }
@@ -90,12 +96,6 @@ impl TurnContext {
             router: Some(router),
             ..Self::default()
         }
-    }
-
-    /// Show `observer` the relays this turn's tool calls run.
-    pub fn observed_by(mut self, observer: Arc<dyn RelayObserver>) -> Self {
-        self.relay_observer = Some(observer);
-        self
     }
 
     /// Run on `lane`, giving it up when the user's interaction asks.
@@ -121,10 +121,24 @@ impl TurnContext {
     }
 
     /// The same turn for one agent's loop, which alone is told what the user says when
-    /// declining the prompts its tool calls raise.
+    /// declining the prompts its tool calls raise, numbers its own sub-agents, and has no
+    /// call in flight.
     pub fn for_agent(mut self) -> Self {
         self.decline_messages = DeclineMessages::default();
+        self.agent_ids = AgentIds::default();
+        self.call = None;
         self
+    }
+
+    /// The same turn for tool call `call_id` of the agent that streams on `events`.
+    pub fn in_call(&self, events: mpsc::Sender<LlmEvent>, call_id: &str) -> Self {
+        Self {
+            call: Some(CallStream {
+                events,
+                call_id: call_id.to_owned(),
+            }),
+            ..self.clone()
+        }
     }
 
     /// Ask whoever answers the turn's prompts, keeping a message given instead of an
@@ -221,10 +235,29 @@ impl TurnContext {
         self.router.as_ref().map(|router| router.parked())
     }
 
-    /// Show the turn's relay observer `event`, if it has one.
-    pub async fn report_relay(&self, event: RelayEvent) {
-        if let Some(observer) = &self.relay_observer {
-            observer.report(event).await;
+    /// The id of the next sub-agent a tool call of this agent's loop starts.
+    pub fn next_agent_id(&self) -> AgentId {
+        AgentId(self.agent_ids.0.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+
+    /// Stream `event` as the calling agent's own; dropped outside a tool call and once the
+    /// turn has ended.
+    pub async fn emit(&self, event: LlmEvent) {
+        if let Some(call) = &self.call {
+            let _ = call.events.send(event).await;
+        }
+    }
+
+    /// Stream `event` on the calling agent's stream as sub-agent `agent`'s, which the call
+    /// in flight started.
+    pub async fn emit_from(&self, agent: AgentId, event: LlmEvent) {
+        if let Some(call) = &self.call {
+            let wrapped = LlmEvent::FromAgent {
+                agent,
+                call_id: call.call_id.clone(),
+                event: Box::new(event),
+            };
+            let _ = call.events.send(wrapped).await;
         }
     }
 }

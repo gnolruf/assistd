@@ -16,7 +16,7 @@ use tracing::{Instrument, info, info_span};
 use uuid::Uuid;
 
 use assistd_config::ToolsOutputConfig;
-use assistd_ipc::{Access, HostName, RelayEvent, RelayStepPlan};
+use assistd_ipc::{Access, AgentId, HostName, LlmEvent, RelayStepEnd, RelayStepPlan};
 use assistd_llm::{SlotAssignment, SlotStash};
 use assistd_memory::SessionId;
 use assistd_search::SearxngClient;
@@ -210,6 +210,15 @@ struct StepPosition {
     steps: usize,
 }
 
+/// What a run of a plan has done so far, kept when the run is cut off.
+#[derive(Debug, Default)]
+struct PlanProgress {
+    /// What the sub-agents of the steps run so far touched.
+    touched: Vec<Access>,
+    /// The step whose sub-agent is running.
+    running_step: Option<u32>,
+}
+
 /// Labels every prompt a relay step's commands raise with the step's task.
 #[derive(Debug)]
 struct RelayStepGate {
@@ -229,25 +238,29 @@ impl RelayTool {
     /// Relay `plan` within a task run on `lane`, cancelling it whenever the run yields to the
     /// user's interaction and rerunning it from `args` once the run has the lane again,
     /// since its effects stay inside its quarantine. `None` when the run was cancelled first;
-    /// `touched` holds what the last run's sub-agents touched.
+    /// `progress` is the last run's.
     async fn relay_giving_way(
         &self,
         mut plan: RelayPlan,
         args: &Value,
         turn: &TurnContext,
         lane: &dyn YieldableLane,
-        touched: &mut Vec<Access>,
+        progress: &mut PlanProgress,
     ) -> Result<Option<Result<RelayReport, StepFailed>>, ToolError> {
         loop {
-            touched.clear();
+            *progress = PlanProgress::default();
             tokio::select! {
                 biased;
-                outcome = self.relay(plan, turn, touched) => return Ok(Some(outcome)),
+                outcome = self.relay(plan, turn, progress) => return Ok(Some(outcome)),
                 () = lane.yield_requested() => {}
             }
             info!(target: "assistd::relay", "relay cancelled for the user's conversation");
-            let message = RELAY_YIELDED.to_string();
-            turn.report_relay(RelayEvent::Failed { message }).await;
+            if let Some(step) = progress.running_step.take() {
+                let end = RelayStepEnd::Failed {
+                    message: RELAY_YIELDED.to_string(),
+                };
+                turn.emit(LlmEvent::RelayStepEnded { step, end }).await;
+            }
             if !lane.give_way().await {
                 return Ok(None);
             }
@@ -256,16 +269,16 @@ impl RelayTool {
     }
 
     /// Runs every step inside one slot-stash guard, so the swap is paid once per plan,
-    /// adding what each step's sub-agent touched to `touched`.
+    /// keeping `progress` as the steps run.
     async fn relay(
         &self,
         plan: RelayPlan,
         turn: &TurnContext,
-        touched: &mut Vec<Access>,
+        progress: &mut PlanProgress,
     ) -> Result<RelayReport, StepFailed> {
         self.deps
             .slot_stash
-            .preserve_across(self.run_plan(plan, turn, touched))
+            .preserve_across(self.run_plan(plan, turn, progress))
             .await
     }
 
@@ -273,34 +286,34 @@ impl RelayTool {
         &self,
         plan: RelayPlan,
         turn: &TurnContext,
-        touched: &mut Vec<Access>,
+        progress: &mut PlanProgress,
     ) -> Result<RelayReport, StepFailed> {
         let steps = plan.rest.len() + 1;
         let at = |step| StepPosition { step, steps };
-        turn.report_relay(RelayEvent::Planned {
+        turn.emit(LlmEvent::RelayPlanned {
             steps: plan.steps().map(RelayStep::plan).collect(),
         })
         .await;
         let mut report = self
-            .run_step(plan.first, None, at(1), turn, touched)
+            .run_step(plan.first, None, at(1), turn, progress)
             .await?;
         for (index, step) in plan.rest.into_iter().enumerate() {
             report = self
-                .run_step(step, Some(&report), at(index + 2), turn, touched)
+                .run_step(step, Some(&report), at(index + 2), turn, progress)
                 .await?;
         }
         Ok(report)
     }
 
-    /// Run one step under its own span, telling `turn` when it starts and
-    /// when it ends without a report.
+    /// Run one step under its own span as a new sub-agent of `turn`, telling `turn` when
+    /// it starts and how it ends.
     async fn run_step(
         &self,
         step: RelayStep,
         previous: Option<&RelayReport>,
         position: StepPosition,
         turn: &TurnContext,
-        touched: &mut Vec<Access>,
+        progress: &mut PlanProgress,
     ) -> Result<RelayReport, StepFailed> {
         let span = info_span!(
             "relay_step",
@@ -308,30 +321,41 @@ impl RelayTool {
             steps = position.steps,
             agent = step.role.name
         );
-        turn.report_relay(RelayEvent::Started {
-            step: u32::try_from(position.step).unwrap_or(u32::MAX),
+        let number = u32::try_from(position.step).unwrap_or(u32::MAX);
+        let agent = turn.next_agent_id();
+        turn.emit(LlmEvent::RelayStepStarted {
+            step: number,
+            agent,
         })
         .await;
+        progress.running_step = Some(number);
         let outcome = self
-            .run_subagent(step, previous, turn, touched)
+            .run_subagent(step, previous, agent, turn, &mut progress.touched)
             .instrument(span)
             .await;
-        let failed = outcome.map_err(|source| StepFailed {
+        progress.running_step = None;
+        let end = match &outcome {
+            Ok(report) => RelayStepEnd::Answered {
+                answer_file: report.artifacts().to_path_buf(),
+            },
+            Err(error) => RelayStepEnd::Failed {
+                message: error.to_string(),
+            },
+        };
+        turn.emit(LlmEvent::RelayStepEnded { step: number, end })
+            .await;
+        outcome.map_err(|source| StepFailed {
             step: position.step,
             total: position.steps,
             source,
-        });
-        if let Err(error) = &failed {
-            let message = error.source.to_string();
-            turn.report_relay(RelayEvent::Failed { message }).await;
-        }
-        failed
+        })
     }
 
     async fn run_subagent(
         &self,
         step: RelayStep,
         previous: Option<&RelayReport>,
+        agent: AgentId,
         turn: &TurnContext,
         touched: &mut Vec<Access>,
     ) -> Result<RelayReport, RelayError> {
@@ -365,14 +389,14 @@ impl RelayTool {
             .host
             .child(definition)
             .map_err(SubAgentError::from)?;
-        let mut outcome = run_shown(child, task, CancellationToken::new(), &turn).await;
+        let mut outcome = run_shown(child, task, CancellationToken::new(), &turn, agent).await;
         let input_dir = quarantine.input_dir();
         touched.extend(
             mem::take(&mut outcome.accesses)
                 .into_iter()
                 .filter_map(|access| outside_quarantine(access, &input_dir, &inputs)),
         );
-        let mut report = report_of(outcome, answer_file, &turn).await?;
+        let mut report = report_of(outcome, answer_file).await?;
         report.map_inputs(&input_dir, &inputs);
         Ok(report)
     }
@@ -621,13 +645,13 @@ impl Tool for RelayTool {
         }
         tracing::Span::current().record("agents", plan.agents());
         info!(target: "assistd::relay", "relay started");
-        let mut accesses = Vec::new();
+        let mut progress = PlanProgress::default();
         let outcome = match turn.lane() {
             Some(lane) => {
-                self.relay_giving_way(plan, &args, turn, lane.as_ref(), &mut accesses)
+                self.relay_giving_way(plan, &args, turn, lane.as_ref(), &mut progress)
                     .await?
             }
-            None => Some(self.relay(plan, turn, &mut accesses).await),
+            None => Some(self.relay(plan, turn, &mut progress).await),
         };
         let output = match outcome {
             Some(Ok(report)) => {
@@ -639,7 +663,10 @@ impl Tool for RelayTool {
             }
             None => ToolOutput::failed(RELAY_CANCELLED_WHILE_YIELDED, start.elapsed()),
         };
-        Ok(ToolOutput { accesses, ..output })
+        Ok(ToolOutput {
+            accesses: progress.touched,
+            ..output
+        })
     }
 }
 
@@ -957,11 +984,18 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
 
+    use tokio::sync::mpsc;
+
+    use assistd_ipc::{Event, EventBody};
     use assistd_llm::{LlmBackend, ScriptedBackend, SlotDir, Step, ToolCall};
+    use assistd_memory::{SqliteHandle, SqliteTranscriptStore};
     use assistd_tools::test_support::{DenyAllGate, bash_policy, inert_sandbox};
     use assistd_tools::{Approvals, SharedDirs};
 
     use super::*;
+    use crate::bus::EventSink;
+    use crate::transcript::{SessionContext, TranscriptLog};
+    use crate::turn_driver::TurnDriver;
 
     /// A relay tool whose sub-agents would run beside `parent`, which has none to hand out.
     fn relay_tool(parent: &Arc<ScriptedBackend>, dir: &Path) -> RelayTool {
@@ -1027,6 +1061,89 @@ mod tests {
 
         assert_eq!(output.exit_code, 0, "{}", output.output);
         assert_eq!(output.accesses, [Access::Read(notes)]);
+    }
+
+    /// What a client of the turn that makes `relay` run `step` as tool call `c-relay` is sent.
+    async fn events_sent_to_the_client(relay: &RelayTool, step: Value, dir: &Path) -> Vec<Event> {
+        let handle = SqliteHandle::open(&dir.join("memory.db")).await.unwrap();
+        let transcript = Arc::new(TranscriptLog::new(
+            Arc::new(SqliteTranscriptStore::new(handle)),
+            Arc::new(SessionContext::new(SessionId::new(), None)),
+        ));
+        let (client_tx, mut client_rx) = mpsc::channel(64);
+        let driver = TurnDriver::new(
+            "q".into(),
+            transcript,
+            None,
+            EventSink::unpublished(client_tx),
+        );
+        let (turn_tx, turn_rx) = mpsc::channel(8);
+        let relayed = async {
+            let turn = TurnContext::default().in_call(turn_tx, "c-relay");
+            relay.invoke(&turn, step).await.unwrap()
+        };
+        let cancel = CancellationToken::new();
+        let (output, _reply) = tokio::join!(relayed, driver.drive(turn_rx, &cancel));
+        assert_eq!(output.exit_code, 0, "{}", output.output);
+        let mut sent = Vec::new();
+        while let Ok(event) = client_rx.try_recv() {
+            sent.push(event);
+        }
+        sent
+    }
+
+    #[tokio::test]
+    async fn a_sub_agent_step_cut_off_and_retried_reaches_the_client_as_a_discard_under_its_agent_id()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_agent = ScriptedBackend::new([
+            Step::truncated().saying("The cause is a mis"),
+            Step::reply("The cause is a missing lock."),
+        ]);
+        let handed_out = Arc::new(sub_agent) as Arc<dyn LlmBackend>;
+        let parent = Arc::new(ScriptedBackend::default().handing_out([handed_out]));
+        let relay = relay_tool(&parent, dir.path());
+        let step = json!({ "task": "find the cause", "agent": "file_review" });
+
+        let sent = events_sent_to_the_client(&relay, step, dir.path()).await;
+
+        let started = sent.iter().find_map(|event| match event.body {
+            EventBody::RelayStepStarted { step: 1, sub_agent } => Some(sub_agent),
+            _ => None,
+        });
+        let sub_agent = started.expect("the step started");
+        let streamed: Vec<&EventBody> = sent
+            .iter()
+            .filter(|event| event.agent.is_some())
+            .inspect(|event| assert_eq!(event.agent, Some(sub_agent), "{event:?}"))
+            .map(|event| &event.body)
+            .filter(|body| matches!(body, EventBody::Delta { .. } | EventBody::StepDiscarded))
+            .collect();
+        assert_eq!(
+            streamed,
+            [
+                &EventBody::Delta {
+                    text: "The cause is a mis".into()
+                },
+                &EventBody::StepDiscarded,
+                &EventBody::Delta {
+                    text: "The cause is a missing lock.".into()
+                },
+            ]
+        );
+        assert!(
+            matches!(
+                sent.last().map(|event| (&event.agent, &event.body)),
+                Some((
+                    None,
+                    EventBody::RelayStepEnded {
+                        step: 1,
+                        end: RelayStepEnd::Answered { .. }
+                    }
+                ))
+            ),
+            "{sent:?}"
+        );
     }
 
     #[tokio::test]

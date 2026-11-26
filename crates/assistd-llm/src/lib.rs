@@ -6,14 +6,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use assistd_ipc::{
-    Access, Attachment, Component, RelayEvent, StatusKind, StatusSeverity, ToolReport,
-};
+use assistd_ipc::Attachment;
 
 pub mod completion;
 #[cfg(feature = "test-support")]
@@ -23,8 +20,9 @@ mod page_transcriber;
 #[cfg(feature = "test-support")]
 mod scripted;
 
+pub use assistd_ipc::{CompactionCut, LlmEvent, ToolCall};
 pub use assistd_utils::child_server::ReadyState;
-pub use completion::history::{CompactionCut, ToolCallRecord};
+pub use completion::history::ToolCallRecord;
 pub use completion::{LlamaClient, LlamaClientError};
 #[cfg(feature = "test-support")]
 pub use echo::EchoBackend;
@@ -137,73 +135,6 @@ pub enum OneShotReply {
     /// Exactly one of these words, held by grammar, sampled greedily with thinking off. The
     /// words hold no quote or backslash.
     OneOf(&'static [&'static str]),
-}
-
-/// Events a backend streams during generation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LlmEvent {
-    /// A model step is about to stream; what follows up to the step's tool
-    /// calls or `Done` is that step's output.
-    StepStarted,
-    /// What the step in flight streamed so far is void: the step runs again
-    /// or the turn ends without it.
-    StepDiscarded,
-    /// A streamed chunk of model output.
-    Delta { text: String },
-    /// A streamed chunk of the model's reasoning; never spoken.
-    ReasoningDelta { text: String },
-    /// Every tool call the model requested in one step, in request
-    /// order; emitted once, before the first of them runs.
-    ToolCallsRequested { calls: Vec<ToolCall> },
-    /// The model asked to invoke a tool; emitted before the tool runs.
-    ToolCall {
-        id: String,
-        name: String,
-        arguments: Value,
-    },
-    /// A tool finished with `result`.
-    ToolResult {
-        id: String,
-        name: String,
-        result: Box<ToolReport>,
-        /// Whether the call could put data from this machine in `result`.
-        read_host: bool,
-        /// What the call touched.
-        accesses: Vec<Access>,
-    },
-    /// Progress of a relay running inside the tool call in flight.
-    Relay(RelayEvent),
-    /// Tokens in the history as sent with the request about to stream,
-    /// and `total` the history has held, counting what compaction removed.
-    ContextSize { tokens: u32, total: u32 },
-    /// Non-terminal recovery or status update.
-    Status {
-        severity: StatusSeverity,
-        component: Component,
-        event: StatusKind,
-        message: String,
-    },
-    /// History was compacted: everything `cut` leaves out is now represented
-    /// by `summary`, which took `elapsed` to make.
-    HistoryCompacted {
-        summary: String,
-        cut: CompactionCut,
-        elapsed: Duration,
-    },
-    /// The turn was cut off before the model finished; `reply` is what the
-    /// history keeps as its answer. No `Done` follows.
-    Interrupted { reply: String },
-    /// The model has finished generating.
-    Done,
-}
-
-/// One tool call the model requested during a `step`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ToolCall {
-    /// Server-assigned call ID, echoed back on the matching result.
-    pub id: String,
-    pub name: String,
-    pub arguments: Value,
 }
 
 /// Result of executing one [`ToolCall`], fed back to the model through

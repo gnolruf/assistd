@@ -513,6 +513,7 @@ async fn a_lagged_subscriber_is_resent_the_queue_with_the_prompt_of_a_paused_run
     let Some(Event {
         id,
         body: EventBody::TaskQueue { snapshot },
+        ..
     }) = rx.recv().await
     else {
         panic!("no queue snapshot after the lag");

@@ -261,8 +261,8 @@ async fn dispatch_tool_call(
         );
     };
 
-    let invocation =
-        AssertUnwindSafe(tool.invoke(&turn.context, call.arguments.clone())).catch_unwind();
+    let context = turn.call_context(call);
+    let invocation = AssertUnwindSafe(tool.invoke(&context, call.arguments.clone())).catch_unwind();
     let finished = if tool.bounded_by_tool_deadline() {
         within_deadline(&turn.context, deadline, invocation).await
     } else {

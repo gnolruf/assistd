@@ -4,16 +4,15 @@
 use std::pin::pin;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, warn};
 
-use assistd_ipc::{RelayEvent, StatusKind};
+use assistd_ipc::StatusKind;
 use assistd_llm::{LlmError, LlmEvent, StepOutcome, ToolCall};
-use assistd_tools::{RelayObserver, ToolRegistry, TurnContext};
+use assistd_tools::{ToolRegistry, TurnContext};
 
 use super::definition::AgentLimits;
 use super::outcome::{AgentEnd, AgentOutcome, RunRecord};
@@ -43,10 +42,7 @@ impl Agent {
     ) -> AgentOutcome {
         let tools = Arc::clone(self.tools_for(context));
         let mut turn = Turn {
-            context: context
-                .clone()
-                .for_agent()
-                .observed_by(Arc::new(TurnRelayObserver(events.clone()))),
+            context: context.clone().for_agent(),
             tx: events,
             cancel,
             schemas: tools.openai_schemas(),
@@ -186,7 +182,7 @@ impl Agent {
 }
 
 pub(super) struct Turn {
-    /// The caller's context, with the turn's own events observing its relays.
+    /// The caller's context, as this agent's loop holds it.
     pub(super) context: TurnContext,
     tx: mpsc::Sender<LlmEvent>,
     pub(super) cancel: CancellationToken,
@@ -237,6 +233,11 @@ impl Turn {
         }
     }
 
+    /// The turn's context for tool call `call`, whose sub-agents stream on the turn's events.
+    pub(super) fn call_context(&self, call: &ToolCall) -> TurnContext {
+        self.context.in_call(self.tx.clone(), &call.id)
+    }
+
     /// How a turn whose model has just answered ended.
     fn answered(&self) -> AgentEnd {
         match self.tools_withdrawn {
@@ -251,17 +252,6 @@ impl Turn {
             Some(why) => format!("{TRUNCATION_NOTE} {}", why.model_note()),
             None => TRUNCATION_NOTE.to_string(),
         }
-    }
-}
-
-/// Shows a turn the relays its tool calls run, as [`LlmEvent::Relay`].
-#[derive(Debug)]
-struct TurnRelayObserver(mpsc::Sender<LlmEvent>);
-
-#[async_trait]
-impl RelayObserver for TurnRelayObserver {
-    async fn report(&self, event: RelayEvent) {
-        let _ = self.0.send(LlmEvent::Relay(event)).await;
     }
 }
 

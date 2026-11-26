@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 mod access;
+mod agent;
 pub mod attachment;
 #[cfg(feature = "client")]
 pub mod client;
@@ -24,6 +25,7 @@ mod voice;
 pub mod wakeword;
 
 pub use access::{Access, AccessAction};
+pub use agent::{AgentId, CompactionCut, LlmEvent, ToolCall};
 pub use attachment::{Attachment, ImageAttachment, ImageMime};
 #[cfg(feature = "client")]
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
@@ -37,8 +39,7 @@ pub use permission::{ConfirmSource, PermissionMode, PlanMode, PlanVerdict};
 pub use presence::{DownloadProgress, PresenceState, PresenceTarget};
 pub use readiness::{ComponentReadiness, StartupComponent, StartupReadiness};
 pub use relay::{
-    RelayEvent, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayToolOutcome,
-    RelayTraceEntry,
+    RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayToolOutcome, RelayTraceEntry,
 };
 pub use request::{Request, RequestBody, SubscribeFilter};
 pub use search::{SearchKind, SearchPlace};

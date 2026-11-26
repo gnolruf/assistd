@@ -189,6 +189,7 @@ fn bus_copy(event: &Event) -> Event {
     };
     Event {
         id: event.id.clone(),
+        agent: event.agent,
         body,
     }
 }

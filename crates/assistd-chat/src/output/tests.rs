@@ -462,3 +462,51 @@ fn streamed_text_expands_tabs_and_joins_a_crlf_split_across_deltas() {
     p.finish_thinking();
     assert_eq!(rendered_lines(&mut p, 40, 5)[1..3], ["▎ a", "▎ 漢      b"]);
 }
+
+#[test]
+fn sub_agent_events_draw_in_its_own_transcript_and_a_discard_drops_the_step_in_flight() {
+    let sub_agent = AgentId(7);
+    let mut p = OutputPane::new();
+    p.apply_agent_event(EventBody::ToolCall {
+        name: "relay".into(),
+        args: serde_json::json!({ "task": "find it" }),
+    });
+    p.apply_agent_event(EventBody::RelayPlanned {
+        steps: vec![RelayStepPlan {
+            task: "find it".into(),
+            agent: "file_review".into(),
+        }],
+    });
+    p.apply_agent_event(EventBody::RelayStepStarted { step: 1, sub_agent });
+    let streamed = [
+        EventBody::ReasoningDelta {
+            text: "look first".into(),
+        },
+        EventBody::Delta {
+            text: "The cau".into(),
+        },
+        EventBody::StepDiscarded,
+        EventBody::ToolCall {
+            name: "run".into(),
+            args: serde_json::json!({ "command": "ls" }),
+        },
+    ];
+    for body in streamed {
+        p.apply_sub_agent_event(sub_agent, body);
+    }
+    p.apply_sub_agent_event(
+        AgentId(8),
+        EventBody::Delta {
+            text: "from nobody".into(),
+        },
+    );
+
+    assert_eq!(p.items.len(), 1, "{:?}", item_texts(&p));
+    let agents = p.agents();
+    assert_eq!(
+        item_texts(agents[0].transcript()),
+        ["> find it", "", "[tool:ls]"]
+    );
+    let block = rendered_lines(&mut p, 60, 10);
+    assert!(block.iter().any(|row| row.contains("$ ls …")), "{block:?}");
+}

@@ -8,11 +8,14 @@ use ratatui::text::{Line, Span};
 use textwrap::core::display_width;
 
 use assistd_ipc::{
-    RelayEvent, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayTraceEntry,
+    AgentId, EventBody, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayTraceEntry,
 };
 use assistd_utils::terminal_text::{escape_controls, escape_controls_single_line};
 
-use super::{OutputPane, ToolState, elapsed_text, exit_color, split_body, tool_block_label};
+use super::{
+    BlockTiming, CompactionBlock, OutputItem, OutputPane, ToolBlock, ToolState, elapsed_text,
+    exit_color, split_body, tool_block_label,
+};
 use crate::text::ellipsize;
 use crate::theme::Theme;
 use crate::ui::compact_count;
@@ -58,25 +61,31 @@ impl RelayRun {
         }
     }
 
-    /// Start step `step`, counted from 1; an unknown step is ignored.
-    fn start(&mut self, step: u32) {
-        let index = usize::try_from(step).unwrap_or(usize::MAX);
-        if let Some(trace) = index.checked_sub(1).and_then(|i| self.steps.get_mut(i)) {
-            trace.start();
+    /// Hand step `step`, counted from 1, to sub-agent `agent`; an unknown step is ignored.
+    pub(super) fn start(&mut self, step: u32, agent: AgentId) {
+        if let Some(trace) = self.step_mut(step) {
+            trace.start(agent);
         }
     }
 
-    /// Start the step `event` names, or apply `event` to the running step;
-    /// with none running, it is dropped.
-    pub(super) fn apply(&mut self, event: RelayEvent) {
-        match event {
-            RelayEvent::Started { step } => self.start(step),
-            event => {
-                if let Some(step) = self.steps.iter_mut().find(|step| step.is_running()) {
-                    step.apply(event);
-                }
-            }
+    /// End step `step`, counted from 1, if it is running.
+    pub(super) fn end_step(&mut self, step: u32, end: RelayStepEnd) {
+        if let Some(trace) = self.step_mut(step) {
+            trace.finish(end);
         }
+    }
+
+    /// Draw `body` in the transcript of the step sub-agent `agent` is running; with none,
+    /// it is dropped.
+    pub(super) fn apply(&mut self, agent: AgentId, body: EventBody) {
+        if let Some(step) = self.steps.iter_mut().find(|step| step.is_run_by(agent)) {
+            step.apply(body);
+        }
+    }
+
+    fn step_mut(&mut self, step: u32) -> Option<&mut RelayStepTrace> {
+        let index = usize::try_from(step).ok()?.checked_sub(1)?;
+        self.steps.get_mut(index)
     }
 
     /// Fail a step still running when the relay's tool call ends.
@@ -127,9 +136,9 @@ pub(crate) struct RelayStepTrace {
     step: usize,
     steps: usize,
     state: StepState,
-    calls: Vec<RelayEntry>,
     /// Tokens its history has held, once reported.
     tokens: Option<u32>,
+    /// Its sub-agent's turn, drawn as any agent's is.
     transcript: OutputPane,
 }
 
@@ -141,7 +150,6 @@ impl RelayStepTrace {
             step,
             steps,
             state: StepState::Pending,
-            calls: Vec::new(),
             tokens: None,
             transcript: OutputPane::new(),
         }
@@ -159,9 +167,10 @@ impl RelayStepTrace {
         trace
     }
 
-    fn start(&mut self) {
+    fn start(&mut self, agent: AgentId) {
         self.transcript.push_user(&escape_controls(&self.task));
         self.state = StepState::Running {
+            agent,
             started_at: Instant::now(),
         };
     }
@@ -196,18 +205,15 @@ impl RelayStepTrace {
                 outcome,
             } => {
                 let command = tool_block_label(name, Some(&args));
-                let result = outcome.map(|outcome| {
-                    let exit_code = i32::try_from(outcome.exit_code).unwrap_or(i32::MIN);
-                    (exit_code, outcome.duration_ms)
-                });
-                self.calls.push(RelayEntry::Call {
-                    command: escape_controls_single_line(&command).into_owned(),
-                    result,
-                });
-                match result {
-                    Some((exit_code, duration_ms)) => {
-                        self.transcript
-                            .push_tool_block(command, output, exit_code, duration_ms);
+                match outcome {
+                    Some(outcome) => {
+                        let exit_code = i32::try_from(outcome.exit_code).unwrap_or(i32::MIN);
+                        self.transcript.push_tool_block(
+                            command,
+                            output,
+                            exit_code,
+                            outcome.duration_ms,
+                        );
                     }
                     None => {
                         self.transcript.begin_tool_block(command);
@@ -217,81 +223,21 @@ impl RelayStepTrace {
             }
             RelayTraceEntry::Compaction { duration_ms } => {
                 let took = Duration::from_millis(duration_ms.unwrap_or(0));
-                self.calls.push(RelayEntry::Compaction {
-                    started_at: Instant::now(),
-                    took: Some(took),
-                });
                 self.transcript.push_replayed_compaction(took);
             }
         }
     }
 
-    fn apply(&mut self, event: RelayEvent) {
-        match event {
-            RelayEvent::Planned { .. } | RelayEvent::Started { .. } => {}
-            RelayEvent::Delta { text } => {
-                self.transcript.finish_thinking();
-                self.transcript.append_assistant(&text);
-            }
-            RelayEvent::ReasoningDelta { text } => self.transcript.append_thinking(&text),
-            RelayEvent::ContextSize { total } => self.tokens = Some(total),
-            RelayEvent::ToolCall { name, args } => {
-                let command = tool_block_label(name, Some(&args));
-                self.calls.push(RelayEntry::Call {
-                    command: escape_controls_single_line(&command).into_owned(),
-                    result: None,
-                });
-                self.transcript.finish_thinking();
-                self.transcript.begin_tool_block(command);
-            }
-            RelayEvent::ToolResult { result, .. } => {
-                self.finish_call(result.exit_code, result.duration_ms);
-                self.transcript.finish_tool_block(
-                    result.output,
-                    result.exit_code,
-                    result.duration_ms,
-                );
-            }
-            RelayEvent::Compacting => {
-                self.calls.push(RelayEntry::Compaction {
-                    started_at: Instant::now(),
-                    took: None,
-                });
-                self.transcript.begin_compaction();
-            }
-            RelayEvent::Compacted { duration_ms } => {
-                self.finish_compaction(duration_ms);
-                self.transcript.finish_compaction();
-            }
-            RelayEvent::Answered { .. } => self.finish(RelayStepEnd::Answered),
-            RelayEvent::Failed { message } => self.finish(RelayStepEnd::Failed { message }),
-        }
-    }
-
-    /// Finish the latest unanswered call; a result with none is dropped.
-    fn finish_call(&mut self, exit_code: i32, duration_ms: u64) {
-        let unanswered = self.calls.iter_mut().rev().find_map(|entry| match entry {
-            RelayEntry::Call { result, .. } if result.is_none() => Some(result),
-            _ => None,
-        });
-        if let Some(result) = unanswered {
-            *result = Some((exit_code, duration_ms));
-        }
-    }
-
-    /// Finish the latest unfinished compaction; with none, it is dropped.
-    fn finish_compaction(&mut self, duration_ms: u64) {
-        let unfinished = self.calls.iter_mut().rev().find_map(|entry| match entry {
-            RelayEntry::Compaction { took, .. } if took.is_none() => Some(took),
-            _ => None,
-        });
-        if let Some(took) = unfinished {
-            *took = Some(Duration::from_millis(duration_ms));
+    /// Draw `body`, one event of the sub-agent's turn.
+    fn apply(&mut self, body: EventBody) {
+        match body {
+            EventBody::ContextSize { total, .. } => self.tokens = Some(total),
+            body => self.transcript.apply_agent_event(body),
         }
     }
 
     fn finish(&mut self, outcome: RelayStepEnd) {
-        let StepState::Running { started_at } = self.state else {
+        let StepState::Running { started_at, .. } = self.state else {
             return;
         };
         self.transcript.finish_thinking();
@@ -310,14 +256,19 @@ impl RelayStepTrace {
         matches!(self.state, StepState::Running { .. })
     }
 
+    fn is_run_by(&self, agent: AgentId) -> bool {
+        matches!(self.state, StepState::Running { agent: runner, .. } if runner == agent)
+    }
+
     fn has_started(&self) -> bool {
         !matches!(self.state, StepState::Pending)
     }
 
     fn tool_uses(&self) -> usize {
-        self.calls
+        self.transcript
+            .items
             .iter()
-            .filter(|entry| matches!(entry, RelayEntry::Call { .. }))
+            .filter(|item| matches!(item, OutputItem::Tool(_)))
             .count()
     }
 
@@ -340,10 +291,10 @@ impl RelayStepTrace {
     pub(crate) fn status(&self) -> String {
         let (verb, elapsed) = match &self.state {
             StepState::Pending => return "Waiting".into(),
-            StepState::Running { started_at } => ("Running…", started_at.elapsed()),
+            StepState::Running { started_at, .. } => ("Running…", started_at.elapsed()),
             StepState::Finished {
                 elapsed,
-                outcome: RelayStepEnd::Answered,
+                outcome: RelayStepEnd::Answered { .. },
             } => ("Done", *elapsed),
             StepState::Finished {
                 elapsed,
@@ -359,7 +310,7 @@ impl RelayStepTrace {
             StepState::Pending => theme.meta_style().add_modifier(Modifier::DIM),
             StepState::Running { .. } => theme.meta_style(),
             StepState::Finished {
-                outcome: RelayStepEnd::Answered,
+                outcome: RelayStepEnd::Answered { .. },
                 ..
             } => theme.success_style(),
             StepState::Finished {
@@ -382,7 +333,7 @@ impl RelayStepTrace {
             StepState::Pending => '○',
             StepState::Running { .. } => '●',
             StepState::Finished {
-                outcome: RelayStepEnd::Answered,
+                outcome: RelayStepEnd::Answered { .. },
                 ..
             } => '✓',
             StepState::Finished {
@@ -392,19 +343,26 @@ impl RelayStepTrace {
         }
     }
 
-    /// Its calls, cut to the latest few while running unless `all`, then
-    /// how it failed.
+    /// Its tool calls and compactions, cut to the latest few while running unless `all`,
+    /// then how it failed.
     fn detail_rows(&self, all: bool, theme: &Theme) -> Vec<(String, Style)> {
+        let mut rows: Vec<(String, Style)> = self
+            .transcript
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::Tool(block) => Some(call_row(block, theme)),
+                OutputItem::Compaction(block) => Some(compaction_row(block, theme)),
+                _ => None,
+            })
+            .collect();
         let shown = match (&self.state, all) {
-            (_, true) => self.calls.len(),
-            (StepState::Running { .. }, false) => TAIL_CALLS.min(self.calls.len()),
+            (_, true) => rows.len(),
+            (StepState::Running { .. }, false) => TAIL_CALLS.min(rows.len()),
             _ => 0,
         };
-        let hidden = self.calls.len().saturating_sub(shown);
-        let mut rows: Vec<(String, Style)> = self.calls[hidden..]
-            .iter()
-            .map(|entry| entry_row(entry, theme))
-            .collect();
+        let hidden = rows.len() - shown;
+        rows.drain(..hidden);
         if hidden > 0 && shown > 0 {
             rows.push((format!("+{hidden} more tool uses"), theme.aside_style()));
         }
@@ -424,26 +382,14 @@ impl RelayStepTrace {
 
 enum StepState {
     Pending,
+    /// Sub-agent `agent` is running it.
     Running {
+        agent: AgentId,
         started_at: Instant,
     },
     Finished {
         elapsed: Duration,
         outcome: RelayStepEnd,
-    },
-}
-
-/// One row of what a sub-agent did, in the order it happened.
-enum RelayEntry {
-    /// A tool call; `result` is its exit code and duration once it finished.
-    Call {
-        command: String,
-        result: Option<(i32, u64)>,
-    },
-    /// A compaction of its history, with how long it took once it finished.
-    Compaction {
-        started_at: Instant,
-        took: Option<Duration>,
     },
 }
 
@@ -669,37 +615,29 @@ fn result_gutter() -> Gutter<'static> {
     }
 }
 
-fn entry_row(entry: &RelayEntry, theme: &Theme) -> (String, Style) {
-    match entry {
-        RelayEntry::Call {
-            command,
-            result: None,
-        } => (format!("$ {command} …"), theme.aside_style()),
-        RelayEntry::Call {
-            command,
-            result: Some((exit_code, _)),
-        } if *exit_code != 0 => (
+fn call_row(block: &ToolBlock, theme: &Theme) -> (String, Style) {
+    let command = escape_controls_single_line(&block.command);
+    match block.state {
+        ToolState::Running { .. } => (format!("$ {command} …"), theme.aside_style()),
+        ToolState::Finished { exit_code, .. } if exit_code != 0 => (
             format!("$ {command}  [exit:{exit_code}]"),
             theme.error_style(),
         ),
-        RelayEntry::Call { command, .. } => (format!("$ {command}"), theme.code_style()),
-        RelayEntry::Compaction {
-            started_at,
-            took: None,
-        } => (
-            format!(
-                "compacting history… ({})",
-                elapsed_text(started_at.elapsed())
-            ),
-            theme.aside_style(),
-        ),
-        RelayEntry::Compaction {
-            took: Some(took), ..
-        } => (
-            format!("compacted history in {}", elapsed_text(*took)),
-            theme.aside_style(),
-        ),
+        ToolState::Finished { .. } => (format!("$ {command}"), theme.code_style()),
     }
+}
+
+fn compaction_row(block: &CompactionBlock, theme: &Theme) -> (String, Style) {
+    let text = match block.timing {
+        BlockTiming::Live { started_at } => format!(
+            "compacting history… ({})",
+            elapsed_text(started_at.elapsed())
+        ),
+        BlockTiming::Finished { elapsed } => {
+            format!("compacted history in {}", elapsed_text(elapsed))
+        }
+    };
+    (text, theme.aside_style())
 }
 
 /// `{lead}{task}{tail}` in `cols` columns, the task cut to fit but kept to at

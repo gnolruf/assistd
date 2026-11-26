@@ -80,6 +80,7 @@ async fn subscribe_bus(ipc: &IpcClient) -> Option<EventStream> {
                     EventKind::WakeWordDetected,
                     EventKind::Delta,
                     EventKind::ReasoningDelta,
+                    EventKind::StepDiscarded,
                     EventKind::ToolCall,
                     EventKind::ToolResult,
                     EventKind::Relay,

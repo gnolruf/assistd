@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use assistd_config::SynthesisConfig;
-use assistd_ipc::{Access, Event, EventBody, EventKind, RelayEvent, ToolReport};
+use assistd_ipc::{Access, AgentId, Event, EventBody, EventKind, ToolReport};
 use assistd_llm::{CompactionCut, LlmEvent, ToolCall};
 use assistd_memory::{
     PersistedMessage, PersistedToolCall, Reasoning, ToolOutcome, ToolTrace, TurnStats,
@@ -151,92 +151,83 @@ struct TurnTranslator {
 }
 
 impl TurnTranslator {
-    /// The wire event for `event`, or `None` when it has no wire form. `LastDelta`
-    /// goes straight to `events`' bus.
+    /// The wire event for `event`, or `None` when it has no wire form, after recording
+    /// it: the turn's own into the transcript, a sub-agent's into the running relay's
+    /// trace. `LastDelta` goes straight to `events`' bus.
     async fn translate(&mut self, event: LlmEvent, events: &EventSink) -> Option<Event> {
-        let body = match event {
-            LlmEvent::StepStarted => return None,
+        match event {
+            LlmEvent::FromAgent { agent, event, .. } => {
+                self.record_from_agent(agent, &event);
+                wire_body(*event).map(|body| Event::from_agent(self.id.clone(), agent, body))
+            }
+            event => {
+                self.record(&event, events).await;
+                wire_body(event).map(|body| Event::new(self.id.clone(), body))
+            }
+        }
+    }
+
+    /// Record one of the turn's own agent's events.
+    async fn record(&mut self, event: &LlmEvent, events: &EventSink) {
+        match event {
             LlmEvent::StepDiscarded => {
                 self.assistant_accum.clear();
                 self.reasoning = None;
-                return None;
             }
             LlmEvent::Delta { text } => {
                 self.tokens.on_delta();
-                self.accumulate_delta(events, &text);
-                EventBody::Delta { text }
+                self.accumulate_delta(events, text);
             }
             LlmEvent::ReasoningDelta { text } => {
                 self.tokens.on_delta();
                 self.reasoning
                     .get_or_insert_with(ReasoningTrace::new)
-                    .push(&text);
-                EventBody::ReasoningDelta { text }
+                    .push(text);
             }
-            LlmEvent::ToolCallsRequested { calls } => {
-                self.persist_tool_calls(events, &calls).await;
-                return None;
-            }
-            LlmEvent::ToolCall {
-                name, arguments, ..
-            } => {
-                self.awaiting_tool_result = true;
-                EventBody::ToolCall {
-                    name,
-                    args: arguments,
-                }
-            }
+            LlmEvent::ToolCallsRequested { calls } => self.persist_tool_calls(events, calls).await,
+            LlmEvent::ToolCall { .. } => self.awaiting_tool_result = true,
             LlmEvent::ToolResult {
-                id: call_id,
+                id,
                 name,
                 result,
                 read_host,
                 accesses,
             } => {
-                self.persist_tool_result(call_id, &name, &result, read_host, accesses)
+                self.persist_tool_result(id, name, result, *read_host, accesses)
                     .await;
-                EventBody::ToolResult {
-                    name,
-                    result: *result,
+            }
+            LlmEvent::RelayPlanned { steps } => {
+                self.relay = Some(RelayTraceBuilder::planned(steps));
+            }
+            LlmEvent::RelayStepStarted { step, agent } => {
+                if let Some(trace) = &mut self.relay {
+                    trace.start(*step, *agent);
                 }
             }
-            LlmEvent::Relay(event) => {
-                self.record_relay(&event);
-                EventBody::Relay { event }
+            LlmEvent::RelayStepEnded { step, end } => {
+                if let Some(trace) = &mut self.relay {
+                    trace.end(*step, end);
+                }
             }
             LlmEvent::ContextSize { tokens, total } => {
-                self.tokens.on_context_size(tokens, total);
-                EventBody::ContextSize { tokens, total }
+                self.tokens.on_context_size(*tokens, *total);
             }
-            LlmEvent::Status {
-                severity,
-                component,
-                event,
-                message,
-            } => EventBody::Status {
-                severity,
-                component,
-                event,
-                message,
-            },
             LlmEvent::HistoryCompacted {
                 summary,
                 cut,
                 elapsed,
-            } => {
-                self.persist_summary(summary, cut, elapsed).await;
-                return None;
-            }
-            LlmEvent::Interrupted { reply } => {
-                self.persist_interrupted_reply(reply).await;
-                return None;
-            }
-            LlmEvent::Done => {
-                self.persist_final_text(events).await;
-                return None;
-            }
-        };
-        Some(Event::new(self.id.clone(), body))
+            } => self.persist_summary(summary.clone(), *cut, *elapsed).await,
+            LlmEvent::Interrupted { reply } => self.persist_interrupted_reply(reply.clone()).await,
+            LlmEvent::Done => self.persist_final_text(events).await,
+            LlmEvent::StepStarted | LlmEvent::Status { .. } | LlmEvent::FromAgent { .. } => {}
+        }
+    }
+
+    /// Record what sub-agent `agent` streamed into the running relay's trace.
+    fn record_from_agent(&mut self, agent: AgentId, event: &LlmEvent) {
+        if let Some(trace) = &mut self.relay {
+            trace.record(agent, event);
+        }
     }
 
     fn accumulate_delta(&mut self, events: &EventSink, text: &str) {
@@ -272,11 +263,11 @@ impl TurnTranslator {
 
     async fn persist_tool_result(
         &mut self,
-        call_id: String,
+        call_id: &str,
         name: &str,
         result: &ToolReport,
         read_host: bool,
-        accesses: Vec<Access>,
+        accesses: &[Access],
     ) {
         self.awaiting_tool_result = false;
         let outcome = ToolOutcome {
@@ -285,27 +276,16 @@ impl TurnTranslator {
         };
         let msg = PersistedMessage::tool_result(
             result.output.clone(),
-            call_id,
+            call_id.to_owned(),
             name.to_owned(),
             outcome,
             read_host,
         );
         let trace = ToolTrace {
-            accesses,
+            accesses: accesses.to_vec(),
             relay_steps: self.relay.take().map_or_default(RelayTraceBuilder::finish),
         };
         self.persist_message(msg, Some(trace)).await;
-    }
-
-    /// Record `event` into the running relay's trace, starting one at its plan.
-    fn record_relay(&mut self, event: &RelayEvent) {
-        match (&mut self.relay, event) {
-            (Some(trace), event) => trace.record(event),
-            (None, RelayEvent::Planned { steps }) => {
-                self.relay = Some(RelayTraceBuilder::planned(steps));
-            }
-            (None, _) => {}
-        }
     }
 
     async fn persist_summary(&self, summary: String, cut: CompactionCut, elapsed: Duration) {
@@ -494,6 +474,50 @@ async fn next_llm_event(
         None => llm_rx.recv().await,
     };
     received.map_or(NextLlmEvent::Closed, NextLlmEvent::Event)
+}
+
+/// What a client is sent of an agent's `event`, whichever agent of the turn streamed it;
+/// `None` for an event with no wire form.
+fn wire_body(event: LlmEvent) -> Option<EventBody> {
+    Some(match event {
+        LlmEvent::StepDiscarded => EventBody::StepDiscarded,
+        LlmEvent::Delta { text } => EventBody::Delta { text },
+        LlmEvent::ReasoningDelta { text } => EventBody::ReasoningDelta { text },
+        LlmEvent::ToolCall {
+            name, arguments, ..
+        } => EventBody::ToolCall {
+            name,
+            args: arguments,
+        },
+        LlmEvent::ToolResult { name, result, .. } => EventBody::ToolResult {
+            name,
+            result: *result,
+        },
+        LlmEvent::RelayPlanned { steps } => EventBody::RelayPlanned { steps },
+        LlmEvent::RelayStepStarted { step, agent } => EventBody::RelayStepStarted {
+            step,
+            sub_agent: agent,
+        },
+        LlmEvent::RelayStepEnded { step, end } => EventBody::RelayStepEnded { step, end },
+        LlmEvent::ContextSize { tokens, total } => EventBody::ContextSize { tokens, total },
+        LlmEvent::Status {
+            severity,
+            component,
+            event,
+            message,
+        } => EventBody::Status {
+            severity,
+            component,
+            event,
+            message,
+        },
+        LlmEvent::StepStarted
+        | LlmEvent::ToolCallsRequested { .. }
+        | LlmEvent::FromAgent { .. }
+        | LlmEvent::HistoryCompacted { .. }
+        | LlmEvent::Interrupted { .. }
+        | LlmEvent::Done => return None,
+    })
 }
 
 fn tool_calls_message(

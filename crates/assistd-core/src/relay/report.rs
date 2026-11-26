@@ -148,33 +148,20 @@ impl RelayReport {
     }
 }
 
-/// What a sub-agent wrote, ready to be saved, and its message's length before quoting.
-pub(super) struct SavedAnswer {
-    pub(super) chars: usize,
-    pub(super) contents: String,
-}
-
 /// `written` as it is saved: the notes under a heading, then the message, under one of
 /// its own when there are notes. Control, format and separator characters are removed,
 /// chat-template tokens made inert, and the whole quoted under the untrusted-data header.
-pub(super) fn saved_answer(written: &Written) -> SavedAnswer {
+pub(super) fn saved_answer(written: &Written) -> String {
     let message = sanitised(&written.message);
-    let chars = message.chars().count();
     if written.notes.is_empty() {
-        return SavedAnswer {
-            chars,
-            contents: quoted(&message),
-        };
+        return quoted(&message);
     }
     let mut body = String::from(NOTES_HEADING);
     for note in &written.notes {
         let _ = write!(body, "\n{}\n", sanitised(note));
     }
     let _ = write!(body, "\n{MESSAGE_HEADING}\n{message}");
-    SavedAnswer {
-        chars,
-        contents: quoted(&body),
-    }
+    quoted(&body)
 }
 
 /// The start of `text` that fits `max_bytes`, ending at a line's end unless its

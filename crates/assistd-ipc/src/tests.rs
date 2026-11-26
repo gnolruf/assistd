@@ -15,10 +15,7 @@ fn request(body: RequestBody) -> Request {
 }
 
 fn event(body: EventBody) -> Event {
-    Event {
-        id: "r".into(),
-        body,
-    }
+    Event::new("r", body)
 }
 
 /// One of every [`Request`] variant with its exact wire form.
@@ -248,6 +245,7 @@ fn event_cases() -> Vec<(Event, &'static str)> {
         confirmation_and_status_event_cases(),
         session_event_cases(),
         relay_history_event_cases(),
+        relay_and_sub_agent_event_cases(),
         wake_word_event_cases(),
         task_event_cases(),
         task_queue_event_cases(),
@@ -279,7 +277,9 @@ fn relay_history_event_cases() -> Vec<(Event, &'static str)> {
                     task: "find it".into(),
                     agent: "web_research".into(),
                     run: Some(RelayStepRun {
-                        end: RelayStepEnd::Answered,
+                        end: RelayStepEnd::Answered {
+                            answer_file: "/data/relay-1.txt".into(),
+                        },
                         duration_ms: 8000,
                         tokens: Some(4100),
                         entries: vec![
@@ -310,7 +310,7 @@ fn relay_history_event_cases() -> Vec<(Event, &'static str)> {
                 },
             ],
         }),
-        r#"{"id":"r","type":"history_entry","seq":5,"role":"tool","content":"report","tool_name":"relay","exit_code":0,"duration_ms":9000,"relay":[{"task":"find it","agent":"web_research","run":{"end":{"kind":"answered"},"duration_ms":8000,"tokens":4100,"entries":[{"kind":"reasoning","text":"search","duration_ms":300},{"kind":"tool","name":"run","args":{"command":"web search it"},"output":"hit","outcome":{"exit_code":0,"duration_ms":40}},{"kind":"compaction"},{"kind":"text","text":"Found."}]}},{"task":"read it","agent":"file_review"}]}"#,
+        r#"{"id":"r","type":"history_entry","seq":5,"role":"tool","content":"report","tool_name":"relay","exit_code":0,"duration_ms":9000,"relay":[{"task":"find it","agent":"web_research","run":{"end":{"kind":"answered","answer_file":"/data/relay-1.txt"},"duration_ms":8000,"tokens":4100,"entries":[{"kind":"reasoning","text":"search","duration_ms":300},{"kind":"tool","name":"run","args":{"command":"web search it"},"output":"hit","outcome":{"exit_code":0,"duration_ms":40}},{"kind":"compaction"},{"kind":"text","text":"Found."}]}},{"task":"read it","agent":"file_review"}]}"#,
     )]
 }
 
@@ -499,6 +499,49 @@ fn memory_event_cases() -> Vec<(Event, &'static str)> {
     ]
 }
 
+/// A relay's own events, and an agent's output with and without a sub-agent's id.
+fn relay_and_sub_agent_event_cases() -> Vec<(Event, &'static str)> {
+    vec![
+        (
+            event(EventBody::RelayPlanned {
+                steps: vec![RelayStepPlan {
+                    task: "find the release".into(),
+                    agent: "web_research".into(),
+                }],
+            }),
+            r#"{"id":"r","type":"relay_planned","steps":[{"task":"find the release","agent":"web_research"}]}"#,
+        ),
+        (
+            event(EventBody::RelayStepStarted {
+                step: 1,
+                sub_agent: AgentId(3),
+            }),
+            r#"{"id":"r","type":"relay_step_started","step":1,"sub_agent":3}"#,
+        ),
+        (
+            event(EventBody::RelayStepEnded {
+                step: 1,
+                end: RelayStepEnd::Failed {
+                    message: "down".into(),
+                },
+            }),
+            r#"{"id":"r","type":"relay_step_ended","step":1,"end":{"kind":"failed","message":"down"}}"#,
+        ),
+        (
+            Event::from_agent("r", AgentId(3), EventBody::Delta { text: "hi".into() }),
+            r#"{"id":"r","agent":3,"type":"delta","text":"hi"}"#,
+        ),
+        (
+            Event::from_agent("r", AgentId(3), EventBody::StepDiscarded),
+            r#"{"id":"r","agent":3,"type":"step_discarded"}"#,
+        ),
+        (
+            event(EventBody::StepDiscarded),
+            r#"{"id":"r","type":"step_discarded"}"#,
+        ),
+    ]
+}
+
 fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
@@ -550,17 +593,6 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                 },
             }),
             r#"{"id":"r","type":"confirm_request","confirm_id":"c-abc","tool":"web","script":"web fetch https://example.com","matched_pattern":"fetches from example.com","always_allow":["example.com"],"source":{"agent":"relay","task":"summarise the page","run":9}}"#,
-        ),
-        (
-            event(EventBody::Relay {
-                event: RelayEvent::Planned {
-                    steps: vec![RelayStepPlan {
-                        task: "find the release".into(),
-                        agent: "web_research".into(),
-                    }],
-                },
-            }),
-            r#"{"id":"r","type":"relay","event":{"kind":"planned","steps":[{"task":"find the release","agent":"web_research"}]}}"#,
         ),
         (
             event(EventBody::Capabilities {

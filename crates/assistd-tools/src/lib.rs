@@ -51,7 +51,7 @@ pub use presentation::{OutputCap, PresentSpec};
 pub use quarantine::{Egress, Quarantine, QuarantineError};
 pub use run::RunTool;
 pub use tool_output::{RawStreams, ToolOutput};
-pub use turn::{HostReads, RelayObserver, TurnContext, YieldableLane};
+pub use turn::{HostReads, TurnContext, YieldableLane};
 pub use vision::VisionGate;
 
 /// Prefix of every MCP-adapted tool's name (`mcp__<server>__<tool>`).
