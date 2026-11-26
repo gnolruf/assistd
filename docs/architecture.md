@@ -446,10 +446,20 @@ One per-query state machine, single-threaded per turn. The loop:
    stays in the request so a call made anyway is still parsed (and ends
    the turn) rather than streamed to the user as raw markup.
 
-A sub-agent run (`SubAgentRunner`) drives the same loop over
-a backend with an empty history that the main backend's `isolated_backend` opens
-on the same server and model, with its own system prompt, tool registry and
-event sink. Its history budget is the main backend's
+An agent is an `AgentDefinition` (its system prompt, its tools, the step
+ceiling and duplicate-call limit above, and the server slot it takes) over a
+history. The main agent, a task run, a refine's planning turn and each relay
+role are values of that type, and `Agent::run` is the only way a turn runs:
+it returns an `AgentOutcome` saying how the turn ended (answered, tools
+withdrawn, interrupted or failed), what the model wrote, how many steps
+asked for tools and what they touched. The daemon's `AgentHost` holds what
+they share (the main backend, the health probe a crashed step waits on, the
+tool deadline): `main()` is the agent over the main history, and `child()`
+one over an empty history that the main backend's `isolated_backend` opens on
+the same server and model. A sub-agent is such a child, built by the `relay`
+tool and run by the same loop, with its own event sink; its definition holds
+no `relay` tool, which is all that keeps sub-agents from starting their own.
+Its history budget is the main backend's
 `chat.max_history_tokens`, and it compacts the same way: the summary is
 written inside the sub-agent's own history, which keeps its task, and
 never leaves it. The summary request continues the history with its
@@ -1740,10 +1750,10 @@ A walk through "what files changed this week?" typed into `assistd chat`:
    to the client, so a slow client never delays subscribers.
 
 3. **Agent** ([`crates/assistd-core/src/agent.rs`](../crates/assistd-core/src/agent.rs)).
-   The handler builds an `Agent` from the daemon's `AgentSpec` (the
-   health probe and tool deadline every user turn, task run, planning
-   turn and sub-agent shares) over the handles it holds,
-   and calls `run_turn()` with the turn's `TurnContext`, which every
+   The handler builds the main `Agent` from the daemon's `AgentHost` (the
+   backend, health probe and tool deadline every user turn, task run,
+   planning turn and sub-agent shares) and the main agent's definition,
+   and calls `run()` with the turn's `TurnContext`, which every
    tool call receives: it carries who answers the turn's prompts, who
    watches its relays, the lane a task run gives up on request, and whether
    the turn's history has read this machine. A

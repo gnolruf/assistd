@@ -16,7 +16,8 @@ use assistd_ipc::{
     Attachment, HostName, ModeRecommendation, PermissionMode, Plan, TaskPrompt, TaskSpecError,
 };
 use assistd_llm::{
-    LlmBackend, LlmError, LlmEvent, LlmResult, StepOutcome, ToolResultPayload, TurnBackend,
+    LlmBackend, LlmError, LlmEvent, LlmResult, SlotAssignment, SlotHolder, StepOutcome,
+    ToolResultPayload, TurnBackend,
 };
 use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{
@@ -24,7 +25,7 @@ use assistd_tools::{
     TurnContext,
 };
 
-use crate::agent::{Agent, AgentSpec};
+use crate::agent::{Agent, AgentDefinition, AgentEnd, AgentHost};
 
 mod draft;
 mod recommend;
@@ -149,90 +150,89 @@ pub struct Planner {
     tools: PlanningTools,
     /// The tools ordinary turns are offered, which an anticipated MCP tool must be among.
     catalog: Arc<ToolCatalog>,
-    agents: AgentSpec,
+    host: AgentHost,
     /// Auto mode may be recommended.
     auto_offered: bool,
 }
 
 impl Planner {
-    /// A planner over `tools` whose turns run on agents built from `agents`; a refine
-    /// recommends Auto only when `auto_offered`.
+    /// A planner over `tools` whose agents run on `host`; a refine recommends Auto only
+    /// when `auto_offered`.
     pub fn new(
         tools: PlanningTools,
         catalog: Arc<ToolCatalog>,
-        agents: AgentSpec,
+        host: AgentHost,
         auto_offered: bool,
     ) -> Self {
         Self {
             tools,
             catalog,
-            agents,
+            host,
             auto_offered,
         }
     }
 
-    /// An agent for the user turn `turn` over `backend`. It acts with `acting` and a tool
-    /// that asks the user to plan first; while the turn plans, it is offered the planning tools
-    /// and one that hands the plan to the user, with the plan-mode note at the history's
-    /// tail.
-    pub fn user_turn_agent(
-        &self,
-        turn: &TurnContext,
-        backend: Arc<dyn TurnBackend>,
-        acting: &ToolRegistry,
-    ) -> Agent {
-        let mut acting = acting.clone();
+    /// The main agent, defined by `main`, for the user turn `turn`. It acts with its own
+    /// tools and one that asks the user to plan first; while the turn plans, it is offered
+    /// the planning tools and one that hands the plan to the user, with the plan-mode note
+    /// at the history's tail.
+    pub fn user_turn_agent(&self, turn: &TurnContext, main: AgentDefinition) -> Agent {
+        let mut acting = ToolRegistry::clone(&main.tools);
         acting.register(EnterPlanModeTool);
         let mut planning = ToolRegistry::clone(&self.tools.registry);
         planning.register(ExitPlanModeTool);
-        self.agents
-            .agent(
-                PlanModeBackend::new(backend, USER_TURN_PLAN_ENDING, turn.clone()),
-                Arc::new(acting),
-            )
-            .with_planning_tools(Arc::new(planning))
+        let definition = AgentDefinition {
+            tools: Arc::new(acting),
+            planning_tools: Some(Arc::new(planning)),
+            ..main
+        };
+        in_plan_mode(self.host.main(definition), USER_TURN_PLAN_ENDING, turn)
     }
 
-    /// An agent for the headless turn `turn` over `backend`. It acts with `acting` and a tool
-    /// that starts it planning unasked; while it plans, it is offered the planning tools and
-    /// one that puts the plan to the user out loud.
-    pub fn headless_turn_agent(
-        &self,
-        turn: &TurnContext,
-        backend: Arc<dyn TurnBackend>,
-        acting: &ToolRegistry,
-    ) -> Agent {
-        let mut acting = acting.clone();
+    /// The main agent, defined by `main`, for the headless turn `turn`. It acts with its
+    /// own tools and one that starts it planning unasked; while it plans, it is offered
+    /// the planning tools and one that puts the plan to the user out loud.
+    pub fn headless_turn_agent(&self, turn: &TurnContext, main: AgentDefinition) -> Agent {
+        let mut acting = ToolRegistry::clone(&main.tools);
         acting.register(EnterSpokenPlanTool);
         let mut planning = ToolRegistry::clone(&self.tools.registry);
         planning.register(ProposeSpokenPlanTool {
             checks: self.tools.checks.clone(),
             catalog: Arc::clone(&self.catalog),
         });
-        self.agents
-            .agent(
-                PlanModeBackend::new(backend, SPOKEN_PLAN_ENDING, turn.clone()),
-                Arc::new(acting),
-            )
-            .with_planning_tools(Arc::new(planning))
+        let definition = AgentDefinition {
+            tools: Arc::new(acting),
+            planning_tools: Some(Arc::new(planning)),
+            ..main
+        };
+        in_plan_mode(self.host.main(definition), SPOKEN_PLAN_ENDING, turn)
     }
 
-    /// Run a planning turn on `ask` over `backend`, streaming it on `tx`, then ask for the
-    /// task prompt rewritten as a brief for an unattended run, with the plan of that brief,
-    /// each action checked against the machine and `permissions`, and the mode its runs are
-    /// best given.
+    /// An agent that explores a task prompt before it is rewritten: the planning tools
+    /// under `system_prompt`, on a history of its own that shares the main slot.
+    pub fn refining_agent(&self, system_prompt: String) -> LlmResult<Agent> {
+        self.host.child(AgentDefinition::new(
+            system_prompt,
+            Arc::clone(&self.tools.registry),
+            SlotAssignment::Shared(SlotHolder::TaskRefine),
+        ))
+    }
+
+    /// Run a planning turn of `agent` on `ask`, streaming it on `tx`, then ask its history
+    /// for the task prompt rewritten as a brief for an unattended run, with the plan of
+    /// that brief, each action checked against the machine and `permissions`, and the mode
+    /// its runs are best given.
     pub async fn refine(
         &self,
-        backend: Arc<dyn LlmBackend>,
+        agent: &Agent,
         ask: PlanAsk,
         permissions: WorkPermissions,
         request_id: String,
         tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> Result<Refinement, PlanError> {
-        let exploring = Arc::clone(&backend) as Arc<dyn TurnBackend>;
-        self.explore(exploring, ask, request_id, tx, &cancel)
-            .await?;
+        explore(agent, ask, request_id, tx, &cancel).await?;
+        let backend = agent.history();
         let instruction = format!(
             "{REFINE_INSTRUCTION} {PLAN_LAYOUT} {ACTION_KINDS} A step that needs no approval \
              has no actions."
@@ -262,29 +262,6 @@ impl Planner {
             recommended,
         })
     }
-
-    /// Run the planning turn on `ask` over `backend` in plan mode.
-    async fn explore(
-        &self,
-        backend: Arc<dyn TurnBackend>,
-        ask: PlanAsk,
-        request_id: String,
-        tx: mpsc::Sender<LlmEvent>,
-        cancel: &CancellationToken,
-    ) -> Result<(), PlanError> {
-        let turn = TurnContext::answered_by(ConfirmRouter::for_planning(request_id));
-        let agent = self.agents.agent(
-            PlanModeBackend::new(backend, FINDINGS_ENDING, turn.clone()),
-            Arc::clone(&self.tools.registry),
-        );
-        agent
-            .run_turn(&turn, ask.into_text(), Vec::new(), tx, cancel.clone())
-            .await?;
-        if cancel.is_cancelled() {
-            return Err(PlanError::Cancelled);
-        }
-        Ok(())
-    }
 }
 
 impl PlanAsk {
@@ -295,6 +272,32 @@ impl PlanAsk {
                 format!("You gave me this:\n\n{shown}\n\nRevise it with this feedback: {feedback}")
             }
         }
+    }
+}
+
+/// `agent` with every step of its loop, while `turn` plans, ending with the plan-mode note
+/// and `ending`.
+fn in_plan_mode(agent: Agent, ending: &str, turn: &TurnContext) -> Agent {
+    let history = Arc::clone(agent.history()) as Arc<dyn TurnBackend>;
+    agent.driven_through(PlanModeBackend::new(history, ending, turn.clone()))
+}
+
+/// Run `agent`'s planning turn on `ask` in plan mode.
+async fn explore(
+    agent: &Agent,
+    ask: PlanAsk,
+    request_id: String,
+    tx: mpsc::Sender<LlmEvent>,
+    cancel: &CancellationToken,
+) -> Result<(), PlanError> {
+    let turn = TurnContext::answered_by(ConfirmRouter::for_planning(request_id));
+    let outcome = in_plan_mode(agent.clone(), FINDINGS_ENDING, &turn)
+        .run(ask.into_text(), &turn, tx, cancel.clone())
+        .await;
+    match outcome.end {
+        AgentEnd::Answered | AgentEnd::ToolsWithdrawn => Ok(()),
+        AgentEnd::Interrupted => Err(PlanError::Cancelled),
+        AgentEnd::Failed(error) => Err(error.into()),
     }
 }
 

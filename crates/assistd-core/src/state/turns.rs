@@ -13,7 +13,7 @@ use tracing::{Instrument, debug, warn};
 use assistd_config::{Config, EmbeddingConfig};
 use assistd_embed::EmbedderHandle;
 use assistd_ipc::{Attachment, EventBody, ImageAttachment, PlanMode};
-use assistd_llm::{LlmBackend, LlmError, LlmEvent};
+use assistd_llm::{LlmBackend, LlmError, LlmEvent, SlotAssignment, SlotHolder};
 use assistd_memory::{PersistedMessage, RecallStore, SessionId};
 use assistd_tools::{ConfirmRouter, HostReads, ToolCatalog, TurnContext, VoiceGate};
 use assistd_voice::VoiceManager;
@@ -28,8 +28,9 @@ use super::wire::decode_wire_attachments;
 use super::{DispatchError, FailedStep, default_permission_mode};
 use crate::admission::interaction::InteractionTurn;
 use crate::admission::{MainLaneTurn, TurnAdmission};
-use crate::agent::{Agent, AgentSpec};
+use crate::agent::{Agent, AgentDefinition, AgentHost, AgentTask};
 use crate::bus::{EventBus, EventSink};
+use crate::documents::system_prompt;
 use crate::judge::{BackendJudgeModel, safety_judge};
 use crate::planner::Planner;
 use crate::presence::{PresenceManager, RequestGuard};
@@ -124,7 +125,7 @@ pub(super) struct TurnDeps {
     pub(super) llm: Arc<dyn LlmBackend>,
     pub(super) presence: Arc<PresenceManager>,
     pub(super) tools: Arc<ToolCatalog>,
-    pub(super) agents: AgentSpec,
+    pub(super) agents: AgentHost,
     pub(super) planner: Arc<Planner>,
     pub(super) vision_revalidator: Option<Arc<VisionRevalidator>>,
     pub(super) voice: Arc<VoiceManager>,
@@ -428,9 +429,9 @@ impl TurnService {
         }
         AbortOnDropHandle::new(tokio::spawn(
             async move {
-                agent
-                    .run_turn(&turn, text, attachments, llm_tx, cancel)
-                    .await
+                let task = AgentTask { text, attachments };
+                let outcome = agent.run(task, &turn, llm_tx, cancel).await;
+                outcome.end.into_result()
             }
             .in_current_span(),
         ))
@@ -439,15 +440,18 @@ impl TurnService {
     /// The agent of `turn` under `plan`: one that can move through plan mode unless it is off,
     /// and for a headless turn one whose plan is put to the user out loud.
     fn query_agent(&self, turn: &TurnContext, plan: PlanMode) -> Agent {
-        let llm = self.deps.llm.clone();
-        let tools = self.deps.tools.snapshot();
+        let main = AgentDefinition::new(
+            system_prompt(&self.deps.config),
+            self.deps.tools.snapshot(),
+            SlotAssignment::Shared(SlotHolder::Main),
+        );
         if turn.asks_aloud() {
-            return self.deps.planner.headless_turn_agent(turn, llm, &tools);
+            return self.deps.planner.headless_turn_agent(turn, main);
         }
         if !plan.is_off() {
-            return self.deps.planner.user_turn_agent(turn, llm, &tools);
+            return self.deps.planner.user_turn_agent(turn, main);
         }
-        self.deps.agents.agent(llm, tools)
+        self.deps.agents.main(main)
     }
 
     fn spawn_speech_worker(

@@ -11,7 +11,7 @@ use tracing::{Instrument, info, info_span, warn};
 
 use assistd_config::Config;
 use assistd_ipc::{ConfirmSource, EventBody, TaskEvent, TaskId, TaskRunId, TaskTrigger};
-use assistd_llm::{LlmBackend, LlmError, LlmEvent, SlotHolder};
+use assistd_llm::{LlmError, LlmEvent, SlotHolder, TurnBackend};
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
 };
@@ -25,6 +25,7 @@ use super::runner::RegisteredRun;
 use super::{FailedStep, TaskError, TaskService};
 use crate::admission::lanes::LaneLease;
 use crate::admission::queue::QueuedRun;
+use crate::agent::{Agent, AgentDefinition};
 use crate::bus::EventSink;
 use crate::documents::system_prompt;
 use crate::judge::{BackendJudgeModel, safety_judge};
@@ -182,31 +183,24 @@ impl TaskService {
         let Some(awake) = self.wake_for_task_run(None, cancel).await? else {
             return Ok(None);
         };
-        let system_prompt = task_system_prompt(&self.deps.config);
         let holder = SlotHolder::TaskRun(turn.run);
-        let backend = self
-            .deps
-            .llm
-            .isolated_backend(system_prompt, lease.slot(holder))?;
+        let agent = self.deps.agents.child(AgentDefinition::new(
+            task_system_prompt(&self.deps.config),
+            self.deps.tools.snapshot(),
+            lease.slot(holder),
+        ))?;
         let lane = Arc::new(RunLane {
             tasks: Arc::clone(self),
             task: turn.task.id,
             run: turn.run,
             held: LaneHold::new(lease, awake),
-            backend: Arc::clone(&backend),
+            backend: Arc::clone(agent.history()),
             cancel: cancel.clone(),
         });
         let persist = self.open_task_run_session(turn).await;
         let host_reads = self.host_reads_at_start(turn.run).await;
         let outcome = self
-            .unattended_turn(
-                turn,
-                backend,
-                Arc::clone(&lane),
-                persist,
-                host_reads,
-                cancel,
-            )
+            .unattended_turn(turn, agent, Arc::clone(&lane), persist, host_reads, cancel)
             .await;
         self.end_run_backend(holder, lane.on_main_lane()).await;
         outcome
@@ -313,13 +307,13 @@ impl TaskService {
         HostReads::known(started_by_path)
     }
 
-    /// Run the task's prompt over `backend` on `lane`, persisting to `persist`, with
+    /// Run the task's prompt on `agent` on `lane`, persisting to `persist`, with
     /// nothing sent to a client or spoken and its history starting from `host_reads`;
     /// returns the final reply once the turn finished.
     async fn unattended_turn(
         &self,
         turn: &TaskRunTurn,
-        backend: Arc<dyn LlmBackend>,
+        agent: Agent,
         lane: Arc<RunLane>,
         persist: Option<PersistTarget>,
         host_reads: HostReads,
@@ -327,7 +321,7 @@ impl TaskService {
     ) -> Result<Option<String>, TaskError> {
         let (llm_tx, llm_rx) = mpsc::channel(EVENT_BUFFER);
         let agent_task =
-            self.spawn_task_agent(turn, backend, lane, host_reads, llm_tx, cancel.clone());
+            self.spawn_task_agent(turn, agent, lane, host_reads, llm_tx, cancel.clone());
         let transcript = Arc::clone(&self.deps.transcript);
         let unheard = EventSink::discarding();
         let reply = TurnDriver::new(turn.id.clone(), transcript, persist, unheard)
@@ -340,23 +334,23 @@ impl TaskService {
         }
     }
 
-    /// The main agent's tools over `backend`, its history starting from `host_reads`, each
+    /// Run `agent`, which has the main agent's tools, its history starting from `host_reads`, each
     /// model step giving way to the user's interaction on `lane`, every confirmation labelled
     /// as the run's and approved by the task's mode or hosts, or parked until answered.
     fn spawn_task_agent(
         &self,
         turn: &TaskRunTurn,
-        backend: Arc<dyn LlmBackend>,
+        agent: Agent,
         lane: Arc<RunLane>,
         host_reads: HostReads,
         llm_tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> AbortOnDropHandle<Result<(), LlmError>> {
-        let backend = Arc::new(YieldingBackend {
-            inner: backend,
+        let yielding = Arc::new(YieldingBackend {
+            inner: Arc::clone(agent.history()) as Arc<dyn TurnBackend>,
             lane: Arc::clone(&lane),
         });
-        let agent = self.deps.agents.agent(backend, self.deps.tools.snapshot());
+        let agent = agent.driven_through(yielding);
         let source = ConfirmSource::Task {
             task: turn.task.id,
             run: turn.run,
@@ -379,9 +373,8 @@ impl TaskService {
             .on_lane(lane)
             .reading_into(host_reads);
         let agent_turn = async move {
-            agent
-                .run_turn(&context, prompt, Vec::new(), llm_tx, cancel)
-                .await
+            let outcome = agent.run(prompt, &context, llm_tx, cancel).await;
+            outcome.end.into_result()
         };
         AbortOnDropHandle::new(tokio::spawn(agent_turn.in_current_span()))
     }
