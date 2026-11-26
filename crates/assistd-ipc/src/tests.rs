@@ -257,60 +257,27 @@ fn event_cases() -> Vec<(Event, &'static str)> {
     .concat()
 }
 
-/// A `relay` history row with every kind of stored sub-agent entry.
+/// A stored message of a sub-agent's history, replayed after its `relay` row.
 fn relay_history_event_cases() -> Vec<(Event, &'static str)> {
     vec![(
-        event(EventBody::HistoryEntry {
-            seq: 5,
-            role: Role::Tool,
-            content: "report".into(),
-            reasoning: String::new(),
-            reasoning_ms: None,
-            tool_name: Some("relay".into()),
-            tool_args: None,
-            exit_code: Some(0),
-            duration_ms: Some(9000),
-            compaction_ms: None,
-            turn_stats: None,
-            relay: vec![
-                RelayStepRecord {
-                    task: "find it".into(),
-                    agent: "web_research".into(),
-                    run: Some(RelayStepRun {
-                        end: RelayStepEnd::Answered {
-                            answer_file: "/data/relay-1.txt".into(),
-                        },
-                        duration_ms: 8000,
-                        tokens: Some(4100),
-                        entries: vec![
-                            RelayTraceEntry::Reasoning {
-                                text: "search".into(),
-                                duration_ms: 300,
-                            },
-                            RelayTraceEntry::Tool {
-                                name: "run".into(),
-                                args: serde_json::json!({"command": "web search it"}),
-                                output: "hit".into(),
-                                outcome: Some(RelayToolOutcome {
-                                    exit_code: 0,
-                                    duration_ms: 40,
-                                }),
-                            },
-                            RelayTraceEntry::Compaction { duration_ms: None },
-                            RelayTraceEntry::Text {
-                                text: "Found.".into(),
-                            },
-                        ],
-                    }),
-                },
-                RelayStepRecord {
-                    task: "read it".into(),
-                    agent: "file_review".into(),
-                    run: None,
-                },
-            ],
-        }),
-        r#"{"id":"r","type":"history_entry","seq":5,"role":"tool","content":"report","tool_name":"relay","exit_code":0,"duration_ms":9000,"relay":[{"task":"find it","agent":"web_research","run":{"end":{"kind":"answered","answer_file":"/data/relay-1.txt"},"duration_ms":8000,"tokens":4100,"entries":[{"kind":"reasoning","text":"search","duration_ms":300},{"kind":"tool","name":"run","args":{"command":"web search it"},"output":"hit","outcome":{"exit_code":0,"duration_ms":40}},{"kind":"compaction"},{"kind":"text","text":"Found."}]}},{"task":"read it","agent":"file_review"}]}"#,
+        Event::from_agent(
+            "r",
+            AgentId(2),
+            EventBody::HistoryEntry {
+                seq: 2,
+                role: Role::Tool,
+                content: "hit".into(),
+                reasoning: String::new(),
+                reasoning_ms: None,
+                tool_name: Some("run".into()),
+                tool_args: Some(serde_json::json!({"command": "web search it"})),
+                exit_code: Some(0),
+                duration_ms: Some(40),
+                compaction_ms: Some(900),
+                turn_stats: None,
+            },
+        ),
+        r#"{"id":"r","agent":2,"type":"history_entry","seq":2,"role":"tool","content":"hit","tool_name":"run","tool_args":{"command":"web search it"},"exit_code":0,"duration_ms":40,"compaction_ms":900}"#,
     )]
 }
 
@@ -524,8 +491,9 @@ fn relay_and_sub_agent_event_cases() -> Vec<(Event, &'static str)> {
                 end: RelayStepEnd::Failed {
                     message: "down".into(),
                 },
+                duration_ms: 8000,
             }),
-            r#"{"id":"r","type":"relay_step_ended","step":1,"end":{"kind":"failed","message":"down"}}"#,
+            r#"{"id":"r","type":"relay_step_ended","step":1,"end":{"kind":"failed","message":"down"},"duration_ms":8000}"#,
         ),
         (
             Event::from_agent("r", AgentId(3), EventBody::Delta { text: "hi".into() }),
@@ -673,7 +641,6 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                 duration_ms: None,
                 compaction_ms: None,
                 turn_stats: None,
-                relay: Vec::new(),
             }),
             r#"{"id":"r","type":"history_entry","seq":3,"role":"assistant","content":"hello","reasoning":"greet back","reasoning_ms":1500,"tool_name":null}"#,
         ),
@@ -693,7 +660,6 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                     duration_ms: 5300,
                     tokens: 812,
                 }),
-                relay: Vec::new(),
             }),
             r#"{"id":"r","type":"history_entry","seq":4,"role":"tool","content":"out","tool_name":"run","tool_args":{"command":"ls"},"exit_code":1,"duration_ms":7,"compaction_ms":4200,"turn_stats":{"duration_ms":5300,"tokens":812}}"#,
         ),

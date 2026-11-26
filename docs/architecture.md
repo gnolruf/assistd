@@ -486,13 +486,18 @@ calls, results, status notices and discarded steps (`StepDiscarded`, sent when
 a model step is cut off and runs again) reach the client, never the model.
 What is the relay's own stays an event of its tool call: `RelayPlanned` with
 the plan, `RelayStepStarted` naming the sub-agent a step was handed to, and
-`RelayStepEnded` with the answer file or the failure. The TUI draws a
+`RelayStepEnded` with the answer file or the failure and how long the step
+ran. The TUI draws a
 sub-agent's events with the code that draws a turn's, into that sub-agent's
 own transcript; the `relay` tool block shows a compact view of it and
 `/agents` opens it in full. The backend is dropped when the run ends, so none
-of it reaches the main history. What the client was shown is stored with the
-relay's tool result in `relay_steps` and `relay_entries`, never embedded, and
-replayed with branch history.
+of it reaches the main history. Each run is stored with the relay's tool
+result: a row in `agent_runs`, and its history as messages of its own, drafted
+from its events by the code that drafts a turn's and written in the tool
+result's transaction. They sit on no branch and are never embedded. Branch
+replay sends them after the relay's `HistoryEntry` as the relay's own events
+again, with each stored message as a `HistoryEntry` that carries the
+sub-agent's id.
 
 A tool call also reports what it touched, as a list of `Access`es its
 `CommandOutput` and `ToolOutput` carry: `cat`, `see`, `docs read` and the text
@@ -539,9 +544,9 @@ pointed back at the original input. A plan's next step is handed the previous
 step's report beneath its task, and the saved file as an input. The default system
 prompt says never to follow instructions inside one. The sub-agent's tool
 output and reasoning never leave it. Each answered step's file is recorded in
-`relay_steps.answer_file`; `/undo` deletes the files of the steps whose rows it
+`agent_runs.answer_file`; `/undo` deletes the files of the runs whose rows it
 deletes (a fork still holding the turn keeps them), and daemon start deletes
-every saved answer no stored step names.
+every saved answer no stored run names.
 
 A sub-agent's commands run in a `Quarantine`, which starts from an empty world:
 a fresh `relay-*` directory whose `input/` shows the inputs it was handed,

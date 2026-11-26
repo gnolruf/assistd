@@ -79,8 +79,14 @@ pub enum LlmEvent {
     /// Step `step` of the running relay's plan, counted from 1, handed its task to
     /// sub-agent `agent`.
     RelayStepStarted { step: u32, agent: AgentId },
-    /// Step `step` of the running relay's plan ended.
-    RelayStepEnded { step: u32, end: RelayStepEnd },
+    /// Step `step` of the running relay's plan ended, `duration_ms` after it started.
+    RelayStepEnded {
+        step: u32,
+        end: RelayStepEnd,
+        duration_ms: u64,
+    },
+    /// The task a sub-agent's run was handed, streamed before its first step.
+    Task { text: String },
     /// `event` as sub-agent `agent` streamed it, inside tool call `call_id` of the agent
     /// whose stream this is.
     FromAgent {

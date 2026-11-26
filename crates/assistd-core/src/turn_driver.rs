@@ -11,9 +11,7 @@ use tracing::{debug, warn};
 use assistd_config::SynthesisConfig;
 use assistd_ipc::{Access, AgentId, Event, EventBody, EventKind, ToolReport};
 use assistd_llm::{CompactionCut, LlmEvent, ToolCall};
-use assistd_memory::{
-    PersistedMessage, PersistedToolCall, Reasoning, ToolOutcome, ToolTrace, TurnStats,
-};
+use assistd_memory::{PersistedMessage, ToolTrace, TurnStats};
 use assistd_utils::time::saturating_millis;
 use assistd_utils::token_counter::TokenCounter;
 use assistd_voice::{
@@ -21,7 +19,8 @@ use assistd_voice::{
 };
 
 use crate::bus::EventSink;
-use crate::transcript::relay_trace::RelayTraceBuilder;
+use crate::transcript::agent_runs::AgentRunsRecorder;
+use crate::transcript::messages::{StepDraft, tool_result_message};
 use crate::transcript::{PersistTarget, TranscriptLog};
 
 const LAST_DELTA_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -99,37 +98,6 @@ impl SpeechPipeline {
     }
 }
 
-/// Reasoning streamed so far for the current step.
-struct ReasoningTrace {
-    text: String,
-    started_at: Instant,
-    last_delta_at: Instant,
-}
-
-impl ReasoningTrace {
-    fn new() -> Self {
-        let now = Instant::now();
-        Self {
-            text: String::new(),
-            started_at: now,
-            last_delta_at: now,
-        }
-    }
-
-    fn push(&mut self, delta: &str) {
-        self.text.push_str(delta);
-        self.last_delta_at = Instant::now();
-    }
-
-    fn into_reasoning(self) -> Reasoning {
-        let elapsed = self.last_delta_at.duration_since(self.started_at);
-        Reasoning {
-            text: self.text,
-            duration_ms: saturating_millis(elapsed),
-        }
-    }
-}
-
 /// Translates one turn's agent events into wire events, persisting the
 /// transcript as it goes.
 struct TurnTranslator {
@@ -137,11 +105,11 @@ struct TurnTranslator {
     transcript: Arc<TranscriptLog>,
     /// `None` when the session could not be saved, so nothing is persisted.
     persist: Option<PersistTarget>,
-    assistant_accum: String,
-    reasoning: Option<ReasoningTrace>,
+    /// What the turn's own agent has streamed of the step in flight.
+    step: StepDraft,
     awaiting_tool_result: bool,
-    /// What the relay in the running tool call has done, once it announced its plan.
-    relay: Option<RelayTraceBuilder>,
+    /// What the sub-agents of the running tool call have done, once it announced them.
+    agent_runs: Option<AgentRunsRecorder>,
     /// Backdated at start so the first `Delta` publishes `LastDelta` at once.
     last_emit_at: Instant,
     /// The text of the step that ended the turn, once it has.
@@ -152,8 +120,8 @@ struct TurnTranslator {
 
 impl TurnTranslator {
     /// The wire event for `event`, or `None` when it has no wire form, after recording
-    /// it: the turn's own into the transcript, a sub-agent's into the running relay's
-    /// trace. `LastDelta` goes straight to `events`' bus.
+    /// it: the turn's own into the transcript, a sub-agent's into its run's history.
+    /// `LastDelta` goes straight to `events`' bus.
     async fn translate(&mut self, event: LlmEvent, events: &EventSink) -> Option<Event> {
         match event {
             LlmEvent::FromAgent { agent, event, .. } => {
@@ -170,19 +138,14 @@ impl TurnTranslator {
     /// Record one of the turn's own agent's events.
     async fn record(&mut self, event: &LlmEvent, events: &EventSink) {
         match event {
-            LlmEvent::StepDiscarded => {
-                self.assistant_accum.clear();
-                self.reasoning = None;
-            }
+            LlmEvent::StepDiscarded => self.step.discard(),
             LlmEvent::Delta { text } => {
                 self.tokens.on_delta();
                 self.accumulate_delta(events, text);
             }
             LlmEvent::ReasoningDelta { text } => {
                 self.tokens.on_delta();
-                self.reasoning
-                    .get_or_insert_with(ReasoningTrace::new)
-                    .push(text);
+                self.step.push_reasoning(text);
             }
             LlmEvent::ToolCallsRequested { calls } => self.persist_tool_calls(events, calls).await,
             LlmEvent::ToolCall { .. } => self.awaiting_tool_result = true,
@@ -197,16 +160,20 @@ impl TurnTranslator {
                     .await;
             }
             LlmEvent::RelayPlanned { steps } => {
-                self.relay = Some(RelayTraceBuilder::planned(steps));
+                self.agent_runs = Some(AgentRunsRecorder::planned(steps));
             }
             LlmEvent::RelayStepStarted { step, agent } => {
-                if let Some(trace) = &mut self.relay {
-                    trace.start(*step, *agent);
+                if let Some(runs) = &mut self.agent_runs {
+                    runs.start(*step, *agent);
                 }
             }
-            LlmEvent::RelayStepEnded { step, end } => {
-                if let Some(trace) = &mut self.relay {
-                    trace.end(*step, end);
+            LlmEvent::RelayStepEnded {
+                step,
+                end,
+                duration_ms,
+            } => {
+                if let Some(runs) = &mut self.agent_runs {
+                    runs.end(*step, end, *duration_ms);
                 }
             }
             LlmEvent::ContextSize { tokens, total } => {
@@ -219,21 +186,24 @@ impl TurnTranslator {
             } => self.persist_summary(summary.clone(), *cut, *elapsed).await,
             LlmEvent::Interrupted { reply } => self.persist_interrupted_reply(reply.clone()).await,
             LlmEvent::Done => self.persist_final_text(events).await,
-            LlmEvent::StepStarted | LlmEvent::Status { .. } | LlmEvent::FromAgent { .. } => {}
+            LlmEvent::StepStarted
+            | LlmEvent::Task { .. }
+            | LlmEvent::Status { .. }
+            | LlmEvent::FromAgent { .. } => {}
         }
     }
 
-    /// Record what sub-agent `agent` streamed into the running relay's trace.
+    /// Record what sub-agent `agent` streamed in the history of its run.
     fn record_from_agent(&mut self, agent: AgentId, event: &LlmEvent) {
-        if let Some(trace) = &mut self.relay {
-            trace.record(agent, event);
+        if let Some(runs) = &mut self.agent_runs {
+            runs.record(agent, event);
         }
     }
 
     fn accumulate_delta(&mut self, events: &EventSink, text: &str) {
-        self.assistant_accum.push_str(text);
+        self.step.push_text(text);
         if self.last_emit_at.elapsed() >= LAST_DELTA_DEBOUNCE {
-            self.publish_last_delta(events, &self.assistant_accum);
+            self.publish_last_delta(events, self.step.text());
             self.last_emit_at = Instant::now();
         }
     }
@@ -252,12 +222,10 @@ impl TurnTranslator {
     }
 
     async fn persist_tool_calls(&mut self, events: &EventSink, calls: &[ToolCall]) {
-        let narration = std::mem::take(&mut self.assistant_accum);
-        if !narration.is_empty() {
-            self.publish_last_delta(events, &narration);
+        if !self.step.text().is_empty() {
+            self.publish_last_delta(events, self.step.text());
         }
-        let reasoning = self.take_reasoning();
-        let msg = tool_calls_message(narration, calls, reasoning);
+        let msg = self.step.requesting(calls);
         self.persist_message(msg, None).await;
     }
 
@@ -270,20 +238,13 @@ impl TurnTranslator {
         accesses: &[Access],
     ) {
         self.awaiting_tool_result = false;
-        let outcome = ToolOutcome {
-            exit_code: result.exit_code.into(),
-            duration_ms: result.duration_ms,
-        };
-        let msg = PersistedMessage::tool_result(
-            result.output.clone(),
-            call_id.to_owned(),
-            name.to_owned(),
-            outcome,
-            read_host,
-        );
+        let msg = tool_result_message(call_id, name, result, read_host);
         let trace = ToolTrace {
             accesses: accesses.to_vec(),
-            relay_steps: self.relay.take().map_or_default(RelayTraceBuilder::finish),
+            agent_runs: self
+                .agent_runs
+                .take()
+                .map_or_default(AgentRunsRecorder::finish),
         };
         self.persist_message(msg, Some(trace)).await;
     }
@@ -298,21 +259,16 @@ impl TurnTranslator {
 
     /// Persist the turn's last step and keep its text as the turn's reply.
     async fn persist_final_text(&mut self, events: &EventSink) {
-        let reasoning = self.take_reasoning();
-        let final_text = std::mem::take(&mut self.assistant_accum);
-        self.reply = Some(final_text.clone());
-        if final_text.is_empty() {
+        self.reply = Some(self.step.text().to_owned());
+        let Some(msg) = self.step.reply() else {
             return;
-        }
-        self.publish_last_delta(events, &final_text);
-        let msg = PersistedMessage::assistant_text(final_text, reasoning);
+        };
+        self.publish_last_delta(events, &msg.content);
         self.persist_message(msg, None).await;
     }
 
     async fn persist_interrupted_reply(&mut self, reply: String) {
-        self.assistant_accum.clear();
-        let reasoning = self.take_reasoning();
-        let msg = PersistedMessage::assistant_text(reply, reasoning);
+        let msg = self.step.interrupted(reply);
         self.persist_message(msg, None).await;
     }
 
@@ -329,10 +285,6 @@ impl TurnTranslator {
         self.transcript
             .persist_turn_stats(target.clone(), stats)
             .await;
-    }
-
-    fn take_reasoning(&mut self) -> Option<Reasoning> {
-        self.reasoning.take().map(ReasoningTrace::into_reasoning)
     }
 
     async fn persist_message(&self, msg: PersistedMessage, trace: Option<ToolTrace>) {
@@ -371,10 +323,9 @@ impl TurnDriver {
             id,
             transcript,
             persist,
-            assistant_accum: String::new(),
-            reasoning: None,
+            step: StepDraft::default(),
             awaiting_tool_result: false,
-            relay: None,
+            agent_runs: None,
             last_emit_at: Instant::now()
                 .checked_sub(LAST_DELTA_DEBOUNCE)
                 .unwrap_or_else(Instant::now),
@@ -498,7 +449,15 @@ fn wire_body(event: LlmEvent) -> Option<EventBody> {
             step,
             sub_agent: agent,
         },
-        LlmEvent::RelayStepEnded { step, end } => EventBody::RelayStepEnded { step, end },
+        LlmEvent::RelayStepEnded {
+            step,
+            end,
+            duration_ms,
+        } => EventBody::RelayStepEnded {
+            step,
+            end,
+            duration_ms,
+        },
         LlmEvent::ContextSize { tokens, total } => EventBody::ContextSize { tokens, total },
         LlmEvent::Status {
             severity,
@@ -512,33 +471,13 @@ fn wire_body(event: LlmEvent) -> Option<EventBody> {
             message,
         },
         LlmEvent::StepStarted
+        | LlmEvent::Task { .. }
         | LlmEvent::ToolCallsRequested { .. }
         | LlmEvent::FromAgent { .. }
         | LlmEvent::HistoryCompacted { .. }
         | LlmEvent::Interrupted { .. }
         | LlmEvent::Done => return None,
     })
-}
-
-fn tool_calls_message(
-    narration: String,
-    calls: &[ToolCall],
-    reasoning: Option<Reasoning>,
-) -> PersistedMessage {
-    let content = if narration.trim().is_empty() {
-        String::new()
-    } else {
-        narration
-    };
-    let persisted = calls
-        .iter()
-        .map(|call| PersistedToolCall {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            arguments: call.arguments.clone(),
-        })
-        .collect();
-    PersistedMessage::assistant_tool_calls(content, persisted, reasoning)
 }
 
 pub(crate) async fn run_speech_worker(

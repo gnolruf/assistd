@@ -14,7 +14,7 @@ use assistd_ipc::{Access, TaskId, TaskName, TaskRunId, TaskRunSummary};
 
 use crate::{
     AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, HistoryRow, HistoryScope,
-    MemoryError, MessageId, MessageKind, OpenedTurn, PersistedMessage, PersistedRelayStep,
+    MemoryError, MessageId, MessageKind, OpenedTurn, PersistedAgentRun, PersistedMessage,
     PersistedRole, PersistedToolCall, Reasoning, Result, ResumeCandidate, Seq, SessionId,
     ToolOutcome, ToolTrace, TranscriptStore, TurnId, TurnStats, UndoOutcome,
 };
@@ -24,10 +24,20 @@ use super::rows::decodable_rows;
 use super::tasks::run_state_at;
 use super::timestamp::{now_millis, timestamp_at};
 
-mod relays;
+mod agent_runs;
 
-pub(super) use relays::session_answer_files;
-use relays::{all_answer_files, insert_relay_steps, relay_traces, unreferenced_answer_files};
+pub(super) use agent_runs::session_answer_files;
+use agent_runs::{
+    RunOwner, all_answer_files, branch_agent_runs, insert_agent_runs, unreferenced_answer_files,
+};
+
+/// The columns [`stored_message`] reads of a `messages` row `m`.
+const MESSAGE_COLUMNS: &str = "
+    m.id, m.role, m.content, m.reasoning, m.reasoning_ms, m.tool_calls, m.tool_call_id,
+    m.tool_name, m.tool_exit_code, m.tool_duration_ms, m.tool_read_host";
+
+/// How many columns [`MESSAGE_COLUMNS`] names.
+const MESSAGE_COLUMN_COUNT: usize = 11;
 
 /// Columns [`branch_info`] reads, over `branches b JOIN sessions s` and the task run, if any,
 /// the session holds.
@@ -70,7 +80,7 @@ impl SqliteTranscriptStore {
         Self { handle }
     }
 
-    /// Every saved relay answer a stored relay step names.
+    /// Every saved relay answer a stored sub-agent run names.
     pub async fn relay_answer_files(&self) -> Result<Vec<PathBuf>> {
         self.handle
             .read("relay_answer_files", all_answer_files)
@@ -209,7 +219,13 @@ impl TranscriptStore for SqliteTranscriptStore {
                 let slot = claim_next_seq(tx, branch)?;
                 let appended = store_message(tx, branch, slot, turn, &row)?;
                 insert_accesses(tx, appended.id, &trace.accesses)?;
-                insert_relay_steps(tx, appended.id, &trace.relay_steps)?;
+                let owner = RunOwner {
+                    message: appended.id,
+                    session_rowid: slot.session_rowid,
+                    turn,
+                    created_at: row.created_at,
+                };
+                insert_agent_runs(tx, owner, trace.agent_runs)?;
                 Ok(appended)
             })
             .await
@@ -223,12 +239,12 @@ impl TranscriptStore for SqliteTranscriptStore {
         Ok(appended)
     }
 
-    async fn load_relay_traces(
+    async fn load_agent_runs(
         &self,
         branch: BranchId,
-    ) -> Result<HashMap<MessageId, Vec<PersistedRelayStep>>> {
+    ) -> Result<HashMap<MessageId, Vec<PersistedAgentRun>>> {
         self.handle
-            .read_snapshot("load_relay_traces", move |tx| relay_traces(tx, branch))
+            .read_snapshot("load_agent_runs", move |tx| branch_agent_runs(tx, branch))
             .await
     }
 
@@ -622,7 +638,7 @@ fn store_message(
     turn: TurnId,
     row: &MessageRow,
 ) -> rusqlite::Result<AppendedMessage> {
-    let id = insert_message(tx, slot.session_rowid, turn, row)?;
+    let id = insert_message(tx, slot.session_rowid, turn, None, row)?;
     tx.prepare_cached(
         "INSERT INTO branch_messages (branch_id, seq, message_id) VALUES (?1, ?2, ?3)",
     )?
@@ -630,11 +646,13 @@ fn store_message(
     Ok(AppendedMessage { id, seq: slot.seq })
 }
 
-/// Insert `row` into the session with rowid `session_rowid`, returning its id.
+/// Insert `row` into the session with rowid `session_rowid` as part of `turn`, and of
+/// the sub-agent run with rowid `run` when it has one, returning its id.
 fn insert_message(
     tx: &Transaction<'_>,
     session_rowid: i64,
     turn: TurnId,
+    run: Option<i64>,
     row: &MessageRow,
 ) -> rusqlite::Result<MessageId> {
     let columns = &row.columns;
@@ -642,8 +660,8 @@ fn insert_message(
         "INSERT INTO messages
             (session_id, turn_id, created_at, role, content, reasoning, reasoning_ms,
              tool_calls, tool_call_id, tool_name, tool_exit_code, tool_duration_ms,
-             tool_read_host)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             tool_read_host, run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          RETURNING id",
     )?
     .query_row(
@@ -661,6 +679,7 @@ fn insert_message(
             columns.tool_exit_code,
             columns.tool_duration_ms,
             columns.tool_read_host,
+            run,
         ],
         |r| r.get(0),
     )
@@ -765,7 +784,9 @@ fn latest_turn_on_branch(
 
 fn first_user_text_of_turn(tx: &Transaction<'_>, turn: TurnId) -> rusqlite::Result<Option<String>> {
     tx.query_row(
-        "SELECT content FROM messages WHERE turn_id = ?1 AND role = ?2 ORDER BY id LIMIT 1",
+        "SELECT content FROM messages
+         WHERE turn_id = ?1 AND role = ?2 AND run_id IS NULL
+         ORDER BY id LIMIT 1",
         rusqlite::params![turn, PersistedRole::User],
         |r| r.get(0),
     )
@@ -791,12 +812,13 @@ fn drop_summary_covering_turn(
     )
 }
 
-/// Delete the turn's messages that no branch references any more, then the
-/// turn itself once no message points at it; returns how many messages were deleted.
+/// Delete the turn's messages that no branch references any more, each with the
+/// sub-agent runs stored with it, then the turn itself once no message points at it;
+/// returns how many of the turn's own messages were deleted.
 fn delete_unreferenced_turn(tx: &Transaction<'_>, turn: TurnId) -> rusqlite::Result<usize> {
     let deleted = tx.execute(
         "DELETE FROM messages
-         WHERE turn_id = ?1
+         WHERE turn_id = ?1 AND run_id IS NULL
            AND NOT EXISTS (SELECT 1 FROM branch_messages bm WHERE bm.message_id = messages.id)",
         rusqlite::params![turn],
     )?;
@@ -826,17 +848,20 @@ fn branch_summary(
         "SELECT kept_from_seq, steps_folded_through, compacted_after_seq, content, duration_ms
          FROM branch_summaries WHERE branch_id = ?1",
         rusqlite::params![branch],
-        |r| {
-            Ok(BranchSummary {
-                kept_from_seq: r.get(0)?,
-                steps_folded_through: r.get(1)?,
-                compacted_after_seq: r.get(2)?,
-                content: r.get(3)?,
-                duration_ms: r.get(4)?,
-            })
-        },
+        |r| summary_at(r, 0),
     )
     .optional()
+}
+
+/// The summary in the five columns from `idx` on, in the order its fields are declared.
+fn summary_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<BranchSummary> {
+    Ok(BranchSummary {
+        kept_from_seq: row.get(idx)?,
+        steps_folded_through: row.get(idx + 1)?,
+        compacted_after_seq: row.get(idx + 2)?,
+        content: row.get(idx + 3)?,
+        duration_ms: row.get(idx + 4)?,
+    })
 }
 
 /// The messages on `branch` from seq `from` on, ordered by seq.
@@ -845,19 +870,9 @@ fn history_rows(
     branch: BranchId,
     from: Seq,
 ) -> rusqlite::Result<Vec<HistoryRow>> {
-    tx.prepare_cached(
-        "SELECT  m.id,
+    tx.prepare_cached(&format!(
+        "SELECT  {MESSAGE_COLUMNS},
                  bm.seq,
-                 m.role,
-                 m.content,
-                 m.reasoning,
-                 m.reasoning_ms,
-                 m.tool_calls,
-                 m.tool_call_id,
-                 m.tool_name,
-                 m.tool_exit_code,
-                 m.tool_duration_ms,
-                 m.tool_read_host,
                  LEAD(m.turn_id) OVER (ORDER BY bm.seq) IS NOT m.turn_id,
                  t.duration_ms,
                  t.generated_tokens
@@ -865,8 +880,8 @@ fn history_rows(
          JOIN messages m ON m.id = bm.message_id
          JOIN turns t ON t.id = m.turn_id
          WHERE bm.branch_id = ?1 AND bm.seq >= ?2
-         ORDER BY bm.seq ASC",
-    )?
+         ORDER BY bm.seq ASC"
+    ))?
     .query_map(rusqlite::params![branch, from], history_row)?
     .collect()
 }
@@ -906,31 +921,39 @@ fn task_run_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<TaskRunSumm
 }
 
 fn history_row(row: &Row<'_>) -> rusqlite::Result<HistoryRow> {
-    let kind = match row.get(2)? {
+    let (message_id, message) = stored_message(row)?;
+    Ok(HistoryRow {
+        message_id,
+        seq: row.get(MESSAGE_COLUMN_COUNT)?,
+        message,
+        turn_stats: turn_stats_at(row, MESSAGE_COLUMN_COUNT + 1)?,
+    })
+}
+
+/// The message a row that opens with [`MESSAGE_COLUMNS`] holds, and its id.
+fn stored_message(row: &Row<'_>) -> rusqlite::Result<(MessageId, PersistedMessage)> {
+    let id = row.get(0)?;
+    let kind = match row.get(1)? {
         PersistedRole::User => MessageKind::User,
         PersistedRole::Assistant => MessageKind::Assistant {
-            reasoning: reasoning_at(row, 4)?,
-            tool_calls: tool_calls_at(row, 6)?,
+            reasoning: reasoning_at(row, 3)?,
+            tool_calls: tool_calls_at(row, 5, id)?,
         },
         PersistedRole::Tool => MessageKind::Tool {
-            call_id: row.get(7)?,
-            tool_name: row.get(8)?,
+            call_id: row.get(6)?,
+            tool_name: row.get(7)?,
             outcome: ToolOutcome {
-                exit_code: row.get(9)?,
-                duration_ms: row.get(10)?,
+                exit_code: row.get(8)?,
+                duration_ms: row.get(9)?,
             },
-            read_host: row.get(11)?,
+            read_host: row.get(10)?,
         },
     };
-    Ok(HistoryRow {
-        message_id: row.get(0)?,
-        seq: row.get(1)?,
-        message: PersistedMessage {
-            content: row.get(3)?,
-            kind,
-        },
-        turn_stats: turn_stats_at(row, 12)?,
-    })
+    let message = PersistedMessage {
+        content: row.get(2)?,
+        kind,
+    };
+    Ok((id, message))
 }
 
 /// The turn's stats when the flag at `idx` marks the row as its turn's last,
@@ -956,13 +979,16 @@ fn reasoning_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<Reasoning>
         .map(|(text, duration_ms)| Reasoning { text, duration_ms }))
 }
 
-/// The tool calls stored as JSON at `idx` of a [`history_rows`] row; none, with a warning,
-/// when the JSON no longer decodes, so the message still loads.
-fn tool_calls_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Vec<PersistedToolCall>> {
+/// The tool calls of `message` stored as JSON at `idx`; none, with a warning, when the
+/// JSON no longer decodes, so the message still loads.
+fn tool_calls_at(
+    row: &Row<'_>,
+    idx: usize,
+    message: MessageId,
+) -> rusqlite::Result<Vec<PersistedToolCall>> {
     let Some(json) = row.get::<_, Option<String>>(idx)? else {
         return Ok(Vec::new());
     };
-    let message: MessageId = row.get(0)?;
     Ok(serde_json::from_str(&json).unwrap_or_else(|error| {
         warn!(
             target: "assistd::memory",

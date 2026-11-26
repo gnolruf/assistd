@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 
 use assistd_llm::CompactionCut;
 use assistd_memory::{
-    BranchId, BranchSummary, HistoryScope, MemoryError, PersistedMessage, ToolTrace,
-    TranscriptStore, TurnId, TurnStats,
+    BranchId, HistoryScope, MemoryError, PersistedMessage, ToolTrace, TranscriptStore, TurnId,
+    TurnStats,
 };
 
 use super::seq_ledger::{RowRole, SeqLedger, SharedLedger};
@@ -242,13 +242,7 @@ impl TranscriptWriter {
             );
             return;
         };
-        let summary = BranchSummary {
-            kept_from_seq: seqs.kept_from,
-            steps_folded_through: seqs.steps_folded_through,
-            compacted_after_seq: seqs.compacted_after,
-            content,
-            duration_ms,
-        };
+        let summary = seqs.summary(content, duration_ms);
         if let Err(e) = self
             .transcripts
             .record_branch_summary(target.branch, summary)

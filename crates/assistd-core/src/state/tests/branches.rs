@@ -1,4 +1,9 @@
+use serde_json::{Value, json};
+
+use assistd_ipc::{RelayStepEnd, RelayStepPlan};
+
 use super::*;
+use crate::relay::tests::relay_tool;
 
 fn history(events: &[Event]) -> Vec<(Role, &str)> {
     events
@@ -372,4 +377,130 @@ fn tool_calls(row: &HistoryRow) -> &[PersistedToolCall] {
         MessageKind::Assistant { tool_calls, .. } => tool_calls,
         MessageKind::User | MessageKind::Tool { .. } => &[],
     }
+}
+
+/// One thing a client is shown of a relay's sub-agents, streamed or replayed.
+#[derive(Debug, PartialEq)]
+enum RelayShown {
+    Planned(Vec<RelayStepPlan>),
+    Started(u32),
+    Said(String),
+    Ran {
+        args: Option<Value>,
+        output: String,
+        exit_code: i64,
+    },
+    Ended(u32, RelayStepEnd),
+}
+
+/// What `events` show of a relay's sub-agents, with each reply's deltas joined.
+fn relay_shown(events: &[Event]) -> Vec<RelayShown> {
+    let mut shown = Vec::new();
+    let mut call_args = None;
+    for event in events {
+        match (event.agent, &event.body) {
+            (None, EventBody::RelayPlanned { steps }) => {
+                shown.push(RelayShown::Planned(steps.clone()));
+            }
+            (None, EventBody::RelayStepStarted { step, .. }) => {
+                shown.push(RelayShown::Started(*step));
+            }
+            (None, EventBody::RelayStepEnded { step, end, .. }) => {
+                shown.push(RelayShown::Ended(*step, end.clone()));
+            }
+            (Some(_), EventBody::Delta { text }) => match shown.last_mut() {
+                Some(RelayShown::Said(said)) => said.push_str(text),
+                _ => shown.push(RelayShown::Said(text.clone())),
+            },
+            (Some(_), EventBody::ToolCall { args, .. }) => call_args = Some(args.clone()),
+            (Some(_), EventBody::ToolResult { result, .. }) => shown.push(RelayShown::Ran {
+                args: call_args.take(),
+                output: result.output.clone(),
+                exit_code: result.exit_code.into(),
+            }),
+            (Some(_), EventBody::HistoryEntry { role, content, .. })
+                if *role == Role::Assistant && !content.is_empty() =>
+            {
+                shown.push(RelayShown::Said(content.clone()));
+            }
+            (
+                Some(_),
+                EventBody::HistoryEntry {
+                    role: Role::Tool,
+                    content,
+                    tool_args,
+                    exit_code,
+                    ..
+                },
+            ) => shown.push(RelayShown::Ran {
+                args: tool_args.clone(),
+                output: content.clone(),
+                exit_code: exit_code.unwrap_or_default(),
+            }),
+            _ => {}
+        }
+    }
+    shown
+}
+
+#[tokio::test]
+async fn a_relay_turn_replays_its_sub_agent_as_streamed_and_undo_leaves_nothing_of_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes.txt");
+    std::fs::write(&notes, "buy milk").unwrap();
+    let read_the_notes = run_call("c-1", "cat ../input/notes.txt | write copy.txt");
+    let sub_agent =
+        ScriptedBackend::new([Step::tool_calls([read_the_notes]).saying("Reading the notes.")])
+            .then_replying("The notes say to buy milk.");
+    let relay_call = ToolCall {
+        id: "c-relay".into(),
+        name: "relay".into(),
+        arguments: json!({
+            "task": "say what the notes ask for",
+            "inputs": [notes],
+            "agent": "file_review",
+        }),
+    };
+    let backend = Arc::new(
+        ScriptedBackend::new([Step::tool_calls([relay_call])])
+            .then_replying("Buy milk.")
+            .handing_out([Arc::new(sub_agent) as Arc<dyn LlmBackend>]),
+    );
+    let mut tools = ToolRegistry::default();
+    tools.register(relay_tool(&backend, dir.path()));
+    let (state, conv, _session, branch) = branch_state_with(backend, Arc::new(tools)).await;
+
+    let (res, streamed) = dispatch(&state, query("rq", "what do the notes ask for?")).await;
+    res.unwrap();
+    state.transcript.drain_inflight().await;
+    let switch = RequestBody::Switch {
+        target: "main".into(),
+    };
+    let (res, replayed) = dispatch(&state, Request::new("rs", switch)).await;
+    res.unwrap();
+
+    let shown = relay_shown(&streamed);
+    let [
+        RelayShown::Planned(plan),
+        RelayShown::Started(1),
+        RelayShown::Said(narration),
+        RelayShown::Ran { .. },
+        RelayShown::Said(answer),
+        RelayShown::Ended(1, RelayStepEnd::Answered { answer_file }),
+    ] = shown.as_slice()
+    else {
+        panic!("{shown:?}");
+    };
+    assert_eq!(plan.len(), 1);
+    assert_eq!(
+        (narration.as_str(), answer.as_str()),
+        ("Reading the notes.", "The notes say to buy milk.")
+    );
+    assert_eq!(relay_shown(&replayed), shown);
+    assert!(answer_file.exists());
+
+    let (res, _) = dispatch(&state, Request::new("ru", RequestBody::Undo)).await;
+    res.unwrap();
+    assert!(conv.load_agent_runs(branch).await.unwrap().is_empty());
+    assert!(!answer_file.exists());
 }

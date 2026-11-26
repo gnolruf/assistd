@@ -52,7 +52,8 @@ CREATE TABLE turns (
 ) STRICT;
 
 -- `role` is 0 user, 1 assistant, 2 tool. `tool_read_host` is set on a result whose call
--- could put data from this machine in it.
+-- could put data from this machine in it. A message with a `run_id` is part of that
+-- sub-agent run's history and of no branch's.
 CREATE TABLE messages (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id       INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -68,6 +69,7 @@ CREATE TABLE messages (
     tool_exit_code   INTEGER,
     tool_duration_ms INTEGER CHECK (tool_duration_ms >= 0),
     tool_read_host   INTEGER CHECK (tool_read_host IN (0, 1)),
+    run_id           INTEGER REFERENCES agent_runs(id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, turn_id) REFERENCES turns(session_id, id),
     CHECK (tool_calls IS NULL OR (role = 1 AND json_valid(tool_calls)
                                   AND json_type(tool_calls) = 'array'
@@ -82,6 +84,7 @@ CREATE TABLE messages (
 ) STRICT;
 CREATE INDEX idx_messages_session ON messages(session_id);
 CREATE INDEX idx_messages_turn ON messages(turn_id);
+CREATE INDEX idx_messages_run ON messages(run_id) WHERE run_id IS NOT NULL;
 
 CREATE TABLE branch_messages (
     branch_id  INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
@@ -115,9 +118,10 @@ CREATE TABLE accesses (
 CREATE INDEX idx_accesses_message ON accesses(message_id);
 CREATE INDEX idx_accesses_target ON accesses(target);
 
--- What a `relay` tool result's sub-agents did. `outcome` is 0 answered, 1 failed,
--- NULL for a step that never ran; `answer_file` is where the whole answer was saved.
-CREATE TABLE relay_steps (
+-- One sub-agent run a `relay` tool result's call planned, in plan order. `outcome` is
+-- 0 answered, 1 failed, NULL for a run that never started; `answer_file` is where the
+-- whole answer was saved. Its messages are the `messages` rows that name it.
+CREATE TABLE agent_runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id  INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     step        INTEGER NOT NULL CHECK (step >= 1),
@@ -135,26 +139,16 @@ CREATE TABLE relay_steps (
     CHECK (outcome IS NOT NULL OR tokens IS NULL)
 ) STRICT;
 
--- `kind` is 0 reply text, 1 reasoning, 2 tool call, 3 compaction.
-CREATE TABLE relay_entries (
-    step_id        INTEGER NOT NULL REFERENCES relay_steps(id) ON DELETE CASCADE,
-    seq            INTEGER NOT NULL CHECK (seq >= 0),
-    kind           INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 3),
-    content        TEXT NOT NULL,
-    tool_name      TEXT,
-    tool_args      TEXT CHECK (tool_args IS NULL OR json_valid(tool_args)),
-    tool_exit_code INTEGER,
-    duration_ms    INTEGER CHECK (duration_ms >= 0),
-    PRIMARY KEY (step_id, seq),
-    CHECK ((kind = 2) = (tool_name IS NOT NULL)),
-    CHECK ((kind = 2) = (tool_args IS NOT NULL)),
-    CHECK (kind = 2 OR tool_exit_code IS NULL),
-    CHECK (kind <> 2 OR (tool_exit_code IS NULL) = (duration_ms IS NULL)),
-    CHECK (kind <> 0 OR duration_ms IS NULL),
-    CHECK (kind <> 1 OR duration_ms IS NOT NULL),
-    CHECK (kind IN (2, 3) OR content <> ''),
-    CHECK (kind <> 3 OR content = '')
-) STRICT, WITHOUT ROWID;
+-- The latest compaction summary of a run's history. Its seqs count the run's messages
+-- from 0 in id order, and mean what those of `branch_summaries` do.
+CREATE TABLE agent_run_summaries (
+    run_id               INTEGER PRIMARY KEY REFERENCES agent_runs(id) ON DELETE CASCADE,
+    kept_from_seq        INTEGER NOT NULL CHECK (kept_from_seq >= 0),
+    steps_folded_through INTEGER CHECK (steps_folded_through > kept_from_seq),
+    compacted_after_seq  INTEGER NOT NULL CHECK (compacted_after_seq >= kept_from_seq),
+    content              TEXT NOT NULL,
+    duration_ms          INTEGER NOT NULL CHECK (duration_ms >= 0)
+) STRICT;
 
 CREATE TABLE memories (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

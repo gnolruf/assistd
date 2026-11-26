@@ -1,4 +1,4 @@
-//! Deleting saved sub-agent answers no stored relay step names any more: the startup
+//! Deleting saved sub-agent answers no stored sub-agent run names any more: the startup
 //! sweep, and the files a deleted turn, run or task releases.
 
 use std::collections::HashSet;
@@ -61,7 +61,7 @@ fn remove_if_empty(dir: &Path) {
     let _ = std::fs::remove_dir(dir);
 }
 
-/// Delete saved relay answers no stored step names any more; one already gone is fine.
+/// Delete saved relay answers no stored run names any more; one already gone is fine.
 pub(crate) async fn delete_answer_files(files: Vec<PathBuf>) {
     if files.is_empty() {
         return;

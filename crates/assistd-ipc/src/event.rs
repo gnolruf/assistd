@@ -10,9 +10,9 @@ use crate::{
     AgentId, Component, ComponentReadiness, ConfirmSource, DocumentActivity, DocumentPass,
     DocumentPassCounts, DocumentRootStatus, ListenPhase, McpServerState, McpTransportKind,
     ModeRecommendation, PageTranscriptionStatus, PermissionMode, Plan, PresenceState, RelayStepEnd,
-    RelayStepPlan, RelayStepRecord, SearchPlace, StartupComponent, StatusKind, StatusSeverity,
-    TaskId, TaskName, TaskPrompt, TaskQueueSnapshot, TaskRunId, TaskRunRecord, TaskRunState,
-    TaskRunSummary, TaskSpec, TokenRevocation, ToolReport, VoiceCaptureState,
+    RelayStepPlan, SearchPlace, StartupComponent, StatusKind, StatusSeverity, TaskId, TaskName,
+    TaskPrompt, TaskQueueSnapshot, TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary,
+    TaskSpec, TokenRevocation, ToolReport, VoiceCaptureState,
 };
 
 /// Kinds of [`Event`] carried on the daemon-wide broadcast bus, selectable by a
@@ -318,14 +318,19 @@ pub enum EventBody {
         #[serde(default)]
         default_mode: PermissionMode,
     },
-    /// The turn's running `relay` tool call validated its plan; a single-task relay is a
-    /// plan of one step.
+    /// A `relay` tool call validated its plan; a single-task relay is a plan of one step.
+    /// The call is the turn's running one, or in a replayed history the one whose
+    /// `HistoryEntry` came last.
     RelayPlanned { steps: Vec<RelayStepPlan> },
-    /// Step `step` of the running relay's plan, counted from 1, handed its task to
-    /// `sub_agent`, whose output follows in events that carry it as their `agent`.
+    /// Step `step` of that relay's plan, counted from 1, handed its task to `sub_agent`,
+    /// whose output follows in events that carry it as their `agent`.
     RelayStepStarted { step: u32, sub_agent: AgentId },
-    /// Step `step` of the running relay's plan ended.
-    RelayStepEnded { step: u32, end: RelayStepEnd },
+    /// Step `step` of that relay's plan ended, `duration_ms` after it started.
+    RelayStepEnded {
+        step: u32,
+        end: RelayStepEnd,
+        duration_ms: u64,
+    },
     /// Tokens in the history as sent with the model request about to stream,
     /// and `total` the history has held, counting what compaction removed.
     ContextSize { tokens: u32, total: u32 },
@@ -367,9 +372,10 @@ pub enum EventBody {
         parent_branch_name: Option<String>,
         fork_point_seq: Option<i64>,
     },
-    /// One message of branch history, with its reasoning or tool call and outcome.
-    /// `compaction_ms` is set only on the row the branch's latest compaction followed;
-    /// `turn_stats` only on the last row of a finished turn; `relay` only on a `relay` tool row.
+    /// One stored message of a history, with its reasoning or tool call and outcome: a
+    /// branch's, or with an `agent` that sub-agent's, after the task it was handed.
+    /// `compaction_ms` is set only on the row the history's latest compaction followed;
+    /// `turn_stats` only on the last row of a finished turn.
     HistoryEntry {
         seq: i64,
         role: Role,
@@ -389,8 +395,6 @@ pub enum EventBody {
         compaction_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_stats: Option<TurnStats>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        relay: Vec<RelayStepRecord>,
     },
     /// Result of `Undo`; `removed_messages == 0` means there was nothing to undo.
     UndoApplied {

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use assistd_ipc::{Access, TaskRunSummary};
 
-use crate::{BranchId, MessageId, PersistedRelayStep, Result, Seq, SessionId, TurnId};
+use crate::{BranchId, MessageId, PersistedAgentRun, Result, Seq, SessionId, TurnId};
 
 /// Role of a persisted message, stored as the `messages.role` code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -154,8 +154,8 @@ pub struct ToolOutcome {
 pub struct ToolTrace {
     /// What the call touched; it may miss things.
     pub accesses: Vec<Access>,
-    /// The sub-agent steps behind a `relay` result, in plan order.
-    pub relay_steps: Vec<PersistedRelayStep>,
+    /// The sub-agent runs the call planned, in plan order.
+    pub agent_runs: Vec<PersistedAgentRun>,
 }
 
 /// Per-branch metadata; `is_current_in_session` marks the session's current branch.
@@ -250,7 +250,7 @@ pub struct UndoOutcome {
     /// Number of `branch_messages` rows dropped.
     pub removed_messages: u64,
     pub last_user_text: Option<String>,
-    /// Saved relay answers whose steps were deleted, for the caller to delete;
+    /// Saved relay answers whose runs were deleted, for the caller to delete;
     /// those a fork still holds are kept.
     pub released_answer_files: Vec<PathBuf>,
 }
@@ -308,11 +308,11 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
         trace: ToolTrace,
     ) -> Result<AppendedMessage>;
 
-    /// The relay steps stored with each message on `branch`, in plan order.
-    async fn load_relay_traces(
+    /// The sub-agent runs stored with each tool result on `branch`, in plan order.
+    async fn load_agent_runs(
         &self,
         branch: BranchId,
-    ) -> Result<HashMap<MessageId, Vec<PersistedRelayStep>>>;
+    ) -> Result<HashMap<MessageId, Vec<PersistedAgentRun>>>;
 
     /// Every branch of every session, most recently active first, then by
     /// branch id; one whose stored row no longer decodes is left out.
@@ -355,8 +355,8 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// When the newest message on `branch` was written, or `None` when the branch is empty.
     async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<DateTime<Utc>>>;
 
-    /// Drop the latest turn from `branch`, deleting messages and the turn row once
-    /// no other branch references them.
+    /// Drop the latest turn from `branch`, deleting its messages, the sub-agent runs
+    /// stored with them and the turn row once no other branch references them.
     async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome>;
 
     /// The session last made active and its current branch; `None` once it was cleared

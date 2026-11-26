@@ -7,14 +7,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use textwrap::core::display_width;
 
-use assistd_ipc::{
-    AgentId, EventBody, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayTraceEntry,
-};
+use assistd_ipc::{AgentId, EventBody, RelayStepEnd, RelayStepPlan};
 use assistd_utils::terminal_text::{escape_controls, escape_controls_single_line};
 
 use super::{
     BlockTiming, CompactionBlock, OutputItem, OutputPane, ToolBlock, ToolState, elapsed_text,
-    exit_color, split_body, tool_block_label,
+    exit_color, split_body,
 };
 use crate::text::ellipsize;
 use crate::theme::Theme;
@@ -49,18 +47,6 @@ impl RelayRun {
         }
     }
 
-    /// A finished run rebuilt from its stored `records`.
-    pub(super) fn replayed(records: Vec<RelayStepRecord>) -> Self {
-        let steps = records.len();
-        Self {
-            steps: records
-                .into_iter()
-                .enumerate()
-                .map(|(index, record)| RelayStepTrace::replayed(record, index + 1, steps))
-                .collect(),
-        }
-    }
-
     /// Hand step `step`, counted from 1, to sub-agent `agent`; an unknown step is ignored.
     pub(super) fn start(&mut self, step: u32, agent: AgentId) {
         if let Some(trace) = self.step_mut(step) {
@@ -68,10 +54,10 @@ impl RelayRun {
         }
     }
 
-    /// End step `step`, counted from 1, if it is running.
-    pub(super) fn end_step(&mut self, step: u32, end: RelayStepEnd) {
+    /// End step `step`, counted from 1, after it ran for `took`, if it is running.
+    pub(super) fn end_step(&mut self, step: u32, end: RelayStepEnd, took: Duration) {
         if let Some(trace) = self.step_mut(step) {
-            trace.finish(end);
+            trace.finish(end, took);
         }
     }
 
@@ -90,10 +76,13 @@ impl RelayRun {
 
     /// Fail a step still running when the relay's tool call ends.
     pub(super) fn end(&mut self) {
-        for step in self.steps.iter_mut().filter(|step| step.is_running()) {
-            step.finish(RelayStepEnd::Failed {
-                message: STOPPED_MESSAGE.into(),
-            });
+        for step in &mut self.steps {
+            if let StepState::Running { started_at, .. } = step.state {
+                let stopped = RelayStepEnd::Failed {
+                    message: STOPPED_MESSAGE.into(),
+                };
+                step.finish(stopped, started_at.elapsed());
+            }
         }
     }
 
@@ -155,18 +144,6 @@ impl RelayStepTrace {
         }
     }
 
-    fn replayed(record: RelayStepRecord, step: usize, steps: usize) -> Self {
-        let planned = RelayStepPlan {
-            task: record.task,
-            agent: record.agent,
-        };
-        let mut trace = Self::pending(planned, step, steps);
-        if let Some(run) = record.run {
-            trace.replay_run(run);
-        }
-        trace
-    }
-
     fn start(&mut self, agent: AgentId) {
         self.transcript.push_user(&escape_controls(&self.task));
         self.state = StepState::Running {
@@ -175,81 +152,26 @@ impl RelayStepTrace {
         };
     }
 
-    /// Rebuild what a finished step did, and how it ended, from its stored `run`.
-    fn replay_run(&mut self, run: RelayStepRun) {
-        self.transcript.push_user(&escape_controls(&self.task));
-        for entry in run.entries {
-            self.replay_entry(entry);
-        }
-        self.transcript.finish_assistant();
-        if let RelayStepEnd::Failed { message } = &run.end {
-            self.transcript.push_error(&escape_controls(message));
-        }
-        self.tokens = run.tokens;
-        self.state = StepState::Finished {
-            elapsed: Duration::from_millis(run.duration_ms),
-            outcome: run.end,
-        };
-    }
-
-    fn replay_entry(&mut self, entry: RelayTraceEntry) {
-        match entry {
-            RelayTraceEntry::Text { text } => self.transcript.append_assistant(&text),
-            RelayTraceEntry::Reasoning { text, duration_ms } => self
-                .transcript
-                .push_replayed_thinking(text, Duration::from_millis(duration_ms)),
-            RelayTraceEntry::Tool {
-                name,
-                args,
-                output,
-                outcome,
-            } => {
-                let command = tool_block_label(name, Some(&args));
-                match outcome {
-                    Some(outcome) => {
-                        let exit_code = i32::try_from(outcome.exit_code).unwrap_or(i32::MIN);
-                        self.transcript.push_tool_block(
-                            command,
-                            output,
-                            exit_code,
-                            outcome.duration_ms,
-                        );
-                    }
-                    None => {
-                        self.transcript.begin_tool_block(command);
-                        self.transcript.abandon_running_tool();
-                    }
-                }
-            }
-            RelayTraceEntry::Compaction { duration_ms } => {
-                let took = Duration::from_millis(duration_ms.unwrap_or(0));
-                self.transcript.push_replayed_compaction(took);
-            }
-        }
-    }
-
-    /// Draw `body`, one event of the sub-agent's turn.
+    /// Draw `body`, one event of the sub-agent's turn or one stored message of its history.
     fn apply(&mut self, body: EventBody) {
         match body {
             EventBody::ContextSize { total, .. } => self.tokens = Some(total),
+            entry @ EventBody::HistoryEntry { .. } => self.transcript.push_history_entry(entry),
             body => self.transcript.apply_agent_event(body),
         }
     }
 
-    fn finish(&mut self, outcome: RelayStepEnd) {
-        let StepState::Running { started_at, .. } = self.state else {
+    fn finish(&mut self, outcome: RelayStepEnd, elapsed: Duration) {
+        if !self.is_running() {
             return;
-        };
+        }
         self.transcript.finish_thinking();
         self.transcript.finish_assistant();
         self.transcript.abandon_running_tool();
         if let RelayStepEnd::Failed { message } = &outcome {
             self.transcript.push_error(&escape_controls(message));
         }
-        self.state = StepState::Finished {
-            elapsed: started_at.elapsed(),
-            outcome,
-        };
+        self.state = StepState::Finished { elapsed, outcome };
     }
 
     fn is_running(&self) -> bool {

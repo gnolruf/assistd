@@ -2,28 +2,26 @@
 //! database, the semantic store over two more that can be produced again from the
 //! first and from disk, and that store's no-op fallback for when embedding is off.
 
+mod agent_runs;
 mod chunking;
 mod error;
 mod ids;
 mod index_schema;
 mod memories;
 mod migrations;
-mod relay_traces;
 mod semantic;
 mod sqlite;
 mod tasks;
 mod transcripts;
 mod vectors_schema;
 
+pub use agent_runs::{AgentRunEnd, AgentRunRecord, PersistedAgentRun, RunMessage};
 pub use error::{BackendError, MemoryError, Result};
 pub use ids::{
     AccessId, BranchId, ChunkId, DocumentId, MemoryId, MessageId, SHORT_SESSION_ID_CHARS, Seq,
     SessionId, TurnId,
 };
 pub use memories::{MemoryRecord, SavedMemory};
-pub use relay_traces::{
-    PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, PersistedRelayStep,
-};
 pub use semantic::{
     AdjacentChunks, ChunkLocator, ChunkSearch, ChunkSource, ContextChunk, DocumentStore,
     DocumentText, Embedding, EmbeddingQueue, EmbeddingSpace, EmptyPages, FileHash, FileStamp,

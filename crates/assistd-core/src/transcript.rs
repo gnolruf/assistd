@@ -19,7 +19,8 @@ use self::seq_ledger::SharedLedger;
 use self::writer::{TranscriptWriter, WRITE_QUEUE_CAPACITY, WriteCommand};
 use crate::recovery::spawn_supervised;
 
-pub(crate) mod relay_trace;
+pub(crate) mod agent_runs;
+pub(crate) mod messages;
 mod seq_ledger;
 mod session;
 mod writer;
@@ -214,9 +215,8 @@ mod tests {
     use assistd_llm::CompactionCut;
     use assistd_memory::{
         AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, HistoryScope,
-        MemoryError, MessageId, OpenedTurn, PersistedMessage, PersistedRelayStep,
-        PersistedToolCall, ResumeCandidate, Seq, SessionId, TranscriptStore, TurnId, TurnStats,
-        UndoOutcome,
+        MemoryError, MessageId, OpenedTurn, PersistedAgentRun, PersistedMessage, PersistedToolCall,
+        ResumeCandidate, Seq, SessionId, TranscriptStore, TurnId, TurnStats, UndoOutcome,
     };
 
     use super::*;
@@ -310,10 +310,10 @@ mod tests {
         ) -> assistd_memory::Result<AppendedMessage> {
             self.arrive(m).await
         }
-        async fn load_relay_traces(
+        async fn load_agent_runs(
             &self,
             _b: BranchId,
-        ) -> assistd_memory::Result<HashMap<MessageId, Vec<PersistedRelayStep>>> {
+        ) -> assistd_memory::Result<HashMap<MessageId, Vec<PersistedAgentRun>>> {
             Ok(HashMap::new())
         }
         async fn list_branches(&self) -> assistd_memory::Result<Vec<BranchInfo>> {
