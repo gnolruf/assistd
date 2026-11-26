@@ -66,7 +66,7 @@ flowchart TB
 | `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, admission (the queue that grants every model lane, and the permits for background work), presence machine with the policy task that drives it from idle time and GPU contention, listen dispatcher, socket server, document index passes and the watches between them, page transcription while drowsy, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-documents` | Document text extraction (text, HTML, PDF, office files, e-books) and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
 | `assistd-embed`  | Embedding HTTP client + the worker that drains the semantic store's rows without a vector, as four backlogs; launch spec for its llama-server. | `config`, `memory`, `utils`                                                      |
-| `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`, `SearchKind`, `SearchPlace`); the in-memory image `Attachment`, its format check and capped file loader; `Access`, what a tool call reports it touched; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
+| `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`, `SearchKind`, `SearchPlace`); the in-memory image `Attachment`, its format check and capped file loader; `Access`, what a tool call reports it touched; `LlmEvent`, what an agent's run streams inside the daemon, and the `AgentId` that says which agent of a turn an event is from; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec and presets file + control plane + `PageTranscriber` for the OCR model. | `config`, `ipc`, `utils`                                                         |
 | `assistd-mcp`    | Sandboxed stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools. | `config`, `ipc`, `tools`, `utils`                                                |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `TaskStore` in `memory.db`, `SemanticStore` with its one search in the rebuildable `index.db` and `vectors.db`, and the `MessageChunker` backlog. | `ipc`, `utils`                                                                   |
@@ -475,12 +475,22 @@ home as it goes, so compaction and a cut-off run lose less.
 Its step ceiling is the main turn's: after 200 tool-calling steps, or a call
 repeated three times in a row, its tools are withdrawn and it is asked to
 answer from what it has, so a long task ends in a partial report rather than
-an error. While a relay runs, its plan, then each sub-agent's text, reasoning,
-context size, tool calls, results and compactions reach the client as
-`EventBody::Relay` progress, never the model. The TUI draws them as a compact
-block in place of the `relay` tool block, and `/agents` opens any sub-agent's
-full transcript. The backend is dropped when the run ends, so none of it
-reaches the main history. What the client was shown is stored with the
+an error. A sub-agent streams `LlmEvent`s as any agent does. The relay
+forwards each on the calling turn's own stream, wrapped in
+`LlmEvent::FromAgent` with the sub-agent's `AgentId` (numbered from 1 within
+the turn) and the id of the `relay` tool call that started it, and the
+`TurnDriver` sends it to the client as the same `Event` the main agent's
+would be, with that id in the event's `agent` field; an event without one is
+the turn's own agent's. So a sub-agent's text, reasoning, context size, tool
+calls, results, status notices and discarded steps (`StepDiscarded`, sent when
+a model step is cut off and runs again) reach the client, never the model.
+What is the relay's own stays an event of its tool call: `RelayPlanned` with
+the plan, `RelayStepStarted` naming the sub-agent a step was handed to, and
+`RelayStepEnded` with the answer file or the failure. The TUI draws a
+sub-agent's events with the code that draws a turn's, into that sub-agent's
+own transcript; the `relay` tool block shows a compact view of it and
+`/agents` opens it in full. The backend is dropped when the run ends, so none
+of it reaches the main history. What the client was shown is stored with the
 relay's tool result in `relay_steps` and `relay_entries`, never embedded, and
 replayed with branch history.
 

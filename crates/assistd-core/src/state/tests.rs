@@ -492,7 +492,7 @@ async fn dispatch_query_failed_step_ends_with_error_only() {
         "{events:?}"
     );
     assert!(
-        matches!(events.last(), Some(Event { id, body: EventBody::Error { .. } }) if id == "q-fail"),
+        matches!(events.last(), Some(Event { id, body: EventBody::Error { .. }, .. }) if id == "q-fail"),
         "{events:?}"
     );
 }
@@ -549,7 +549,7 @@ async fn dispatch_query_refuses_image_whose_content_does_not_match_its_mime() {
         "{err:?}"
     );
     assert!(
-        matches!(events.as_slice(), [Event { id, body: EventBody::Error { .. } }] if id == "q-html"),
+        matches!(events.as_slice(), [Event { id, body: EventBody::Error { .. }, .. }] if id == "q-html"),
         "{events:?}"
     );
 }
@@ -621,6 +621,7 @@ async fn dispatch_query_forwards_tool_call_and_result_events() {
             Event {
                 id,
                 body: EventBody::ToolResult { name, result },
+                ..
             } if id == "req-42" && name == "run" => Some(result.output.as_str()),
             _ => None,
         })
@@ -650,6 +651,7 @@ async fn completed_turn_broadcasts_a_generated_session_title() {
             if let Event {
                 id,
                 body: EventBody::SessionTitle { title, .. },
+                ..
             } = bus.recv().await.expect("bus open")
             {
                 return (id, title);
@@ -1181,9 +1183,9 @@ async fn query_turn_outlives_the_dispatch_envelope() {
     res.unwrap();
 
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, Event { id, body: EventBody::ToolResult { .. } } if id == "q")),
+        events.iter().any(
+            |e| matches!(e, Event { id, body: EventBody::ToolResult { .. }, .. } if id == "q")
+        ),
         "tool result never reached the client: {events:?}"
     );
     assert!(

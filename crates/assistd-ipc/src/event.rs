@@ -7,12 +7,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Component, ComponentReadiness, ConfirmSource, DocumentActivity, DocumentPass,
+    AgentId, Component, ComponentReadiness, ConfirmSource, DocumentActivity, DocumentPass,
     DocumentPassCounts, DocumentRootStatus, ListenPhase, McpServerState, McpTransportKind,
-    ModeRecommendation, PageTranscriptionStatus, PermissionMode, Plan, PresenceState, RelayEvent,
-    RelayStepRecord, SearchPlace, StartupComponent, StatusKind, StatusSeverity, TaskId, TaskName,
-    TaskPrompt, TaskQueueSnapshot, TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary,
-    TaskSpec, TokenRevocation, ToolReport, VoiceCaptureState,
+    ModeRecommendation, PageTranscriptionStatus, PermissionMode, Plan, PresenceState, RelayStepEnd,
+    RelayStepPlan, RelayStepRecord, SearchPlace, StartupComponent, StatusKind, StatusSeverity,
+    TaskId, TaskName, TaskPrompt, TaskQueueSnapshot, TaskRunId, TaskRunRecord, TaskRunState,
+    TaskRunSummary, TaskSpec, TokenRevocation, ToolReport, VoiceCaptureState,
 };
 
 /// Kinds of [`Event`] carried on the daemon-wide broadcast bus, selectable by a
@@ -22,6 +22,7 @@ use crate::{
 pub enum EventKind {
     Delta,
     ReasoningDelta,
+    StepDiscarded,
     ToolCall,
     ToolResult,
     Presence,
@@ -77,13 +78,18 @@ pub struct TurnStats {
     pub tokens: u64,
 }
 
-/// Daemon-to-client event, one JSON line: `id` beside the fields of `body`. A response stream
-/// ends with exactly one terminal [`EventBody::Done`] or [`EventBody::Error`]; a
-/// [`RequestBody::Subscribe`](crate::RequestBody::Subscribe) stream never ends.
+/// Daemon-to-client event, one JSON line: `id` and `agent` beside the fields of `body`. A
+/// response stream ends with exactly one terminal [`EventBody::Done`] or
+/// [`EventBody::Error`]; a [`RequestBody::Subscribe`](crate::RequestBody::Subscribe) stream
+/// never ends.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Event {
     /// The id of the request this event responds to.
     pub id: String,
+    /// The sub-agent of the turn whose output `body` is; `None` for the turn's own agent
+    /// and for every event that is not an agent's output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentId>,
     #[serde(flatten)]
     pub body: EventBody,
 }
@@ -92,6 +98,16 @@ impl Event {
     pub fn new(id: impl Into<String>, body: EventBody) -> Self {
         Self {
             id: id.into(),
+            agent: None,
+            body,
+        }
+    }
+
+    /// `body` as sub-agent `agent` of turn `id` streamed it.
+    pub fn from_agent(id: impl Into<String>, agent: AgentId, body: EventBody) -> Self {
+        Self {
+            id: id.into(),
+            agent: Some(agent),
             body,
         }
     }
@@ -106,6 +122,7 @@ impl Event {
         Some(match self.body {
             EventBody::Delta { .. } => EventKind::Delta,
             EventBody::ReasoningDelta { .. } => EventKind::ReasoningDelta,
+            EventBody::StepDiscarded => EventKind::StepDiscarded,
             EventBody::ToolCall { .. } => EventKind::ToolCall,
             EventBody::ToolResult { .. } => EventKind::ToolResult,
             EventBody::Presence { .. } => EventKind::Presence,
@@ -121,7 +138,9 @@ impl Event {
             EventBody::ChatFocus { .. } => EventKind::ChatFocus,
             EventBody::Readiness { .. } => EventKind::Readiness,
             EventBody::ContextSize { .. } => EventKind::ContextSize,
-            EventBody::Relay { .. } => EventKind::Relay,
+            EventBody::RelayPlanned { .. }
+            | EventBody::RelayStepStarted { .. }
+            | EventBody::RelayStepEnded { .. } => EventKind::Relay,
             EventBody::TaskQueue { .. } => EventKind::TaskQueue,
             EventBody::TaskReply { .. } => EventKind::TaskReply,
             EventBody::DocumentActivity { .. } => EventKind::DocumentActivity,
@@ -169,6 +188,9 @@ pub enum EventBody {
     Delta { text: String },
     /// Chunk of model reasoning, separate from the reply.
     ReasoningDelta { text: String },
+    /// The reply text and reasoning the agent streamed since its last tool call are void:
+    /// the model step that wrote them runs again or ends the turn without them.
+    StepDiscarded,
     /// The model invoked a tool.
     ToolCall {
         name: String,
@@ -296,8 +318,14 @@ pub enum EventBody {
         #[serde(default)]
         default_mode: PermissionMode,
     },
-    /// Progress of a relay running inside the turn's `relay` tool call.
-    Relay { event: RelayEvent },
+    /// The turn's running `relay` tool call validated its plan; a single-task relay is a
+    /// plan of one step.
+    RelayPlanned { steps: Vec<RelayStepPlan> },
+    /// Step `step` of the running relay's plan, counted from 1, handed its task to
+    /// `sub_agent`, whose output follows in events that carry it as their `agent`.
+    RelayStepStarted { step: u32, sub_agent: AgentId },
+    /// Step `step` of the running relay's plan ended.
+    RelayStepEnded { step: u32, end: RelayStepEnd },
     /// Tokens in the history as sent with the model request about to stream,
     /// and `total` the history has held, counting what compaction removed.
     ContextSize { tokens: u32, total: u32 },

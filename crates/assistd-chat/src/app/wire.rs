@@ -4,8 +4,8 @@
 use std::time::{Duration, Instant};
 
 use assistd_ipc::{
-    DocumentActivity, Event, EventBody, ListenPhase, PresenceState, RelayEvent, RelayStepRecord,
-    Role, StartupComponent, StatusKind, StatusSeverity, ToolReport, TurnStats, VoiceCaptureState,
+    DocumentActivity, Event, EventBody, ListenPhase, PresenceState, RelayStepRecord, Role,
+    StartupComponent, StatusKind, TurnStats, VoiceCaptureState,
 };
 use assistd_utils::time::saturating_millis;
 use serde_json::Value;
@@ -147,6 +147,10 @@ impl App {
         if matches!(stream, WireStream::Reply) && !self.accept_reply_event(&ev) {
             return;
         }
+        if let Some(agent) = ev.agent {
+            self.output.apply_sub_agent_event(agent, ev.body);
+            return;
+        }
         let now = Instant::now();
         match ev.body {
             EventBody::Done => self.finish_stream(stream, now),
@@ -156,9 +160,12 @@ impl App {
             }
             turn @ (EventBody::Delta { .. }
             | EventBody::ReasoningDelta { .. }
+            | EventBody::StepDiscarded
             | EventBody::ToolCall { .. }
             | EventBody::ToolResult { .. }
-            | EventBody::Relay { .. }
+            | EventBody::RelayPlanned { .. }
+            | EventBody::RelayStepStarted { .. }
+            | EventBody::RelayStepEnded { .. }
             | EventBody::ConfirmRequest { .. }
             | EventBody::PlanReview { .. }
             | EventBody::PlanModeEntered
@@ -215,18 +222,6 @@ impl App {
     fn on_turn_event(&mut self, body: EventBody) {
         self.queued_behind = None;
         match body {
-            EventBody::Delta { text } => {
-                self.output.finish_thinking();
-                self.tokens.on_delta();
-                self.output.append_assistant(&text);
-            }
-            EventBody::ReasoningDelta { text } => {
-                self.tokens.on_delta();
-                self.output.append_thinking(&text);
-            }
-            EventBody::ToolCall { args, name } => self.on_tool_call(name, &args),
-            EventBody::ToolResult { result, .. } => self.on_tool_result(result),
-            EventBody::Relay { event } => self.on_relay_event(event),
             EventBody::ConfirmRequest {
                 confirm_id,
                 tool,
@@ -250,26 +245,15 @@ impl App {
                 self.set_notice("no speech detected");
             }
             EventBody::Transcription { text } => self.begin_turn(&text, &[]),
-            _ => {}
-        }
-    }
-
-    fn on_tool_call(&mut self, name: String, args: &Value) {
-        self.output.finish_thinking();
-        self.output
-            .begin_tool_block(tool_block_label(name, Some(args)));
-    }
-
-    fn on_tool_result(&mut self, result: ToolReport) {
-        self.output
-            .finish_tool_block(result.output, result.exit_code, result.duration_ms);
-    }
-
-    /// Draw a relay's progress inside the running `relay` tool block.
-    fn on_relay_event(&mut self, event: RelayEvent) {
-        match event {
-            RelayEvent::Planned { steps } => self.output.begin_relay(steps),
-            event => self.output.apply_relay(event),
+            output => {
+                if matches!(
+                    output,
+                    EventBody::Delta { .. } | EventBody::ReasoningDelta { .. }
+                ) {
+                    self.tokens.on_delta();
+                }
+                self.output.apply_agent_event(output);
+            }
         }
     }
 
@@ -301,34 +285,17 @@ impl App {
                 ..
             } => self.compacting_soon = true,
             EventBody::Status {
-                event: StatusKind::HistoryCompacted,
-                ..
-            } => self.output.finish_compaction(),
-            EventBody::Status {
                 severity,
                 component,
                 event,
                 message,
             } => {
-                self.set_notice(&message);
-                match event {
-                    StatusKind::Restarting => {
-                        self.close_discarded_step(&format!("[{component} restarting…]"));
-                    }
-                    StatusKind::CompactingHistory => {
-                        self.compacting_soon = false;
-                        self.output.begin_compaction();
-                    }
-                    StatusKind::OutputTruncated => {
-                        self.close_discarded_step(&format!(
-                            "[{component} response hit the token limit; retrying…]"
-                        ));
-                    }
-                    _ if severity == StatusSeverity::Error => {
-                        self.output.push_info(&format!("[{component}: {message}]"));
-                    }
-                    _ => {}
+                if event != StatusKind::HistoryCompacted {
+                    self.set_notice(&message);
                 }
+                self.compacting_soon &= event != StatusKind::CompactingHistory;
+                self.output
+                    .show_status(severity, component, event, &message);
             }
             _ => {}
         }
@@ -345,13 +312,6 @@ impl App {
         if came_up {
             self.spawn_capabilities_refresh();
         }
-    }
-
-    /// Close the streamed blocks of a step the daemon discarded, then say why.
-    fn close_discarded_step(&mut self, info: &str) {
-        self.output.finish_thinking();
-        self.output.finish_assistant();
-        self.output.push_info(info);
     }
 
     /// Branch and session responses.
@@ -637,22 +597,30 @@ impl App {
 fn turn_scoped_id(ev: &Event) -> Option<&str> {
     match ev {
         Event {
+            id, agent: Some(_), ..
+        } => Some(id),
+        Event {
             id,
             body:
                 EventBody::Delta { .. }
                 | EventBody::ReasoningDelta { .. }
+                | EventBody::StepDiscarded
                 | EventBody::ToolCall { .. }
                 | EventBody::ToolResult { .. }
-                | EventBody::Relay { .. }
+                | EventBody::RelayPlanned { .. }
+                | EventBody::RelayStepStarted { .. }
+                | EventBody::RelayStepEnded { .. }
                 | EventBody::ConfirmRequest { .. }
                 | EventBody::PlanReview { .. }
                 | EventBody::PlanModeEntered
                 | EventBody::Done
                 | EventBody::Error { .. },
+            ..
         } => Some(id),
         Event {
             id,
             body: EventBody::Transcription { text },
+            ..
         } => (!text.trim().is_empty()).then_some(id.as_str()),
         _ => None,
     }

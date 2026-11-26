@@ -7,11 +7,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use assistd_config::{ChatConfig, ModelConfig};
-use assistd_ipc::Attachment;
+use assistd_ipc::{Attachment, CompactionCut};
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
@@ -191,15 +190,6 @@ pub struct AssistantMessage {
     /// Reasoning behind `tool_calls`, sent back with them.
     pub reasoning: String,
     pub tool_calls: Vec<ToolCallRecord>,
-}
-
-/// What a compaction summary leaves of the history: its `kept_turns`
-/// newest user turns, the oldest of them cut to its `kept_steps` newest tool
-/// steps when its earlier steps were folded into its call log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompactionCut {
-    pub kept_turns: NonZeroUsize,
-    pub kept_steps: Option<NonZeroUsize>,
 }
 
 /// A summary to write by continuing the history itself, so the server

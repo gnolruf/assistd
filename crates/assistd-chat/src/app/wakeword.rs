@@ -130,7 +130,7 @@ impl App {
     /// Route an event answering a `/wakeword` request. Copies of these
     /// events on the bus never reach here.
     pub(super) fn on_wake_word_event(&mut self, stream: WakeWordStream, ev: Event) {
-        let Event { id, body } = ev;
+        let Event { id, body, .. } = ev;
         match body {
             EventBody::WakeWordStatus { phrase, listening } => {
                 let status = WakeWordStatus { phrase, listening };

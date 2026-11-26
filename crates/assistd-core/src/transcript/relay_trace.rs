@@ -1,11 +1,11 @@
-//! A relay's sub-agent trace: recorded from the progress its tool call streams,
+//! A relay's sub-agent trace: recorded from what its tool call and its sub-agents stream,
 //! stored with the call's tool result, and replayed with branch history.
 
 use std::time::Instant;
 
 use assistd_ipc::{
-    RelayEvent, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayToolOutcome,
-    RelayTraceEntry, ToolReport,
+    AgentId, LlmEvent, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun,
+    RelayToolOutcome, RelayTraceEntry, StatusKind, ToolReport,
 };
 use assistd_memory::{
     PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, PersistedRelayStep, ToolOutcome,
@@ -28,11 +28,15 @@ struct StepBuilder {
     entries: Vec<PersistedRelayEntry>,
     /// When the reasoning entry being streamed began.
     reasoning_since: Option<Instant>,
+    /// When the compaction entry still unfinished began.
+    compacting_since: Option<Instant>,
 }
 
 enum StepProgress {
     Pending,
+    /// Sub-agent `agent` is running it.
     Running {
+        agent: AgentId,
         started_at: Instant,
     },
     Ended {
@@ -48,28 +52,43 @@ impl RelayTraceBuilder {
         }
     }
 
-    /// Record `event` against the step it belongs to; a new plan starts over.
-    pub(crate) fn record(&mut self, event: &RelayEvent) {
-        match event {
-            RelayEvent::Planned { steps } => *self = Self::planned(steps),
-            RelayEvent::Started { step } => {
-                let index = usize::try_from(*step).ok().and_then(|s| s.checked_sub(1));
-                if let Some(step) = index.and_then(|i| self.steps.get_mut(i)) {
-                    step.progress = StepProgress::Running {
-                        started_at: Instant::now(),
-                    };
-                }
-            }
-            event => {
-                let running = self
-                    .steps
-                    .iter_mut()
-                    .find(|step| matches!(step.progress, StepProgress::Running { .. }));
-                if let Some(step) = running {
-                    step.record(event);
-                }
-            }
+    /// Hand step `step`, counted from 1, to sub-agent `agent`; an unknown step is ignored.
+    pub(crate) fn start(&mut self, step: u32, agent: AgentId) {
+        if let Some(step) = self.step_mut(step) {
+            step.progress = StepProgress::Running {
+                agent,
+                started_at: Instant::now(),
+            };
         }
+    }
+
+    /// End step `step`, counted from 1, if it is running.
+    pub(crate) fn end(&mut self, step: u32, end: &RelayStepEnd) {
+        if let Some(step) = self.step_mut(step) {
+            step.end(match end {
+                RelayStepEnd::Answered { answer_file } => PersistedRelayEnd::Answered {
+                    answer_file: answer_file.clone(),
+                },
+                RelayStepEnd::Failed { message } => PersistedRelayEnd::Failed {
+                    message: message.clone(),
+                },
+            });
+        }
+    }
+
+    /// Record `event` against the step sub-agent `agent` is running, if any.
+    pub(crate) fn record(&mut self, agent: AgentId, event: &LlmEvent) {
+        let running = self.steps.iter_mut().find(|step| {
+            matches!(step.progress, StepProgress::Running { agent: runner, .. } if runner == agent)
+        });
+        if let Some(step) = running {
+            step.record(event);
+        }
+    }
+
+    fn step_mut(&mut self, step: u32) -> Option<&mut StepBuilder> {
+        let index = usize::try_from(step).ok()?.checked_sub(1)?;
+        self.steps.get_mut(index)
     }
 
     /// The steps as stored; one still running is stored as stopped.
@@ -87,32 +106,47 @@ impl StepBuilder {
             tokens: None,
             entries: Vec::new(),
             reasoning_since: None,
+            compacting_since: None,
         }
     }
 
-    fn record(&mut self, event: &RelayEvent) {
+    fn record(&mut self, event: &LlmEvent) {
         match event {
-            RelayEvent::Planned { .. } | RelayEvent::Started { .. } => {}
-            RelayEvent::Delta { text } => self.push_text(text),
-            RelayEvent::ReasoningDelta { text } => self.push_reasoning(text),
-            RelayEvent::ContextSize { total } => self.tokens = Some(*total),
-            RelayEvent::ToolCall { name, args } => self.entries.push(PersistedRelayEntry::Tool {
+            LlmEvent::Delta { text } => self.push_text(text),
+            LlmEvent::ReasoningDelta { text } => self.push_reasoning(text),
+            LlmEvent::StepDiscarded => self.discard_step(),
+            LlmEvent::ContextSize { total, .. } => self.tokens = Some(*total),
+            LlmEvent::ToolCall {
+                name, arguments, ..
+            } => self.entries.push(PersistedRelayEntry::Tool {
                 name: name.clone(),
-                arguments: args.clone(),
+                arguments: arguments.clone(),
                 output: String::new(),
                 outcome: None,
             }),
-            RelayEvent::ToolResult { result, .. } => self.finish_tool(result),
-            RelayEvent::Compacting => self
-                .entries
-                .push(PersistedRelayEntry::Compaction { duration_ms: None }),
-            RelayEvent::Compacted { duration_ms } => self.finish_compaction(*duration_ms),
-            RelayEvent::Answered { answer_file, .. } => self.end(PersistedRelayEnd::Answered {
-                answer_file: answer_file.clone(),
-            }),
-            RelayEvent::Failed { message } => self.end(PersistedRelayEnd::Failed {
-                message: message.clone(),
-            }),
+            LlmEvent::ToolResult { result, .. } => self.finish_tool(result),
+            LlmEvent::Status {
+                event: StatusKind::CompactingHistory,
+                ..
+            } => {
+                self.compacting_since = Some(Instant::now());
+                self.entries
+                    .push(PersistedRelayEntry::Compaction { duration_ms: None });
+            }
+            LlmEvent::Status {
+                event: StatusKind::HistoryCompacted,
+                ..
+            } => self.finish_compaction(),
+            _ => {}
+        }
+    }
+
+    /// Drop the text and reasoning of the step in flight, which follow every other entry.
+    fn discard_step(&mut self) {
+        while let Some(PersistedRelayEntry::Text(_) | PersistedRelayEntry::Reasoning { .. }) =
+            self.entries.last()
+        {
+            self.entries.pop();
         }
     }
 
@@ -165,20 +199,21 @@ impl StepBuilder {
         }
     }
 
-    fn finish_compaction(&mut self, took_ms: u64) {
+    /// Time the latest unfinished compaction from its announcement.
+    fn finish_compaction(&mut self) {
         let unfinished = self.entries.iter_mut().rev().find_map(|entry| match entry {
             PersistedRelayEntry::Compaction { duration_ms } if duration_ms.is_none() => {
                 Some(duration_ms)
             }
             _ => None,
         });
-        if let Some(duration_ms) = unfinished {
-            *duration_ms = Some(took_ms);
+        if let (Some(duration_ms), Some(since)) = (unfinished, self.compacting_since.take()) {
+            *duration_ms = Some(saturating_millis(since.elapsed()));
         }
     }
 
     fn end(&mut self, end: PersistedRelayEnd) {
-        if let StepProgress::Running { started_at } = self.progress {
+        if let StepProgress::Running { started_at, .. } = self.progress {
             self.progress = StepProgress::Ended {
                 end,
                 duration_ms: saturating_millis(started_at.elapsed()),
@@ -189,7 +224,7 @@ impl StepBuilder {
     fn finish(self) -> PersistedRelayStep {
         let ended = match self.progress {
             StepProgress::Pending => None,
-            StepProgress::Running { started_at } => Some((
+            StepProgress::Running { started_at, .. } => Some((
                 PersistedRelayEnd::Failed {
                     message: STOPPED_MESSAGE.into(),
                 },
@@ -225,7 +260,7 @@ pub(crate) fn wire_relay_steps(steps: Vec<PersistedRelayStep>) -> Vec<RelayStepR
 fn wire_relay_run(run: PersistedRelayRun) -> RelayStepRun {
     RelayStepRun {
         end: match run.end {
-            PersistedRelayEnd::Answered { .. } => RelayStepEnd::Answered,
+            PersistedRelayEnd::Answered { answer_file } => RelayStepEnd::Answered { answer_file },
             PersistedRelayEnd::Failed { message } => RelayStepEnd::Failed { message },
         },
         duration_ms: run.duration_ms,
@@ -262,6 +297,7 @@ fn wire_relay_entry(entry: PersistedRelayEntry) -> RelayTraceEntry {
 
 #[cfg(test)]
 mod tests {
+    use assistd_ipc::{Component, StatusSeverity};
     use serde_json::json;
 
     use super::*;
@@ -282,50 +318,76 @@ mod tests {
             .collect()
     }
 
+    fn delta(text: &str) -> LlmEvent {
+        LlmEvent::Delta { text: text.into() }
+    }
+
+    fn reasoning(text: &str) -> LlmEvent {
+        LlmEvent::ReasoningDelta { text: text.into() }
+    }
+
+    fn tool_call(command: &str) -> LlmEvent {
+        LlmEvent::ToolCall {
+            id: "c".into(),
+            name: "run".into(),
+            arguments: json!({ "command": command }),
+        }
+    }
+
+    fn compacting() -> LlmEvent {
+        LlmEvent::Status {
+            severity: StatusSeverity::Info,
+            component: Component::Llm,
+            event: StatusKind::CompactingHistory,
+            message: String::new(),
+        }
+    }
+
     #[test]
-    fn trace_merges_deltas_pairs_results_and_stores_an_unfinished_step_as_stopped() {
+    fn trace_merges_deltas_pairs_results_drops_a_discarded_step_and_stores_an_unfinished_step_as_stopped()
+     {
         let mut trace = RelayTraceBuilder::planned(&plan());
-        let events = [
-            RelayEvent::Started { step: 1 },
-            RelayEvent::ReasoningDelta {
-                text: "grep ".into(),
-            },
-            RelayEvent::ReasoningDelta {
-                text: "first".into(),
-            },
-            RelayEvent::ToolCall {
+        let (first, second) = (AgentId(1), AgentId(2));
+        let first_events = [
+            reasoning("grep "),
+            reasoning("first"),
+            tool_call("grep -rn x /in"),
+            LlmEvent::ToolResult {
+                id: "c".into(),
                 name: "run".into(),
-                args: json!({"command": "grep -rn x /in"}),
-            },
-            RelayEvent::ToolResult {
-                name: "run".into(),
-                result: ToolReport {
+                result: Box::new(ToolReport {
                     output: "none".into(),
                     exit_code: 1,
                     duration_ms: 12,
                     ..ToolReport::default()
-                },
+                }),
+                read_host: false,
+                accesses: Vec::new(),
             },
-            RelayEvent::Delta {
-                text: "Nothing ".into(),
+            reasoning("cut off"),
+            delta("Nothi"),
+            LlmEvent::StepDiscarded,
+            delta("Nothing "),
+            delta("found."),
+            LlmEvent::ContextSize {
+                tokens: 3000,
+                total: 4100,
             },
-            RelayEvent::Delta {
-                text: "found.".into(),
-            },
-            RelayEvent::ContextSize { total: 4100 },
-            RelayEvent::Answered {
-                answer_chars: 14,
-                tool_steps: 1,
+        ];
+        trace.start(1, first);
+        first_events
+            .iter()
+            .for_each(|event| trace.record(first, event));
+        trace.end(
+            1,
+            &RelayStepEnd::Answered {
                 answer_file: "/data/relay-1.txt".into(),
             },
-            RelayEvent::Started { step: 2 },
-            RelayEvent::ToolCall {
-                name: "run".into(),
-                args: json!({"command": "cat /in/a"}),
-            },
-            RelayEvent::Compacting,
-        ];
-        events.iter().for_each(|event| trace.record(event));
+        );
+        trace.record(first, &delta("after its end"));
+        trace.start(2, second);
+        trace.record(second, &tool_call("cat /in/a"));
+        trace.record(second, &compacting());
         let steps = trace.finish();
 
         let first = steps[0].run.as_ref().expect("step 1 ran");

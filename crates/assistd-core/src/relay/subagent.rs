@@ -1,22 +1,20 @@
-//! One sub-agent's run as the relay sees it: its events shown to the calling turn, what
-//! it wrote saved to a file, and its outcome as a [`RelayReport`].
+//! One sub-agent's run as the relay sees it: its events streamed on the calling turn's
+//! stream, what it wrote saved to a file, and its outcome as a [`RelayReport`].
 
 use std::fs::{DirBuilder, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use assistd_ipc::{RelayEvent, StatusKind};
+use assistd_ipc::AgentId;
 use assistd_llm::{LlmError, LlmEvent};
 use assistd_tools::TurnContext;
 use assistd_tools::policy::on_blocking_pool;
-use assistd_utils::time::saturating_millis;
 
 use super::report::{RelayReport, RelayStatus, Shortfall, saved_answer};
 use crate::agent::{Agent, AgentEnd, AgentOutcome};
@@ -45,32 +43,30 @@ pub(super) enum SubAgentError {
 }
 
 /// Run `child` on `task` until it ends or `cancel` fires, and drop it. `turn`, the calling
-/// turn, answers the run's prompts and is shown its text and tool calls.
+/// turn, answers the run's prompts and streams its events as sub-agent `agent`'s.
 pub(super) async fn run_shown(
     child: Agent,
     task: String,
     cancel: CancellationToken,
     turn: &TurnContext,
+    agent: AgentId,
 ) -> AgentOutcome {
     let (tx, rx) = mpsc::channel(EVENT_BUFFER);
-    let (outcome, ()) = tokio::join!(child.run(task, turn, tx, cancel), show_run(rx, turn));
+    let (outcome, ()) = tokio::join!(
+        child.run(task, turn, tx, cancel),
+        stream_run(rx, turn, agent)
+    );
     outcome
 }
 
-/// The report of a run that ended with `outcome`: what it wrote is saved to the new file
-/// `answer_file` and `turn` is told it answered. A run that failed after streaming text
-/// reports that text as partial; one that streamed none, or was cancelled, is an error.
+/// The report of a run that ended with `outcome`, what it wrote saved to the new file
+/// `answer_file`. A run that failed after streaming text reports that text as partial; one
+/// that streamed none, or was cancelled, is an error.
 pub(super) async fn report_of(
     outcome: AgentOutcome,
     answer_file: PathBuf,
-    turn: &TurnContext,
 ) -> Result<RelayReport, SubAgentError> {
-    let AgentOutcome {
-        end,
-        written,
-        tool_steps,
-        ..
-    } = outcome;
+    let AgentOutcome { end, written, .. } = outcome;
     let status = match end {
         AgentEnd::Answered => RelayStatus::Done,
         AgentEnd::ToolsWithdrawn => RelayStatus::Partial(Shortfall::ToolsWithdrawn),
@@ -81,14 +77,7 @@ pub(super) async fn report_of(
             RelayStatus::Partial(Shortfall::of(&error))
         }
     };
-    let saved = saved_answer(&written);
-    let answer_file = save_answer(saved.contents, answer_file).await?;
-    turn.report_relay(RelayEvent::Answered {
-        answer_chars: u32::try_from(saved.chars).unwrap_or(u32::MAX),
-        tool_steps,
-        answer_file: answer_file.clone(),
-    })
-    .await;
+    let answer_file = save_answer(saved_answer(&written), answer_file).await?;
     Ok(RelayReport::new(status, written.message, answer_file))
 }
 
@@ -117,47 +106,27 @@ fn write_new_file(path: &Path, contents: &[u8]) -> io::Result<()> {
         .write_all(contents)
 }
 
-/// Show `turn` what the run streams until it ends.
-async fn show_run(mut rx: mpsc::Receiver<LlmEvent>, turn: &TurnContext) {
-    let mut compacting_since = None;
+/// Stream what the run streams on `turn`'s stream as `agent`'s until it ends. Tool results
+/// go without their attachments.
+async fn stream_run(mut rx: mpsc::Receiver<LlmEvent>, turn: &TurnContext, agent: AgentId) {
     while let Some(event) = rx.recv().await {
-        if let Some(shown) = relay_event_of(event, &mut compacting_since) {
-            turn.report_relay(shown).await;
-        }
-    }
-}
-
-/// What the user is shown of `event`, timing a compaction from the
-/// announcement that starts it to the one that ends it.
-fn relay_event_of(event: LlmEvent, compacting_since: &mut Option<Instant>) -> Option<RelayEvent> {
-    match event {
-        LlmEvent::Delta { text } => Some(RelayEvent::Delta { text }),
-        LlmEvent::ReasoningDelta { text } => Some(RelayEvent::ReasoningDelta { text }),
-        LlmEvent::ContextSize { total, .. } => Some(RelayEvent::ContextSize { total }),
-        LlmEvent::ToolCall {
-            name, arguments, ..
-        } => Some(RelayEvent::ToolCall {
-            name,
-            args: arguments,
-        }),
-        LlmEvent::ToolResult { name, result, .. } => Some(RelayEvent::ToolResult {
-            name,
-            result: result.without_attachments(),
-        }),
-        LlmEvent::Status {
-            event: StatusKind::CompactingHistory,
-            ..
-        } => {
-            *compacting_since = Some(Instant::now());
-            Some(RelayEvent::Compacting)
-        }
-        LlmEvent::Status {
-            event: StatusKind::HistoryCompacted,
-            ..
-        } => compacting_since.take().map(|since| RelayEvent::Compacted {
-            duration_ms: saturating_millis(since.elapsed()),
-        }),
-        _ => None,
+        let event = match event {
+            LlmEvent::ToolResult {
+                id,
+                name,
+                result,
+                read_host,
+                accesses,
+            } => LlmEvent::ToolResult {
+                id,
+                name,
+                result: Box::new(result.without_attachments()),
+                read_host,
+                accesses,
+            },
+            event => event,
+        };
+        turn.emit_from(agent, event).await;
     }
 }
 
@@ -217,8 +186,9 @@ mod tests {
             SlotAssignment::Unassigned,
         );
         let turn = TurnContext::default();
-        let outcome = run_shown(host.child(definition)?, "task".into(), cancel, &turn).await;
-        report_of(outcome, answer_file, &turn).await
+        let child = host.child(definition)?;
+        let outcome = run_shown(child, "task".into(), cancel, &turn, AgentId(1)).await;
+        report_of(outcome, answer_file).await
     }
 
     #[tokio::test]

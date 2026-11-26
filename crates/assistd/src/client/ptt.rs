@@ -15,6 +15,9 @@ pub(crate) async fn run(with_id: fn(String) -> Request) -> Result<()> {
     let mut stdout = io::stdout().lock();
     let mut wrote_delta = false;
     run_one_shot(req, |event| {
+        if event.agent.is_some() {
+            return Ok(());
+        }
         match &event.body {
             EventBody::VoiceState { state } => {
                 writeln!(io::stderr(), "[voice: {}]", voice_state_label(*state))?;

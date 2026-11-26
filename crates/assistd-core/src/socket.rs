@@ -1002,7 +1002,7 @@ mod tests {
             assert!(
                 matches!(
                     events.as_slice(),
-                    [Event { id, body: EventBody::Error { message } }]
+                    [Event { id, body: EventBody::Error { message }, .. }]
                         if id.is_empty() && message.starts_with("invalid request: ")
                 ),
                 "{events:?}"
@@ -1383,7 +1383,7 @@ mod tests {
             let mut outputs = Vec::new();
             let run = async {
                 while let Some(ev) = read_event(&mut reader).await {
-                    if let Event { id, body: EventBody::ConfirmRequest { confirm_id, .. } } = &ev {
+                    if let Event { id, body: EventBody::ConfirmRequest { confirm_id, .. }, .. } = &ev {
                         assert_eq!(id, "q1");
                         let answer = format!(
                             "{{\"type\":\"confirm_response\",\"id\":\"cr\",\"confirm_id\":\"{confirm_id}\",\"allow\":true}}\n"

@@ -136,7 +136,7 @@ impl TrayTracker {
     /// Returns `true` when the resolved [`TrayState`] changed.
     pub(super) fn ingest(&mut self, event: &Event) -> bool {
         let before = self.current();
-        let Event { id, body } = event;
+        let Event { id, body, .. } = event;
         match body {
             EventBody::Delta { .. }
             | EventBody::ReasoningDelta { .. }
