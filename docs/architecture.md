@@ -446,9 +446,13 @@ One per-query state machine, single-threaded per turn. The loop:
    stays in the request so a call made anyway is still parsed (and ends
    the turn) rather than streamed to the user as raw markup.
 
-An agent is an `AgentDefinition` (its system prompt, its tools, the step
-ceiling and duplicate-call limit above, and the server slot it takes) over a
-history. The main agent, a task run, a refine's planning turn and each relay
+An agent is an `AgentDefinition` (its system prompt, its `Permissions`, its
+tools, the step ceiling and duplicate-call limit above, and the server slot it
+takes) over a history. `Permissions` says what the agent may reach: files, the
+web, the index of stored text, and MCP servers, all of them or the ones named.
+The main agent's holds everything and its tools are assembled by
+`build_tools`; a sub-agent's tools, prompt and host-read rule are derived from
+its own. The main agent, a task run, a refine's planning turn and each relay
 role are values of that type, and `Agent::run` is the only way a turn runs:
 it returns an `AgentOutcome` saying how the turn ended (answered, tools
 withdrawn, interrupted or failed), what the model wrote, how many steps
@@ -602,14 +606,20 @@ The model starts a sub-agent with the `relay` tool (`task`, `inputs`,
 `agent`, or `steps`: a plan of up to five such steps), registered in
 `assistd-core` beside `run` whenever tools are. `agent` names a `Role`: its
 name, when the model should pick it, a brief opening its system prompt, and
-its `Reach`, either files or the web, never both. The roles are built in and
-fixed: `file_review` reaches files, seeing its `inputs` read-only with no
-network; `web_research` reaches the web, getting an `Egress` and no inputs.
+its `Permissions`. Each permission adds to the sub-agent's registry and a
+sentence to its prompt: `files` has it handed `inputs`, `web` gives its
+quarantine an `Egress`, `index` adds the main agent's `docs` and `search`
+commands (which also rank past sessions), and each MCP server named adds that
+server's tools out of those the calling agent is offered, with the prompts
+and output cap they have there. An MCP server reachable from a quarantine is a
+way out of it, so a role names servers one by one. The roles are built in and
+fixed: `file_review` holds `files` alone, seeing its `inputs` read-only with no
+network; `web_research` holds `web` alone; `file_web_research` holds both. No
+built-in role holds `index` or an MCP server.
 The tool's schema and description list the roles, and the wire and the
-database carry a step's role by name. A web step naming inputs is refused as
-invalid arguments before a quarantine or backend exists, since a relay
-that could both see private files and reach the network could leak them, and
-a web step's quarantine is never handed inputs. Every file step's inputs are
+database carry a step's role by name. A step naming inputs for a role without
+`files`, or sites for one without `web`, is refused as invalid arguments
+before a quarantine or backend exists. Every file step's inputs are
 checked before the first step starts: a missing input, one that is neither a
 file nor a directory, or two sharing a file name refuse the whole plan, so a
 mistake in a late step costs no earlier step's work. A file step is also
@@ -622,12 +632,14 @@ rather than reads its inputs through) skips the check. The tool description
 states the budget and asks for relays of about half of it, one per natural part
 such as a crate or module, with independent parts requested together. Each call
 creates a fresh `Quarantine` under `~/.cache/assistd/relays` (emptied at daemon
-start), gives the sub-agent a registry holding only `run` over the quarantine's
-commands, and runs it inside `SlotStash::preserve_across`. A plan's steps run
+start), gives the sub-agent a registry holding `run` over the quarantine's
+commands and whatever its permissions add, and runs it inside `SlotStash::preserve_across`. A plan's steps run
 back to back inside one `preserve_across`, each in its own quarantine and
 handed only the previous step's rendered `RelayReport` beneath its task and
-its saved answer as an extra input. Since a report carries what its sub-agent
-read, a plan with a web step after a file step is refused as invalid arguments.
+its saved answer as an extra input. A report carries what its sub-agent
+read, so a step that follows one whose history read this machine starts as
+having read it too: a web step after a file step is allowed, and asks before
+each fetch.
 The tool result is the last step's rendered `RelayReport`; a failed step ends
 the plan as a failed tool result, not a failed turn. A relay starts without confirmation, unless it has a
 web step and the calling turn's history has read this machine; commands inside it ask
@@ -973,8 +985,14 @@ user's turns keep one between them. Each tool result is saved with whether its
 call read this machine (`messages.tool_read_host`), decided by the tools the
 call ran on, and when another branch becomes active the record is read back
 from that branch's saved results; a task run starts with a new
-one; a sub-agent's reads are not recorded, since its quarantine holds files or
-the web, never both. Host-level trust remains for a history that has only
+one. A sub-agent follows the same rule over its own history: one whose
+quarantine holds this machine's data (inputs, the index or an MCP server) gets
+a `HostReads` of its own, so with `web` as well it fetches as a web-only
+sub-agent does until a command other than `web` runs, and after that every
+fetch asks, showing the URL, with no "always allow". One handed the report of
+a step that read this machine starts with its record set, and one whose
+quarantine holds nothing of this machine's has none, so reading its own notes
+never counts. Host-level trust remains for a history that has only
 searched and fetched, which can still send what the user typed, recalled
 memories and the window title to an approved host, and `web search` queries
 reach SearXNG's search engines unasked.

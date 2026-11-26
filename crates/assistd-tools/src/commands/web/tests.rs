@@ -185,7 +185,7 @@ async fn approved_host_asks_about_each_url_once_the_turn_has_read_this_machine()
     assert!(request.always_allow.is_empty());
     assert_eq!(request.unattended, Unattended::Never);
 
-    let quarantined = fetch_in(&cmd, url, turn.quarantined()).await;
+    let quarantined = fetch_in(&cmd, url, turn.quarantined(None)).await;
     assert_ne!(
         quarantined.exit_code,
         POLICY_DENIED_EXIT,

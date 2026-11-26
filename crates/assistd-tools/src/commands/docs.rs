@@ -186,7 +186,7 @@ impl Excerpt {
 
 /// `docs read`: prints the text stored for an indexed document, as much as fits a
 /// result at a time, after a header marking it as untrusted data.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DocsCommand {
     recall: Arc<dyn RecallStore>,
     read_room: ReadRoom,

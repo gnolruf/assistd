@@ -223,6 +223,8 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
             gate: Arc::clone(&confirmation_gate),
             hosts: approved_hosts.clone(),
             search: search.clone(),
+            docs: stored_text.docs_command(),
+            stored_search: stored_text.search_command(),
             output: config.tools.output.clone(),
         },
     );

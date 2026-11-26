@@ -111,7 +111,7 @@ impl Searched {
 /// `search`: ranks past sessions, the files and pages they touched, saved memories and
 /// indexed documents together by a query's meaning and words, or the messages of one
 /// past session, each shown in its exchange. What it prints follows a header marking it as untrusted data.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SearchCommand {
     embedder: Arc<EmbedderHandle>,
     recall: Arc<dyn RecallStore>,
