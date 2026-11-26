@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use assistd_utils::hf::InvalidHfId;
 use thiserror::Error;
 
+use crate::agents::{MAX_AGENT_FILE_BYTES, MAX_AGENT_NAME_BYTES};
+
 /// Errors produced while loading, writing, or validating configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -173,6 +175,75 @@ pub enum ConfigIssue {
         own_dir.display()
     )]
     DocumentRootOverlapsOwnDir { root: PathBuf, own_dir: PathBuf },
+}
+
+/// An agent file that was not loaded, and why.
+#[derive(Debug, Error)]
+#[error("agent file {}: {issue}", path.display())]
+pub struct AgentFileError {
+    pub path: PathBuf,
+    #[source]
+    pub issue: AgentFileIssue,
+}
+
+/// Why an agent file was refused.
+#[derive(Debug, Error)]
+pub enum AgentFileIssue {
+    #[error("cannot be read: {0}")]
+    Read(#[source] std::io::Error),
+
+    #[error(
+        "holds {bytes} bytes, more than the {} an agent file may",
+        MAX_AGENT_FILE_BYTES
+    )]
+    TooLarge { bytes: u64 },
+
+    #[error(
+        "the file name `{name}` is not an agent name: start with a lowercase letter and use only \
+         lowercase letters, digits and `_`, {} bytes at most",
+        MAX_AGENT_NAME_BYTES
+    )]
+    InvalidName { name: String },
+
+    #[error("`{0}` is a built-in agent, which a file may not replace: rename the file")]
+    BuiltInName(String),
+
+    #[error("does not parse as TOML{}: {message}", at_line(*.line))]
+    Parse {
+        line: Option<usize>,
+        message: String,
+    },
+
+    #[error("`description` must say when to pick this agent")]
+    BlankDescription,
+
+    #[error("`capabilities` lists `{0}`, which is not one of `files`, `web` and `index`")]
+    UnknownCapability(String),
+
+    #[error("`commands` lists `{0}`, which is not a command a sub-agent can run")]
+    UnknownCommand(String),
+
+    #[error("`mcp_servers` lists `{0}`, which is not the name of an `[[mcp.servers]]` entry")]
+    UnknownMcpServer(String),
+
+    #[error("`sites` lists `{0}`, which is not a host name such as `docs.rs`")]
+    NotAHost(String),
+
+    #[error("`sites` needs `web` in `capabilities`: this agent has no network")]
+    SitesWithoutWeb,
+
+    #[error("`{field}` ({value}) must be at most the daemon's own limit of {max}")]
+    LimitAboveDaemon {
+        field: &'static str,
+        value: u32,
+        max: u32,
+    },
+
+    #[error(
+        "the thinking limit ({thinking}) must be below the reply limit ({reply}): set \
+         `thinking_tokens` or raise `reply_tokens`"
+    )]
+    ThinkingNotBelowReply { thinking: u32, reply: u32 },
 }
 
 /// A tool directory left unset on a machine with nowhere to default it to.

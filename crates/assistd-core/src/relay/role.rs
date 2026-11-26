@@ -1,11 +1,13 @@
-//! The kinds of sub-agent a relay step runs as: named roles, each with the
-//! permissions its sub-agent's tools, prompt and host-read rule follow from.
+//! The kinds of sub-agent a relay step runs as: named roles, each a loaded definition
+//! with the permissions its sub-agent's tools, prompt and host-read rule follow from.
 
 use std::sync::Arc;
 
-use assistd_config::McpServerName;
+use assistd_config::{AgentCommand, AgentSpec, McpServerName};
+use assistd_ipc::HostName;
+use assistd_llm::ReplyLimits;
 
-use crate::agent::{McpAccess, Permissions};
+use crate::agent::{AgentLimits, McpAccess, Permissions};
 
 /// A kind of sub-agent the main model can hand a step to.
 #[derive(Debug)]
@@ -14,9 +16,15 @@ pub(super) struct Role {
     pub(super) name: String,
     /// When to pick it, as the model is told.
     pub(super) summary: String,
-    /// Its job, as its own system prompt states it.
+    /// Its own instructions, which follow what every sub-agent's system prompt says.
     pub(super) brief: String,
     pub(super) permissions: Permissions,
+    /// The only commands its `run` offers; `None` offers every one its permissions give.
+    pub(super) commands: Option<Vec<AgentCommand>>,
+    /// The web hosts every run is handed beside its step's own.
+    pub(super) sites: Vec<HostName>,
+    pub(super) limits: AgentLimits,
+    pub(super) reply: ReplyLimits,
 }
 
 /// The roles a relay offers, in the order the model is shown them; names
@@ -25,6 +33,14 @@ pub(super) struct Role {
 pub(super) struct Roles(Vec<Arc<Role>>);
 
 impl Role {
+    /// Whether `run` offers a sub-agent in this role the command named `command`, when
+    /// its permissions give it.
+    pub(super) fn offers_command(&self, command: &str) -> bool {
+        self.commands
+            .as_ref()
+            .is_none_or(|allowed| allowed.iter().any(|allowed| allowed.as_str() == command))
+    }
+
     /// What a sub-agent in this role can touch, as the model is told.
     pub(super) fn reach_described(&self) -> String {
         let permissions = &self.permissions;
@@ -59,47 +75,49 @@ impl Role {
     }
 }
 
+impl From<AgentSpec> for Role {
+    fn from(spec: AgentSpec) -> Self {
+        let capabilities = spec.capabilities;
+        Self {
+            name: spec.name.as_str().to_owned(),
+            summary: spec.description,
+            brief: spec.prompt,
+            permissions: Permissions {
+                files: capabilities.files,
+                web: capabilities.web,
+                index: capabilities.index,
+                mcp: McpAccess::Servers(capabilities.mcp_servers),
+            },
+            commands: spec.commands,
+            sites: spec
+                .sites
+                .into_iter()
+                .filter_map(|site| HostName::try_from(site).ok())
+                .collect(),
+            limits: AgentLimits {
+                tool_steps: spec
+                    .limits
+                    .tool_steps
+                    .map_or(AgentLimits::default().tool_steps, u32::from),
+                ..AgentLimits::default()
+            },
+            reply: ReplyLimits {
+                reply_tokens: spec.limits.reply_tokens,
+                reasoning_tokens: spec.limits.thinking_tokens,
+            },
+        }
+    }
+}
+
 impl Roles {
-    /// The roles assistd ships, which configuration cannot change.
-    pub(super) fn built_in() -> Self {
-        Self(vec![
-            Arc::new(Role {
-                name: "file_review".into(),
-                summary: "For documents, logs and code too large to read here.".into(),
-                brief: "You review local files handed to you: documents, logs and code.".into(),
-                permissions: Permissions {
-                    files: true,
-                    ..Permissions::default()
-                },
-            }),
-            Arc::new(Role {
-                name: "web_research".into(),
-                summary: "For research and reading web pages.".into(),
-                brief: "You research on the web: search, read the pages that answer the task, \
-                        and name the URLs your report relies on."
-                    .into(),
-                permissions: Permissions {
-                    web: true,
-                    ..Permissions::default()
-                },
-            }),
-            Arc::new(Role {
-                name: "file_web_research".into(),
-                summary: "For a task that needs local files and the web together, such as \
-                          checking a project's dependencies for advisories or a config against \
-                          its upstream documentation."
-                    .into(),
-                brief: "You work from local files handed to you and from the web: read what \
-                        the task needs from each, and name the paths and URLs your report \
-                        relies on."
-                    .into(),
-                permissions: Permissions {
-                    files: true,
-                    web: true,
-                    ..Permissions::default()
-                },
-            }),
-        ])
+    /// One role per definition in `agents`, whose names are unique.
+    pub(super) fn new(agents: Vec<AgentSpec>) -> Self {
+        Self(
+            agents
+                .into_iter()
+                .map(|agent| Arc::new(Role::from(agent)))
+                .collect(),
+        )
     }
 
     pub(super) fn named(&self, name: &str) -> Option<&Arc<Role>> {

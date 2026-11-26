@@ -17,6 +17,7 @@ use super::input::paste_as_keys;
 use super::shutdown_signal;
 use super::terminal::{TerminalGuard, TerminalInput};
 
+mod agent_box;
 mod catalog;
 mod color_picker;
 mod form;

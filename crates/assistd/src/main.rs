@@ -12,6 +12,7 @@ use tracing_subscriber::EnvFilter;
 
 use client::{documents, listen, mcp, memory, presence, ptt, search, task, voice_ctl};
 
+mod agents;
 mod client;
 mod daemon;
 mod extract_worker;
@@ -120,6 +121,10 @@ enum Commands {
     /// Sign OAuth MCP servers in or out, or list every MCP server's state.
     Mcp(mcp::McpArgs),
 
+    /// List the sub-agents `relay` would offer: the built-ins and the files in the
+    /// `agents` directory beside the config, with each file that is refused and why.
+    Agents(agents::AgentsArgs),
+
     /// Run the daemon's voice stack over stdin and stdout; the daemon
     /// spawns this itself.
     #[command(hide = true)]
@@ -200,6 +205,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Documents(args) => documents::run(args).await,
         Commands::Task(args) => task::run(args).await,
         Commands::Mcp(args) => mcp::run(args).await,
+        Commands::Agents(args) => agents::run(args),
         Commands::VoiceWorker => voice_worker::run().await,
         Commands::ExtractWorker => extract_worker::run().await,
     }

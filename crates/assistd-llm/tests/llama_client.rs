@@ -22,8 +22,8 @@ use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::StatusKind;
 use assistd_llm::{
     HealthSnapshot, HealthWaitError, LlamaClient, LlamaClientError, LlmBackend, LlmError, LlmEvent,
-    LlmHealthProbe, OneShotReply, ReadyState, SlotAssignment, StepOutcome, Thinking, ToolCall,
-    ToolResultPayload, TurnBackend,
+    LlmHealthProbe, OneShotReply, ReadyState, ReplyLimits, SlotAssignment, StepOutcome, Thinking,
+    ToolCall, ToolResultPayload, TurnBackend,
 };
 
 const MAX_REQUEST_HEADER_BYTES: usize = 128 * 1024;
@@ -1421,7 +1421,11 @@ async fn isolated_backend_never_reaches_the_main_history() {
 
     ask(&main, "main question").await;
     let sub = main
-        .isolated_backend("sub prompt".into(), SlotAssignment::Unassigned)
+        .isolated_backend(
+            "sub prompt".into(),
+            SlotAssignment::Unassigned,
+            ReplyLimits::default(),
+        )
         .unwrap();
     ask(sub.as_ref(), "sub task").await;
     drop(sub);
@@ -1457,7 +1461,11 @@ async fn schema_completion_constrains_the_reply_and_leaves_the_history_alone() {
     let (port, _server) = spawn_fake(script.clone()).await;
     let main = build_client(&client_spec(port));
     let sub = main
-        .isolated_backend("sub prompt".into(), SlotAssignment::Unassigned)
+        .isolated_backend(
+            "sub prompt".into(),
+            SlotAssignment::Unassigned,
+            ReplyLimits::default(),
+        )
         .unwrap();
     ask(sub.as_ref(), "task").await;
     let schema = json!({"type": "object", "properties": {"found": {"type": "boolean"}}});

@@ -2,12 +2,9 @@
 
 use std::sync::Arc;
 
-use assistd_config::McpServerName;
-use assistd_llm::SlotAssignment;
+use assistd_config::{MAX_TOOL_STEPS, McpServerName};
+use assistd_llm::{ReplyLimits, SlotAssignment};
 use assistd_tools::{MCP_TOOL_NAME_PREFIX, ToolRegistry};
-
-/// Tool-calling steps a turn may take while it keeps making different calls.
-pub(super) const MAX_TOOL_STEPS: u32 = 200;
 
 /// Consecutive identical tool calls after which the model is treated as stuck.
 pub(super) const DUPLICATE_CALL_LIMIT: usize = 3;
@@ -22,6 +19,8 @@ pub struct AgentDefinition {
     /// Offered in place of `tools` while the turn plans.
     pub planning_tools: Option<Arc<ToolRegistry>>,
     pub limits: AgentLimits,
+    /// What each response of a child is held to in place of the server backend's limits.
+    pub reply: ReplyLimits,
     pub slot: SlotAssignment,
 }
 
@@ -35,6 +34,7 @@ impl AgentDefinition {
             tools,
             planning_tools: None,
             limits: AgentLimits::default(),
+            reply: ReplyLimits::default(),
             slot,
         }
     }

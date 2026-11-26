@@ -2,6 +2,7 @@
 //! and the child-process supervisor that keeps llama-server alive.
 
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -221,6 +222,16 @@ pub trait TurnBackend: fmt::Debug + Send + Sync + 'static {
     async fn set_transient_note(&self, text: String) -> LlmResult<()>;
 }
 
+/// Limits on one response that an isolated backend holds in place of its parent's; `None`
+/// keeps the parent's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReplyLimits {
+    /// Tokens per response, thinking included.
+    pub reply_tokens: Option<NonZeroU32>,
+    /// Tokens the model may think for in one response.
+    pub reasoning_tokens: Option<NonZeroU32>,
+}
+
 /// A language model holding one in-memory history: what a turn drives, plus optional
 /// capabilities whose defaults do nothing, or fail with [`LlmError::Unavailable`] where a
 /// result is required.
@@ -274,11 +285,12 @@ pub trait LlmBackend: TurnBackend {
 
     /// A backend with an empty history and `system_prompt` on this backend's server and
     /// model, with this backend's history budget, compacted as this backend is, whose
-    /// requests use the server slot `slot` names.
+    /// requests use the server slot `slot` names and are held to `limits`.
     fn isolated_backend(
         &self,
         _system_prompt: String,
         _slot: SlotAssignment,
+        _limits: ReplyLimits,
     ) -> LlmResult<Arc<dyn LlmBackend>> {
         Err(LlmError::Unavailable(
             "isolated backends not supported by this backend".into(),

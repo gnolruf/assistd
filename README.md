@@ -43,6 +43,10 @@ window-manager bindings), and integrates with the running compositor for context
   under `[[mcp.servers]]`, signing OAuth ones in with `assistd mcp login`;
   their tools register into the same registry the LLM sees, namespaced
   as `mcp__<server>__<tool>` (see [MCP servers](docs/mcp.md)).
+- **Sub-agents you define.** The model hands large or untrusted work to
+  a sub-agent in a disposable sandbox. Beside the built-in kinds, each
+  TOML file in `~/.config/assistd/agents/` defines one: when to pick
+  it, what it may reach, and its prompt (see [sub-agents](docs/agents.md)).
 - **Coarse presence.** `Active → Drowsy → Sleeping`. On NVIDIA GPUs
   the daemon watches VRAM and drops to `Sleeping` when another process
   (a game, a second model runner) claims the GPU, freeing all of its

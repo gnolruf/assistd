@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use assistd_config::Config;
+use assistd_config::{AgentCatalog, AgentSpec, Config};
 use assistd_core::planner::PlanningTools;
 use assistd_core::{BuildToolsDeps, McpServerStatus, RelayDeps};
 use assistd_memory::SessionId;
@@ -17,7 +17,7 @@ use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::readiness::ReadinessCell;
 use assistd_wm::WindowManager;
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::embed_init::EmbeddingHandles;
 use super::mcp_init::{self, McpFleet};
@@ -103,6 +103,7 @@ pub(super) fn init(
         window_manager: deps.window_manager,
         web_search: deps.web_search,
         relay: deps.relay,
+        agents: load_agents(config, config_path),
         mcp_approvals,
     })?;
     info!(
@@ -117,4 +118,21 @@ pub(super) fn init(
         mcp_fleet,
         sandbox: Ok(sandbox),
     })
+}
+
+/// The sub-agents `relay` offers: the built-ins and the agent files beside the config at
+/// `config_path`, each refused file logged.
+fn load_agents(config: &Config, config_path: &Path) -> Vec<AgentSpec> {
+    let dir = AgentCatalog::dir_beside(config_path);
+    let catalog = AgentCatalog::load(&dir, config);
+    for refused in &catalog.refused {
+        warn!("agents: {refused}");
+    }
+    info!(
+        "agents: {} loaded, {} refused ({})",
+        catalog.agents.len(),
+        catalog.refused.len(),
+        dir.display()
+    );
+    catalog.agents
 }

@@ -62,7 +62,7 @@ flowchart TB
 |------------------|------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
 | `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | every other `assistd-*` crate                                                    |
 | `assistd-chat`   | The `assistd chat` terminal window and the `assistd settings` panel, a client that only reads and writes the socket. | `config`, `ipc`, `utils`                                                         |
-| `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
+| `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. Also the sub-agent definitions: the built-ins and the loader of the agent files beside the config. | `utils`                                                                          |
 | `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, admission (the queue that grants every model lane, and the permits for background work), presence machine with the policy task that drives it from idle time and GPU contention, listen dispatcher, socket server, document index passes and the watches between them, page transcription while drowsy, `build_tools()` factory. | `config`, `documents`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-documents` | Document text extraction (text, HTML, PDF, office files, e-books) and PDF page rendering in a sandboxed `extract-worker` child: its protocol, the worker side, and the daemon-side `Extractor` and supervisor. | `utils`                                                                          |
 | `assistd-embed`  | Embedding HTTP client + the worker that drains the semantic store's rows without a vector, as four backlogs; launch spec for its llama-server. | `config`, `memory`, `utils`                                                      |
@@ -604,18 +604,31 @@ through the daemon's SearXNG client, which only ever sees the query.
 
 The model starts a sub-agent with the `relay` tool (`task`, `inputs`,
 `agent`, or `steps`: a plan of up to five such steps), registered in
-`assistd-core` beside `run` whenever tools are. `agent` names a `Role`: its
-name, when the model should pick it, a brief opening its system prompt, and
-its `Permissions`. Each permission adds to the sub-agent's registry and a
+`assistd-core` beside `run` whenever tools are. `agent` names a `Role`, built
+from an `AgentSpec` of `assistd-config`: its name, when the model should pick
+it, its own instructions, which follow the part of its system prompt the
+daemon writes, and its `Permissions`. Each permission adds to the sub-agent's registry and a
 sentence to its prompt: `files` has it handed `inputs`, `web` gives its
 quarantine an `Egress`, `index` adds the main agent's `docs` and `search`
 commands (which also rank past sessions), and each MCP server named adds that
 server's tools out of those the calling agent is offered, with the prompts
 and output cap they have there. An MCP server reachable from a quarantine is a
-way out of it, so a role names servers one by one. The roles are built in and
-fixed: `file_review` holds `files` alone, seeing its `inputs` read-only with no
+way out of it, so a role names servers one by one. Three specs are built in:
+`file_review` holds `files` alone, seeing its `inputs` read-only with no
 network; `web_research` holds `web` alone; `file_web_research` holds both. No
-built-in role holds `index` or an MCP server.
+built-in role holds `index` or an MCP server. The rest come from the
+`<name>.toml` files of the `agents` directory beside the config
+([sub-agents](agents.md)), which `AgentCatalog::load` reads at daemon start.
+A file is refused, with a typed
+`AgentFileIssue` the daemon logs, when its name is not an identifier or is a
+built-in's, or it names a capability, command or MCP server that does not
+exist, or sets a limit above the daemon's; the other files still load. A spec
+may also narrow `run` to a list of commands, name sites every run is handed,
+and lower the tool-step limit and the reply and thinking token limits, which
+its backend takes as `ReplyLimits`. The config directory is read-only in the
+tool sandbox, so the model cannot write a definition. `assistd agents` and
+the settings panel list the same catalog by reading the directory
+themselves.
 The tool's schema and description list the roles, and the wire and the
 database carry a step's role by name. A step naming inputs for a role without
 `files`, or sites for one without `web`, is refused as invalid arguments

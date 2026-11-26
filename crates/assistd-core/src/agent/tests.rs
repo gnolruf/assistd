@@ -8,6 +8,7 @@ use serde_json::Value;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use assistd_config::MAX_TOOL_STEPS;
 use assistd_ipc::StatusKind;
 use assistd_llm::{
     HealthSnapshot, HealthWaitError, LlmError, LlmEvent, LlmHealthProbe, ScriptedBackend,
@@ -19,7 +20,7 @@ use assistd_tools::{
     TurnContext,
 };
 
-use super::definition::{DUPLICATE_CALL_LIMIT, MAX_TOOL_STEPS};
+use super::definition::DUPLICATE_CALL_LIMIT;
 use super::recovery::{TRUNCATION_NOTE, TRUNCATION_RETRY_LIMIT};
 use super::run::ToolBudgetExhausted;
 use super::{Agent, AgentDefinition, AgentHost};

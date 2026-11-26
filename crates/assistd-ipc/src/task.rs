@@ -8,6 +8,8 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use assistd_utils::net::normalized_host_name;
+
 use crate::{ConfirmSource, PermissionMode};
 
 /// Longest task name accepted, in characters.
@@ -21,9 +23,6 @@ pub const DEFAULT_EVENT_COOLDOWN_SECS: u32 = 60;
 
 /// How long a burst of path changes is gathered into one fire when not given, in seconds.
 pub const DEFAULT_PATH_DEBOUNCE_SECS: u32 = 2;
-
-/// Longest host name accepted, in bytes.
-pub const MAX_HOST_NAME_BYTES: usize = 253;
 
 /// Most runs a `TaskRuns` lists.
 pub const MAX_LISTED_RUNS: u32 = 50;
@@ -145,7 +144,7 @@ impl From<TaskPrompt> for String {
 }
 
 /// A web host named exactly: lowercase ASCII letters, digits, `-` and `.`, in labels of 1
-/// to 63 bytes that neither start nor end with `-`, at most [`MAX_HOST_NAME_BYTES`] in all.
+/// to 63 bytes that neither start nor end with `-`, at most 253 in all.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct HostName(String);
@@ -161,19 +160,9 @@ impl TryFrom<String> for HostName {
 
     /// Trims and lowercases `host` before checking it.
     fn try_from(host: String) -> Result<Self, Self::Error> {
-        let lowered = host.trim().to_ascii_lowercase();
-        let label_ok = |label: &str| {
-            (1..=63).contains(&label.len())
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        };
-        if lowered.len() > MAX_HOST_NAME_BYTES || !lowered.split('.').all(label_ok) {
-            return Err(TaskSpecError::NotAHost(host));
-        }
-        Ok(Self(lowered))
+        normalized_host_name(&host)
+            .map(Self)
+            .ok_or(TaskSpecError::NotAHost(host))
     }
 }
 
