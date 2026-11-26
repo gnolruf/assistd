@@ -127,6 +127,14 @@ impl EventSink {
         }
     }
 
+    /// The same client with nothing published, for events that replay what was stored.
+    pub fn unpublishing(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            bus: None,
+        }
+    }
+
     /// Events nobody asked for, published on `bus`.
     pub fn to_bus(bus: EventBus) -> Self {
         Self {

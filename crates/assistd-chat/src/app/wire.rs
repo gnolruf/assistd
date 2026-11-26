@@ -1,16 +1,14 @@
 //! Reducer for daemon events. Several streams feed it at once, so reply
 //! events are gated on the turn that owns the output pane.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use assistd_ipc::{
-    DocumentActivity, Event, EventBody, ListenPhase, PresenceState, RelayStepRecord, Role,
-    StartupComponent, StatusKind, TurnStats, VoiceCaptureState,
+    DocumentActivity, Event, EventBody, ListenPhase, PresenceState, StartupComponent, StatusKind,
+    TurnStats, VoiceCaptureState,
 };
 use assistd_utils::time::saturating_millis;
-use serde_json::Value;
 
-use super::super::output::tool_block_label;
 use super::super::ui::turn_summary;
 use super::{
     ActiveReply, AnswerTo, App, BranchListEntry, BranchOp, ChatEvent, ChatMode,
@@ -354,37 +352,7 @@ impl App {
                 session_title.as_deref(),
             ),
             EventBody::SessionTitle { title, .. } => self.session_title = Some(title),
-            EventBody::HistoryEntry {
-                role,
-                content,
-                reasoning,
-                reasoning_ms,
-                tool_name,
-                tool_args,
-                exit_code,
-                duration_ms,
-                compaction_ms,
-                turn_stats,
-                relay,
-                ..
-            } => {
-                if let Some(ms) = reasoning_ms
-                    && !reasoning.is_empty()
-                {
-                    self.output
-                        .push_replayed_thinking(reasoning, Duration::from_millis(ms));
-                }
-                let outcome = (exit_code, duration_ms);
-                let tool = (tool_name, tool_args.as_ref());
-                self.on_history_entry(role, content, tool, outcome, relay);
-                if let Some(ms) = compaction_ms {
-                    self.output
-                        .push_replayed_compaction(Duration::from_millis(ms));
-                }
-                if let Some(stats) = turn_stats {
-                    self.output.push_turn_summary(turn_summary(&stats));
-                }
-            }
+            entry @ EventBody::HistoryEntry { .. } => self.output.push_history_entry(entry),
             EventBody::UndoApplied {
                 removed_messages,
                 last_user_text,
@@ -415,43 +383,6 @@ impl App {
                     _ => format!("[branch '{name}' is now active]"),
                 };
                 self.output.push_info(&detail);
-            }
-        }
-    }
-
-    /// `tool` is a tool row's name and arguments, `outcome` its exit code and
-    /// duration, and `relay` the sub-agent steps behind a `relay` row.
-    fn on_history_entry(
-        &mut self,
-        role: Role,
-        content: String,
-        (tool_name, tool_args): (Option<String>, Option<&Value>),
-        outcome: (Option<i64>, Option<u64>),
-        relay: Vec<RelayStepRecord>,
-    ) {
-        match role {
-            Role::User => self.output.push_user(&content),
-            Role::Assistant => {
-                if !content.is_empty() {
-                    self.output.begin_assistant();
-                    self.output.append_assistant(&content);
-                    self.output.finish_assistant();
-                }
-            }
-            Role::Tool => {
-                let label = tool_block_label(tool_name.unwrap_or_default(), tool_args);
-                let exit_code = outcome
-                    .0
-                    .and_then(|code| i32::try_from(code).ok())
-                    .unwrap_or(0);
-                let duration_ms = outcome.1.unwrap_or(0);
-                if relay.is_empty() {
-                    self.output
-                        .push_tool_block(label, content, exit_code, duration_ms);
-                } else {
-                    self.output
-                        .push_replayed_relay(label, content, exit_code, duration_ms, relay);
-                }
             }
         }
     }

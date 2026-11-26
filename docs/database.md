@@ -80,8 +80,9 @@ erDiagram
     messages ||--|{ branch_messages : "appears in"
     branches ||--o| branch_summaries : "compacted by"
     messages ||--o{ accesses : "touched"
-    messages ||--o{ relay_steps : "relayed by"
-    relay_steps ||--o{ relay_entries : "did"
+    messages ||--o{ agent_runs : "relayed by"
+    agent_runs ||--o{ messages : "history of"
+    agent_runs ||--o| agent_run_summaries : "compacted by"
     tasks ||--o{ task_runs : "ran as"
     task_runs ||--o| sessions : "recorded in"
     sessions ||--o| active_session : "pointed at by"
@@ -129,6 +130,7 @@ erDiagram
         int tool_exit_code
         int tool_duration_ms
         int tool_read_host "0 or 1"
+        int run_id FK "set on a sub-agent run's message"
     }
     branch_messages {
         int branch_id PK, FK
@@ -150,7 +152,7 @@ erDiagram
         blob target "a path, a URL, a session's uuid or a memory's key"
         text label "a fetched page's title"
     }
-    relay_steps {
+    agent_runs {
         int id PK
         int message_id FK
         int step "from 1, unique per message"
@@ -162,14 +164,12 @@ erDiagram
         int duration_ms
         int tokens
     }
-    relay_entries {
-        int step_id PK, FK
-        int seq PK
-        int kind "0 text, 1 reasoning, 2 tool, 3 compaction"
+    agent_run_summaries {
+        int run_id PK, FK
+        int kept_from_seq
+        int steps_folded_through
+        int compacted_after_seq
         text content
-        text tool_name
-        text tool_args "JSON"
-        int tool_exit_code
         int duration_ms
     }
     memories {
@@ -270,15 +270,23 @@ it, in `index.db`, follow ([What ties the files together](#what-ties-the-files-t
   address and a file by the words of its path. A target that is not
   UTF-8 has none, and neither has a session looked into or a memory
   saved.
-- **`relay_steps`** / **`relay_entries`**: what the sub-agents behind a
-  `relay` tool result did, hung off that result's `messages` row so
-  forks share it and undo deletes it with the message. Each planned
-  step gets a row, one that never ran with a NULL `outcome`; its
-  entries are the sub-agent's reply text, reasoning, tool calls with
-  their output, and compactions, in order. They are written with the
-  tool result in one transaction, replayed to clients on resume, and
-  never reach the model's history or the embedding chunks, since they
-  come from untrusted files and pages.
+- **`agent_runs`**: the sub-agent runs behind a `relay` tool result,
+  hung off that result's `messages` row so forks share them and undo
+  deletes them with the message. Each planned run gets a row, one that
+  never started with a NULL `outcome`. A run's history is `messages`
+  rows of its own, the ones whose `run_id` names it: the task as it
+  was handed over as a user message, each step as an assistant message
+  with its reasoning and tool calls, each result as a tool message
+  with its outcome and its `accesses`, whose paths are the ones the
+  sub-agent saw inside its quarantine. They take the session and turn
+  of the relay's result and sit on no branch, so no branch history,
+  compaction or undo count sees them, and the model never does. They
+  are written with the tool result in one transaction and replayed to
+  clients on resume. They are never cut into chunks, nor are their
+  accesses, since they come from untrusted files and pages.
+- **`agent_run_summaries`**: the latest compaction summary of a run's
+  history, shaped as `branch_summaries` is; its seqs count the run's
+  messages from 0 in id order.
 
 ### Key/value memories
 

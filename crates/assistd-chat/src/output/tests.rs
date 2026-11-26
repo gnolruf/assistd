@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use assistd_config::{ThemeColor, ThemeConfig};
+use assistd_ipc::RelayStepEnd;
 use ratatui_image::picker::Picker;
 
 use super::*;
@@ -509,4 +510,65 @@ fn sub_agent_events_draw_in_its_own_transcript_and_a_discard_drops_the_step_in_f
     );
     let block = rendered_lines(&mut p, 60, 10);
     assert!(block.iter().any(|row| row.contains("$ ls …")), "{block:?}");
+}
+
+fn stored(role: Role, content: &str, command: Option<&str>) -> EventBody {
+    EventBody::HistoryEntry {
+        seq: 0,
+        role,
+        content: content.into(),
+        reasoning: String::new(),
+        reasoning_ms: None,
+        tool_name: command.map(|_| "run".into()),
+        tool_args: command.map(|command| serde_json::json!({ "command": command })),
+        exit_code: command.map(|_| 0),
+        duration_ms: command.map(|_| 12),
+        compaction_ms: None,
+        turn_stats: None,
+    }
+}
+
+#[test]
+fn a_replayed_relay_draws_its_sub_agent_under_the_row_it_follows() {
+    let sub_agent = AgentId(1);
+    let mut p = OutputPane::new();
+    p.push_history_entry(stored(Role::Tool, "report", Some("relay it")));
+    p.apply_agent_event(EventBody::RelayPlanned {
+        steps: vec![RelayStepPlan {
+            task: "find it".into(),
+            agent: "file_review".into(),
+        }],
+    });
+    p.apply_agent_event(EventBody::RelayStepStarted { step: 1, sub_agent });
+    let history = [
+        stored(Role::Assistant, "Looking.", None),
+        stored(Role::Tool, "a.txt", Some("ls")),
+        stored(Role::Assistant, "Found it.", None),
+    ];
+    for entry in history {
+        p.apply_sub_agent_event(sub_agent, entry);
+    }
+    p.apply_agent_event(EventBody::RelayStepEnded {
+        step: 1,
+        end: RelayStepEnd::Answered {
+            answer_file: "/data/relay-1.txt".into(),
+        },
+        duration_ms: 41_000,
+    });
+
+    assert_eq!(p.items.len(), 1, "{:?}", item_texts(&p));
+    let agents = p.agents();
+    assert_eq!(
+        item_texts(agents[0].transcript()),
+        [
+            "> find it",
+            "",
+            "Looking.",
+            "",
+            "[tool:ls]",
+            "Found it.",
+            ""
+        ]
+    );
+    assert_eq!(agents[0].status(), "Done (1 tool use · 41s)");
 }

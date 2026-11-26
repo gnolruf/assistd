@@ -11,16 +11,13 @@ use ratatui_image::protocol::StatefulProtocol;
 use serde_json::Value;
 use textwrap::core::display_width;
 
-use assistd_ipc::{
-    AgentId, Component, EventBody, RelayStepEnd, RelayStepPlan, RelayStepRecord, StatusKind,
-    StatusSeverity,
-};
+use assistd_ipc::{AgentId, Component, EventBody, RelayStepPlan, Role, StatusKind, StatusSeverity};
 use assistd_utils::terminal_text::escape_bidi_controls;
 
 use super::markdown::{last_block_boundary, render_markdown};
 use super::text::{append_expanded, expanded};
 use super::theme::Theme;
-use super::ui::compact_duration;
+use super::ui::{compact_duration, turn_summary};
 
 mod relay;
 
@@ -323,27 +320,52 @@ impl OutputPane {
         }));
     }
 
-    /// Append a finished `relay` tool block rebuilt from its stored `steps`,
-    /// collapsed.
-    pub(super) fn push_replayed_relay(
-        &mut self,
-        command: String,
-        output: String,
-        exit_code: i32,
-        duration_ms: u64,
-        steps: Vec<RelayStepRecord>,
-    ) {
-        self.close_open_assistant();
-        self.items.push(OutputItem::Tool(ToolBlock {
-            command: expanded_without_bidi_controls(command),
-            expanded: false,
-            relay: Some(RelayRun::replayed(steps)),
-            state: ToolState::Finished {
-                output: expanded_without_bidi_controls(output),
-                exit_code,
-                duration_ms,
-            },
-        }));
+    /// Draw `entry`, one stored message of an agent's history; an event that is not one
+    /// is ignored.
+    pub(super) fn push_history_entry(&mut self, entry: EventBody) {
+        let EventBody::HistoryEntry {
+            role,
+            content,
+            reasoning,
+            reasoning_ms,
+            tool_name,
+            tool_args,
+            exit_code,
+            duration_ms,
+            compaction_ms,
+            turn_stats,
+            ..
+        } = entry
+        else {
+            return;
+        };
+        if let Some(ms) = reasoning_ms
+            && !reasoning.is_empty()
+        {
+            self.push_replayed_thinking(reasoning, Duration::from_millis(ms));
+        }
+        match role {
+            Role::User => self.push_user(&content),
+            Role::Assistant if content.is_empty() => {}
+            Role::Assistant => {
+                self.begin_assistant();
+                self.append_assistant(&content);
+                self.finish_assistant();
+            }
+            Role::Tool => {
+                let label = tool_block_label(tool_name.unwrap_or_default(), tool_args.as_ref());
+                let exit_code = exit_code
+                    .and_then(|code| i32::try_from(code).ok())
+                    .unwrap_or(0);
+                self.push_tool_block(label, content, exit_code, duration_ms.unwrap_or(0));
+            }
+        }
+        if let Some(ms) = compaction_ms {
+            self.push_replayed_compaction(Duration::from_millis(ms));
+        }
+        if let Some(stats) = turn_stats {
+            self.push_turn_summary(turn_summary(&stats));
+        }
     }
 
     pub(super) fn begin_tool_block(&mut self, command: String) {
@@ -379,7 +401,14 @@ impl OutputPane {
             EventBody::RelayStepStarted { step, sub_agent } => {
                 self.update_relay(|run| run.start(step, sub_agent));
             }
-            EventBody::RelayStepEnded { step, end } => self.end_relay_step(step, end),
+            EventBody::RelayStepEnded {
+                step,
+                end,
+                duration_ms,
+            } => {
+                let took = Duration::from_millis(duration_ms);
+                self.update_relay(|run| run.end_step(step, end, took));
+            }
             EventBody::Status {
                 severity,
                 component,
@@ -390,7 +419,7 @@ impl OutputPane {
         }
     }
 
-    /// Draw `body` as sub-agent `agent` of the running relay streamed it.
+    /// Draw `body` as sub-agent `agent` of the latest relay streamed it.
     pub(super) fn apply_sub_agent_event(&mut self, agent: AgentId, body: EventBody) {
         self.update_relay(|run| run.apply(agent, body));
     }
@@ -427,27 +456,38 @@ impl OutputPane {
         self.open_assistant = None;
     }
 
-    /// Turn the running tool block into a relay of `plan`'s steps. No-op,
-    /// like every relay update, when no tool block is running.
+    /// Turn the latest tool block into a relay of `plan`'s steps, collapsed once it has
+    /// finished. No-op, like every relay update, when there is no tool block.
     fn begin_relay(&mut self, plan: Vec<RelayStepPlan>) {
-        if let Some((idx, block)) = self.running_tool() {
+        if let Some((idx, block)) = self.latest_tool() {
             block.relay = Some(RelayRun::planned(plan));
+            if matches!(block.state, ToolState::Finished { .. }) {
+                block.expanded = false;
+            }
             self.wrap.invalidate(idx);
         }
     }
 
-    fn end_relay_step(&mut self, step: u32, end: RelayStepEnd) {
-        self.update_relay(|run| run.end_step(step, end));
-    }
-
-    /// Apply `update` to the running relay.
+    /// Apply `update` to the relay of the latest tool block: the one running, or the
+    /// one a replayed history drew last.
     fn update_relay(&mut self, update: impl FnOnce(&mut RelayRun)) {
-        if let Some((idx, block)) = self.running_tool()
+        if let Some((idx, block)) = self.latest_tool()
             && let Some(run) = block.relay.as_mut()
         {
             update(run);
             self.wrap.invalidate(idx);
         }
+    }
+
+    fn latest_tool(&mut self) -> Option<(usize, &mut ToolBlock)> {
+        self.items
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, item)| match item {
+                OutputItem::Tool(block) => Some((idx, block)),
+                _ => None,
+            })
     }
 
     /// Every sub-agent that has started, oldest first.
@@ -1377,7 +1417,7 @@ fn starts_expanded(output: &str) -> bool {
 
 /// A tool block's header: the `command` argument when the call has one,
 /// else the tool's name.
-pub(super) fn tool_block_label(name: String, args: Option<&Value>) -> String {
+fn tool_block_label(name: String, args: Option<&Value>) -> String {
     args.and_then(|args| args.get("command"))
         .and_then(Value::as_str)
         .map_or(name, str::to_string)

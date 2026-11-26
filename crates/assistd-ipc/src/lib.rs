@@ -38,9 +38,7 @@ pub use mcp::{McpServerState, McpTransportKind, TokenRevocation};
 pub use permission::{ConfirmSource, PermissionMode, PlanMode, PlanVerdict};
 pub use presence::{DownloadProgress, PresenceState, PresenceTarget};
 pub use readiness::{ComponentReadiness, StartupComponent, StartupReadiness};
-pub use relay::{
-    RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayToolOutcome, RelayTraceEntry,
-};
+pub use relay::{RelayStepEnd, RelayStepPlan};
 pub use request::{Request, RequestBody, SubscribeFilter};
 pub use search::{SearchKind, SearchPlace};
 pub use socket::socket_path;

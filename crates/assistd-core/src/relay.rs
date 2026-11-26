@@ -28,6 +28,7 @@ use assistd_tools::{
     ToolError, ToolOutput, ToolRegistry, TurnContext, Unattended, YieldableLane,
 };
 use assistd_utils::path::expand_tilde_from_env;
+use assistd_utils::time::saturating_millis;
 
 use crate::agent::{AgentDefinition, AgentHost, AgentLimits};
 
@@ -215,8 +216,8 @@ struct StepPosition {
 struct PlanProgress {
     /// What the sub-agents of the steps run so far touched.
     touched: Vec<Access>,
-    /// The step whose sub-agent is running.
-    running_step: Option<u32>,
+    /// The step whose sub-agent is running, counted from 1, and when it started.
+    running_step: Option<(u32, Instant)>,
 }
 
 /// Labels every prompt a relay step's commands raise with the step's task.
@@ -255,11 +256,11 @@ impl RelayTool {
                 () = lane.yield_requested() => {}
             }
             info!(target: "assistd::relay", "relay cancelled for the user's conversation");
-            if let Some(step) = progress.running_step.take() {
+            if let Some((step, started_at)) = progress.running_step.take() {
                 let end = RelayStepEnd::Failed {
                     message: RELAY_YIELDED.to_string(),
                 };
-                turn.emit(LlmEvent::RelayStepEnded { step, end }).await;
+                turn.emit(step_ended(step, end, started_at)).await;
             }
             if !lane.give_way().await {
                 return Ok(None);
@@ -328,7 +329,8 @@ impl RelayTool {
             agent,
         })
         .await;
-        progress.running_step = Some(number);
+        let started_at = Instant::now();
+        progress.running_step = Some((number, started_at));
         let outcome = self
             .run_subagent(step, previous, agent, turn, &mut progress.touched)
             .instrument(span)
@@ -342,8 +344,7 @@ impl RelayTool {
                 message: error.to_string(),
             },
         };
-        turn.emit(LlmEvent::RelayStepEnded { step: number, end })
-            .await;
+        turn.emit(step_ended(number, end, started_at)).await;
         outcome.map_err(|source| StepFailed {
             step: position.step,
             total: position.steps,
@@ -886,6 +887,15 @@ fn step_schema(roles: &Roles) -> Value {
     })
 }
 
+/// The event that step `step`, started at `started_at`, has now ended with `end`.
+fn step_ended(step: u32, end: RelayStepEnd, started_at: Instant) -> LlmEvent {
+    LlmEvent::RelayStepEnded {
+        step,
+        end,
+        duration_ms: saturating_millis(started_at.elapsed()),
+    }
+}
+
 /// The prompt of a sub-agent in `role` handed `sites` to read, on a turn whose user is asked
 /// about other sites out loud when `spoken`.
 fn subagent_prompt(
@@ -979,7 +989,7 @@ fn mounted_path(quarantine: &Quarantine, input: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::path::Path;
     use std::time::Duration;
@@ -998,7 +1008,7 @@ mod tests {
     use crate::turn_driver::TurnDriver;
 
     /// A relay tool whose sub-agents would run beside `parent`, which has none to hand out.
-    fn relay_tool(parent: &Arc<ScriptedBackend>, dir: &Path) -> RelayTool {
+    pub(crate) fn relay_tool(parent: &Arc<ScriptedBackend>, dir: &Path) -> RelayTool {
         let gate = Arc::new(DenyAllGate);
         RelayTool::new(
             RelayDeps {
@@ -1138,7 +1148,8 @@ mod tests {
                     None,
                     EventBody::RelayStepEnded {
                         step: 1,
-                        end: RelayStepEnd::Answered { .. }
+                        end: RelayStepEnd::Answered { .. },
+                        ..
                     }
                 ))
             ),

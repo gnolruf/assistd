@@ -86,7 +86,7 @@ impl Transcript {
         let result = PersistedMessage::tool_result("done", "c-1", "run", outcome, true);
         let trace = ToolTrace {
             accesses,
-            relay_steps: Vec::new(),
+            agent_runs: Vec::new(),
         };
         self.store
             .append_tool_result(self.branch, turn, result, trace)

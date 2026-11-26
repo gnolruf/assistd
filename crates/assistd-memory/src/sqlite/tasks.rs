@@ -435,7 +435,7 @@ impl TaskStore {
 }
 
 /// Delete the sessions of task `task`'s runs, except the active session, returning the
-/// answer files their relay steps named.
+/// answer files their sub-agent runs named.
 fn delete_run_sessions(tx: &Transaction<'_>, task: TaskId) -> rusqlite::Result<Vec<PathBuf>> {
     let sessions: Vec<SessionId> = tx
         .prepare_cached(
@@ -839,7 +839,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        PersistedMessage, PersistedRelayEnd, PersistedRelayRun, PersistedRelayStep,
+        AgentRunEnd, AgentRunRecord, PersistedAgentRun, PersistedMessage, RunMessage,
         SqliteTranscriptStore, ToolOutcome, ToolTrace, TranscriptStore,
     };
 
@@ -1045,16 +1045,20 @@ mod tests {
             exit_code: 0,
             duration_ms: 1,
         };
-        let step = PersistedRelayStep {
+        let step = PersistedAgentRun {
             task: "look".into(),
             agent: "web_research".into(),
-            run: Some(PersistedRelayRun {
-                end: PersistedRelayEnd::Answered {
+            record: Some(AgentRunRecord {
+                end: AgentRunEnd::Answered {
                     answer_file: PathBuf::from(answer),
                 },
                 duration_ms: 1,
                 tokens: None,
-                entries: Vec::new(),
+                messages: vec![RunMessage {
+                    message: PersistedMessage::user("look"),
+                    accesses: Vec::new(),
+                }],
+                summary: None,
             }),
         };
         let result = PersistedMessage::tool_result("done", "c-1", "relay", outcome, true);
@@ -1064,7 +1068,7 @@ mod tests {
                 turn,
                 result,
                 ToolTrace {
-                    relay_steps: vec![step],
+                    agent_runs: vec![step],
                     ..ToolTrace::default()
                 },
             )
@@ -1198,7 +1202,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(counts, (4, 8));
+        assert_eq!(counts, (4, 12));
     }
 
     #[tokio::test]

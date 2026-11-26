@@ -7,14 +7,15 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use assistd_ipc::{Event, EventBody};
+use assistd_ipc::{AgentId, Event, EventBody, RelayStepEnd, RelayStepPlan};
 use assistd_llm::{
     HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, OneShotReply, SlotHolder, SlotStash,
     Thinking, ToolCallRecord,
 };
 use assistd_memory::{
-    BranchHistory, BranchId, BranchSummary, HistoryRow, HistoryScope, MessageId, MessageKind,
-    PersistedRelayStep, PersistedToolCall, Seq, SessionId, TranscriptStore, TurnStats, UndoOutcome,
+    AgentRunEnd, AgentRunRecord, BranchHistory, BranchId, BranchSummary, HistoryRow, HistoryScope,
+    MessageId, MessageKind, PersistedAgentRun, PersistedMessage, PersistedRole, PersistedToolCall,
+    Seq, SessionId, TranscriptStore, TurnStats, UndoOutcome,
 };
 
 use super::{DispatchError, FailedStep, wire_role, wire_timestamp};
@@ -23,11 +24,25 @@ use crate::bus::EventBus;
 use crate::bus::EventSink;
 use crate::presence::PresenceManager;
 use crate::relay::delete_answer_files;
-use crate::transcript::relay_trace::wire_relay_steps;
 use crate::transcript::{SessionContext, TranscriptLog};
 
 const MAX_TITLE_CHARS: usize = 80;
 const MAX_TITLE_PROMPT_CHARS: usize = 1024;
+
+/// Where a replayed history draws its compaction line, and how long the compaction took.
+#[derive(Clone, Copy)]
+struct CompactionLine {
+    after: Seq,
+    duration_ms: u64,
+}
+
+/// What a replayed message is followed by when its history's compaction line or its
+/// turn's end falls on it.
+#[derive(Clone, Copy)]
+struct ReplayedEnds {
+    compaction: Option<CompactionLine>,
+    turn_stats: Option<TurnStats>,
+}
 
 /// Where a branch row lands when its history is replayed into the LLM.
 enum ReplayPart {
@@ -377,7 +392,7 @@ impl BranchService {
             .context("/resume: load_branch")?;
         let compaction = summary
             .as_ref()
-            .and_then(|s| Some((compaction_marker(&rows, s)?, s.duration_ms)));
+            .and_then(|s| compaction_line(rows.iter().map(|row| row.seq), s));
         let replay = branch_replay(&rows, summary);
         self.transcript.forget_user_history();
         if let Err(e) = self.llm.replace_history(replay).await {
@@ -403,67 +418,35 @@ impl BranchService {
                 },
             ))
             .await;
-        let mut call_arguments = tool_call_arguments(&rows);
-        let mut relay_traces = self.relay_traces_of(branch).await;
+        let mut call_arguments = tool_call_arguments(rows.iter().map(|row| &row.message));
+        let mut agent_runs = self.agent_runs_of(branch).await;
+        let stored = tx.unpublishing();
         for row in rows {
-            let relay = relay_traces
-                .remove(&row.message_id)
-                .map_or_default(wire_relay_steps);
-            let role = wire_role(row.message.role());
-            let (reasoning, tool_name, tool_args, outcome) = match row.message.kind {
-                MessageKind::Tool {
-                    call_id,
-                    tool_name,
-                    outcome,
-                    ..
-                } => (
-                    None,
-                    Some(tool_name),
-                    call_arguments.remove(&call_id),
-                    Some(outcome),
-                ),
-                MessageKind::Assistant { reasoning, .. } => (reasoning, None, None, None),
-                MessageKind::User => (None, None, None, None),
+            let marker = compaction.filter(|line| line.after == row.seq);
+            let runs = agent_runs.remove(&row.message_id);
+            let ends = ReplayedEnds {
+                compaction: marker,
+                turn_stats: row.turn_stats,
             };
-            let reasoning_ms = reasoning.as_ref().map(|r| r.duration_ms);
-            let _ = tx
-                .send(Event::new(
-                    id.clone(),
-                    EventBody::HistoryEntry {
-                        seq: row.seq.0,
-                        role,
-                        content: row.message.content,
-                        reasoning: reasoning.map_or_default(|r| r.text),
-                        reasoning_ms,
-                        tool_name,
-                        tool_args,
-                        exit_code: outcome.map(|o| o.exit_code),
-                        duration_ms: outcome.map(|o| o.duration_ms),
-                        compaction_ms: compaction
-                            .filter(|(marker_seq, _)| *marker_seq == row.seq)
-                            .map(|(_, duration_ms)| duration_ms),
-                        turn_stats: row.turn_stats.map(wire_turn_stats),
-                        relay,
-                    },
-                ))
-                .await;
+            let body = replayed_message(row.seq, row.message, &mut call_arguments, ends);
+            let _ = stored.send(Event::new(id.clone(), body)).await;
+            if let Some(runs) = runs {
+                replay_agent_runs(&id, runs, &stored).await;
+            }
         }
         Ok(())
     }
 
-    /// The relay traces stored on `branch`'s rows; none when they cannot be read.
-    async fn relay_traces_of(
-        &self,
-        branch: BranchId,
-    ) -> HashMap<MessageId, Vec<PersistedRelayStep>> {
+    /// The sub-agent runs stored on `branch`'s rows; none when they cannot be read.
+    async fn agent_runs_of(&self, branch: BranchId) -> HashMap<MessageId, Vec<PersistedAgentRun>> {
         self.transcripts
-            .load_relay_traces(branch)
+            .load_agent_runs(branch)
             .await
             .unwrap_or_else(|e| {
                 warn!(
                     target: "assistd::state",
                     error = %e,
-                    "load_relay_traces failed; replaying relays without their traces"
+                    "load_agent_runs failed; replaying relays without their sub-agents"
                 );
                 HashMap::new()
             })
@@ -581,13 +564,123 @@ fn replay_part(summary: Option<&BranchSummary>, seq: Seq) -> ReplayPart {
     }
 }
 
-/// The row the compaction line follows: the newest one left of those on the
-/// branch when it ran.
-fn compaction_marker(rows: &[HistoryRow], summary: &BranchSummary) -> Option<Seq> {
-    rows.iter()
-        .map(|row| row.seq)
+/// The compaction line of a history whose rows have `seqs`, oldest first: after the
+/// newest row left of those it held when `summary` was made.
+fn compaction_line(
+    seqs: impl Iterator<Item = Seq>,
+    summary: &BranchSummary,
+) -> Option<CompactionLine> {
+    let after = seqs
         .take_while(|seq| *seq <= summary.compacted_after_seq)
-        .last()
+        .last()?;
+    Some(CompactionLine {
+        after,
+        duration_ms: summary.duration_ms,
+    })
+}
+
+/// The stored `message` at `seq` of a history as a client replays it, taking the
+/// arguments of a tool result's call from `call_arguments`.
+fn replayed_message(
+    seq: Seq,
+    message: PersistedMessage,
+    call_arguments: &mut HashMap<String, Value>,
+    ends: ReplayedEnds,
+) -> EventBody {
+    let role = wire_role(message.role());
+    let (reasoning, tool_name, tool_args, outcome) = match message.kind {
+        MessageKind::Tool {
+            call_id,
+            tool_name,
+            outcome,
+            ..
+        } => (
+            None,
+            Some(tool_name),
+            call_arguments.remove(&call_id),
+            Some(outcome),
+        ),
+        MessageKind::Assistant { reasoning, .. } => (reasoning, None, None, None),
+        MessageKind::User => (None, None, None, None),
+    };
+    EventBody::HistoryEntry {
+        seq: seq.0,
+        role,
+        content: message.content,
+        reasoning_ms: reasoning.as_ref().map(|r| r.duration_ms),
+        reasoning: reasoning.map_or_default(|r| r.text),
+        tool_name,
+        tool_args,
+        exit_code: outcome.map(|o| o.exit_code),
+        duration_ms: outcome.map(|o| o.duration_ms),
+        compaction_ms: ends.compaction.map(|line| line.duration_ms),
+        turn_stats: ends.turn_stats.map(wire_turn_stats),
+    }
+}
+
+/// Replay the stored `runs` of the `relay` row just sent to `tx` as the events the relay
+/// streamed: its plan, then each run that started, with its history after the task as
+/// sub-agent events.
+async fn replay_agent_runs(id: &str, runs: Vec<PersistedAgentRun>, tx: &EventSink) {
+    let steps = runs
+        .iter()
+        .map(|run| RelayStepPlan {
+            task: run.task.clone(),
+            agent: run.agent.clone(),
+        })
+        .collect();
+    tx.reply(id.to_owned(), EventBody::RelayPlanned { steps })
+        .await;
+    for (step, run) in (1u32..).zip(runs) {
+        if let Some(record) = run.record {
+            replay_agent_run(id, step, record, tx).await;
+        }
+    }
+}
+
+/// Replay run `step` of a stored relay as sub-agent `step`'s.
+async fn replay_agent_run(id: &str, step: u32, record: AgentRunRecord, tx: &EventSink) {
+    let sub_agent = AgentId(step);
+    let from_agent = |body| Event::from_agent(id, sub_agent, body);
+    tx.reply(
+        id.to_owned(),
+        EventBody::RelayStepStarted { step, sub_agent },
+    )
+    .await;
+    let seqs = (0i64..).map(Seq);
+    let compaction = record
+        .summary
+        .as_ref()
+        .and_then(|s| compaction_line(seqs.clone().take(record.messages.len()), s));
+    let mut call_arguments = tool_call_arguments(record.messages.iter().map(|m| &m.message));
+    for (seq, stored) in seqs.zip(record.messages) {
+        if stored.message.role() == PersistedRole::User {
+            continue;
+        }
+        let ends = ReplayedEnds {
+            compaction: compaction.filter(|line| line.after == seq),
+            turn_stats: None,
+        };
+        let body = replayed_message(seq, stored.message, &mut call_arguments, ends);
+        let _ = tx.send(from_agent(body)).await;
+    }
+    if let Some(tokens) = record.tokens {
+        let total = EventBody::ContextSize {
+            tokens,
+            total: tokens,
+        };
+        let _ = tx.send(from_agent(total)).await;
+    }
+    let end = match record.end {
+        AgentRunEnd::Answered { answer_file } => RelayStepEnd::Answered { answer_file },
+        AgentRunEnd::Failed { message } => RelayStepEnd::Failed { message },
+    };
+    let ended = EventBody::RelayStepEnded {
+        step,
+        end,
+        duration_ms: record.duration_ms,
+    };
+    tx.reply(id.to_owned(), ended).await;
 }
 
 fn wire_turn_stats(stats: TurnStats) -> assistd_ipc::TurnStats {
@@ -645,10 +738,12 @@ fn tool_call_record(call: &PersistedToolCall) -> ToolCallRecord {
     }
 }
 
-/// The arguments of every tool call recorded on `rows`, by call id.
-fn tool_call_arguments(rows: &[HistoryRow]) -> HashMap<String, Value> {
-    rows.iter()
-        .flat_map(|row| match &row.message.kind {
+/// The arguments of every tool call `messages` request, by call id.
+fn tool_call_arguments<'a>(
+    messages: impl Iterator<Item = &'a PersistedMessage>,
+) -> HashMap<String, Value> {
+    messages
+        .flat_map(|message| match &message.kind {
             MessageKind::Assistant { tool_calls, .. } => tool_calls.as_slice(),
             MessageKind::User | MessageKind::Tool { .. } => &[],
         })

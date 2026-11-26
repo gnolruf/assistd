@@ -6,7 +6,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use assistd_llm::CompactionCut;
-use assistd_memory::{HistoryRow, MessageKind, PersistedMessage, Seq};
+use assistd_memory::{BranchSummary, HistoryRow, MessageKind, PersistedMessage, Seq};
 
 /// What a message is to a compaction cut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +46,19 @@ pub(super) struct CutSeqs {
     pub(super) steps_folded_through: Option<Seq>,
     /// The newest stored message.
     pub(super) compacted_after: Seq,
+}
+
+impl CutSeqs {
+    /// The summary `content`, made in `duration_ms`, as it stands in at this cut.
+    pub(super) fn summary(self, content: String, duration_ms: u64) -> BranchSummary {
+        BranchSummary {
+            kept_from_seq: self.kept_from,
+            steps_folded_through: self.steps_folded_through,
+            compacted_after_seq: self.compacted_after,
+            content,
+            duration_ms,
+        }
+    }
 }
 
 /// One row per message the model holds, oldest first, including those whose

@@ -43,7 +43,8 @@ pub(super) enum SubAgentError {
 }
 
 /// Run `child` on `task` until it ends or `cancel` fires, and drop it. `turn`, the calling
-/// turn, answers the run's prompts and streams its events as sub-agent `agent`'s.
+/// turn, answers the run's prompts and streams `task` and then the run's events as
+/// sub-agent `agent`'s.
 pub(super) async fn run_shown(
     child: Agent,
     task: String,
@@ -51,6 +52,8 @@ pub(super) async fn run_shown(
     turn: &TurnContext,
     agent: AgentId,
 ) -> AgentOutcome {
+    let handed = LlmEvent::Task { text: task.clone() };
+    turn.emit_from(agent, handed).await;
     let (tx, rx) = mpsc::channel(EVENT_BUFFER);
     let (outcome, ()) = tokio::join!(
         child.run(task, turn, tx, cancel),

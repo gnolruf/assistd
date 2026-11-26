@@ -120,7 +120,8 @@ pub(super) fn recut_changed_memories(
 
 /// Up to `limit` messages saved after both `after` and the highest message chunked
 /// that have chunks to cut, in id order: a user or assistant message with its content,
-/// and a tool result stored with an access to a file or a page with none.
+/// and a tool result stored with an access to a file or a page with none. A message
+/// of a sub-agent run has none.
 pub(super) fn unchunked_messages(
     conn: &Connection,
     after: Option<MessageId>,
@@ -129,6 +130,7 @@ pub(super) fn unchunked_messages(
     conn.prepare_cached(&format!(
         "SELECT m.id, CASE WHEN m.role IN (?2, ?3) THEN m.content END FROM messages m
          WHERE m.id > max(ifnull(?1, 0), (SELECT chunked_through FROM chunked_source))
+           AND m.run_id IS NULL
            AND (m.role IN (?2, ?3)
                 OR EXISTS (SELECT 1 FROM accesses src
                            WHERE src.message_id = m.id AND {TOUCHED_FILE_OR_PAGE}))

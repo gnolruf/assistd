@@ -5,8 +5,8 @@ use tokio::sync::watch;
 
 use super::*;
 use crate::{
-    ChunkSource, EmbeddingQueue, MessageChunker, PersistedRelayEnd, PersistedRelayEntry,
-    PersistedRelayRun, Seq, SqliteSemanticStore,
+    AgentRunEnd, AgentRunRecord, ChunkSource, EmbeddingQueue, MessageChunker, RunMessage, Seq,
+    SqliteSemanticStore,
 };
 
 /// The returned temp dir must outlive the store.
@@ -454,69 +454,92 @@ async fn the_active_session_follows_every_switch_not_session_age() {
     assert_eq!(store.active_session().await.unwrap(), None);
 }
 
-fn relay_plan() -> Vec<PersistedRelayStep> {
-    let finished = ToolOutcome {
+/// A plan of three runs: one that answered after two steps and a compaction, one that
+/// failed before its first step, and one that never started.
+fn agent_runs() -> Vec<PersistedAgentRun> {
+    let call = PersistedToolCall {
+        id: "c-1".into(),
+        name: "run".into(),
+        arguments: serde_json::json!({"command": "grep -rn key /q/input"}),
+    };
+    let grep_outcome = ToolOutcome {
         exit_code: 1,
         duration_ms: 12,
     };
-    let entries = vec![
-        PersistedRelayEntry::Reasoning {
-            text: "grep first".into(),
-            duration_ms: 900,
+    let message = |message| RunMessage {
+        message,
+        accesses: Vec::new(),
+    };
+    let messages = vec![
+        message(PersistedMessage::user("fetch the notes on the spare key")),
+        message(PersistedMessage::assistant_tool_calls(
+            "",
+            vec![call],
+            Some(look_first()),
+        )),
+        RunMessage {
+            message: PersistedMessage::tool_result("none", "c-1", "run", grep_outcome, true),
+            accesses: vec![
+                Access::Read("/q/input/notes.md".into()),
+                Access::fetched("https://example.com/keys", Some("Keys")),
+            ],
         },
-        PersistedRelayEntry::Tool {
-            name: "run".into(),
-            arguments: serde_json::json!({"command": "grep -rn Error /in"}),
-            output: "no matches".into(),
-            outcome: Some(finished),
-        },
-        PersistedRelayEntry::Compaction {
-            duration_ms: Some(3000),
-        },
-        PersistedRelayEntry::Text("Nothing matched.".into()),
-        PersistedRelayEntry::Tool {
-            name: "run".into(),
-            arguments: serde_json::json!({"command": "cat /in/x"}),
-            output: String::new(),
-            outcome: None,
-        },
-        PersistedRelayEntry::Compaction { duration_ms: None },
+        message(PersistedMessage::assistant_text("Nothing matched.", None)),
     ];
+    let summary = BranchSummary {
+        kept_from_seq: Seq(0),
+        steps_folded_through: Some(Seq(2)),
+        compacted_after_seq: Seq(2),
+        content: "grep found nothing".into(),
+        duration_ms: 900,
+    };
     vec![
-        PersistedRelayStep {
+        PersistedAgentRun {
             task: "fetch the notes".into(),
             agent: "web_research".into(),
-            run: Some(PersistedRelayRun {
-                end: PersistedRelayEnd::Answered {
+            record: Some(AgentRunRecord {
+                end: AgentRunEnd::Answered {
                     answer_file: PathBuf::from("/data/relays/s/relay-1.txt"),
                 },
                 duration_ms: 41_000,
                 tokens: Some(9000),
-                entries,
+                messages,
+                summary: Some(summary),
             }),
         },
-        PersistedRelayStep {
+        PersistedAgentRun {
             task: "compare them".into(),
             agent: "file_review".into(),
-            run: Some(PersistedRelayRun {
-                end: PersistedRelayEnd::Failed {
+            record: Some(AgentRunRecord {
+                end: AgentRunEnd::Failed {
                     message: "server crashed".into(),
                 },
                 duration_ms: 500,
                 tokens: None,
-                entries: Vec::new(),
+                messages: Vec::new(),
+                summary: None,
             }),
         },
-        PersistedRelayStep {
+        PersistedAgentRun {
             task: "summarise".into(),
             agent: "file_review".into(),
-            run: None,
+            record: None,
         },
     ]
 }
 
+async fn count_rows(store: &SqliteTranscriptStore, table: &'static str) -> i64 {
+    store
+        .handle
+        .read("count rows", move |c| {
+            c.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+        })
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
-async fn relay_trace_round_trips_follows_forks_and_goes_with_undo() {
+async fn agent_runs_round_trip_off_the_branch_unchunked_follow_forks_and_go_with_undo() {
     let (store, _temp) = fresh_store().await;
     let branch = store
         .begin_session_with_main_branch(SessionId::new())
@@ -539,25 +562,45 @@ async fn relay_trace_round_trips_follows_forks_and_goes_with_undo() {
             turn,
             result,
             ToolTrace {
-                relay_steps: relay_plan(),
+                agent_runs: agent_runs(),
                 ..ToolTrace::default()
             },
         )
         .await
         .unwrap();
 
-    let traces = store.load_relay_traces(branch).await.unwrap();
-    assert_eq!(traces.get(&appended.id), Some(&relay_plan()));
-    assert_eq!(traces.len(), 1);
+    let runs = store.load_agent_runs(branch).await.unwrap();
+    assert_eq!(runs.get(&appended.id), Some(&agent_runs()));
+    assert_eq!(runs.len(), 1);
     assert_eq!(
         store.relay_answer_files().await.unwrap(),
         [PathBuf::from("/data/relays/s/relay-1.txt")]
     );
+    let history = store
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap();
+    assert_eq!(
+        contents(&history.rows),
+        [
+            (PersistedRole::User, "research it"),
+            (PersistedRole::Tool, "[error] relay: step 2"),
+        ],
+        "a run's messages are on no branch"
+    );
+    chunk_saved_messages(&store.handle).await;
+    assert_eq!(message_chunk_texts(&store.handle).await, ["research it"]);
+    let access_chunks = SqliteSemanticStore::new(store.handle.clone())
+        .chunks_missing_embedding(ChunkSource::Access, None, 10)
+        .await
+        .unwrap();
+    assert!(access_chunks.is_empty(), "{access_chunks:?}");
 
     let fork = store.fork_and_switch(branch, "fork").await.unwrap();
     let undone = store.undo_last_turn(branch).await.unwrap();
-    let forked = store.load_relay_traces(fork).await.unwrap();
-    assert_eq!(forked.get(&appended.id), Some(&relay_plan()));
+    assert_eq!(undone.last_user_text.as_deref(), Some("research it"));
+    let forked = store.load_agent_runs(fork).await.unwrap();
+    assert_eq!(forked.get(&appended.id), Some(&agent_runs()));
     assert!(
         undone.released_answer_files.is_empty(),
         "the fork still holds it"
@@ -568,15 +611,15 @@ async fn relay_trace_round_trips_follows_forks_and_goes_with_undo() {
         undone.released_answer_files,
         [PathBuf::from("/data/relays/s/relay-1.txt")]
     );
-    assert!(store.relay_answer_files().await.unwrap().is_empty());
-    let steps: i64 = store
-        .handle
-        .read("count relay_steps", |c| {
-            c.query_row("SELECT COUNT(*) FROM relay_steps", [], |r| r.get(0))
-        })
-        .await
-        .unwrap();
-    assert_eq!(steps, 0, "undo on every branch deletes the trace");
+    for table in [
+        "agent_runs",
+        "agent_run_summaries",
+        "messages",
+        "accesses",
+        "turns",
+    ] {
+        assert_eq!(count_rows(&store, table).await, 0, "{table}");
+    }
 }
 
 #[tokio::test]
@@ -706,7 +749,7 @@ async fn what_a_tool_call_touched_is_stored_with_its_result_until_no_branch_hold
                 title: Some("Tenancy law".into()),
             },
         ],
-        relay_steps: Vec::new(),
+        agent_runs: Vec::new(),
     };
     let result = PersistedMessage::tool_result("both read", "c-1", "run", outcome, true);
     let appended = store
