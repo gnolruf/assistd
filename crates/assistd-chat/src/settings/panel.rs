@@ -3,13 +3,15 @@
 
 use std::collections::BTreeSet;
 use std::ops::ControlFlow;
+use std::path::PathBuf;
 
 use assistd_config::{
-    ConfigDocument, ConfigError, ConfigIssue, Consumer, SettingKind, ThemeColor, ThemeConfig,
-    ThemeName,
+    AgentCatalog, AgentOrigin, ConfigDocument, ConfigError, ConfigIssue, Consumer, SettingKind,
+    ThemeColor, ThemeConfig, ThemeName,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use super::super::selection::Selection;
 use super::super::text_editor::{EditAction, EditorShape, TextEditor};
 use super::super::theme::Theme;
 use super::catalog::{SECTIONS, Setting, Tab};
@@ -42,6 +44,8 @@ pub(crate) enum Row {
     /// checkbox when it has one.
     Heading(usize),
     Setting(usize, &'static Setting),
+    /// Opens the read-only list of sub-agents.
+    Agents(usize),
     /// Shows or hides the section's advanced settings.
     AdvancedToggle(usize),
 }
@@ -49,9 +53,10 @@ pub(crate) enum Row {
 impl Row {
     fn section(self) -> usize {
         match self {
-            Self::Heading(section) | Self::Setting(section, _) | Self::AdvancedToggle(section) => {
-                section
-            }
+            Self::Heading(section)
+            | Self::Setting(section, _)
+            | Self::Agents(section)
+            | Self::AdvancedToggle(section) => section,
         }
     }
 }
@@ -63,6 +68,8 @@ pub(crate) enum PanelMode {
     List(ListEditor),
     /// Adding, changing or deleting MCP servers.
     Servers(ServerList),
+    /// Reading the sub-agents and the agent files that were refused, one selected.
+    Agents(Selection),
     /// Picking a theme color, with the theme as it would look once applied.
     Color {
         picker: ColorPicker,
@@ -100,11 +107,15 @@ pub(crate) struct SettingsPanel {
     feedback: Option<Feedback>,
     /// Why the config would not load, if it would not.
     issues: Vec<ConfigIssue>,
+    /// The sub-agents a daemon started on the document would offer.
+    agents: AgentCatalog,
 }
 
 impl SettingsPanel {
     pub(crate) fn new(document: ConfigDocument, host: PanelHost) -> Self {
+        let agents = load_agents(&document);
         let mut panel = Self {
+            agents,
             document,
             host,
             tab: Tab::ALL[0],
@@ -152,6 +163,36 @@ impl SettingsPanel {
         &self.issues
     }
 
+    /// Whether the row that opens the sub-agents is the selected one.
+    pub(crate) fn agents_selected(&self) -> bool {
+        matches!(self.selected_row(), Row::Agents(_))
+    }
+
+    pub(crate) fn agents(&self) -> &AgentCatalog {
+        &self.agents
+    }
+
+    /// The directory the agent files are read from.
+    pub(crate) fn agents_dir(&self) -> PathBuf {
+        AgentCatalog::dir_beside(self.document.path())
+    }
+
+    /// How many sub-agents are built in, come from files, and were refused.
+    pub(crate) fn agents_summary(&self) -> String {
+        let from_files = self
+            .agents
+            .agents
+            .iter()
+            .filter(|agent| matches!(agent.origin, AgentOrigin::File(_)))
+            .count();
+        let built_in = self.agents.agents.len() - from_files;
+        let refused = match self.agents.refused.len() {
+            0 => String::new(),
+            refused => format!(" · {refused} refused"),
+        };
+        format!("{built_in} built-in · {from_files} from files{refused}")
+    }
+
     pub(crate) fn rows(&self) -> Vec<Row> {
         SECTIONS
             .iter()
@@ -161,6 +202,7 @@ impl SettingsPanel {
                 let shown = self.advanced_shown[index];
                 let toggle = (section.advanced_count() > 0).then_some(Row::AdvancedToggle(index));
                 std::iter::once(Row::Heading(index))
+                    .chain(section.lists_agents.then_some(Row::Agents(index)))
                     .chain(
                         section
                             .settings
@@ -184,7 +226,7 @@ impl SettingsPanel {
         let requirements_met = section.requires.iter().all(|key| self.is_on(key));
         match row {
             Row::Heading(_) => !requirements_met,
-            Row::Setting(..) | Row::AdvancedToggle(_) => {
+            Row::Setting(..) | Row::Agents(_) | Row::AdvancedToggle(_) => {
                 !requirements_met
                     || section
                         .enable
@@ -231,6 +273,10 @@ impl SettingsPanel {
             }
             PanelMode::Servers(_) => {
                 self.on_servers_key(ev);
+                ControlFlow::Continue(())
+            }
+            PanelMode::Agents(_) => {
+                self.on_agents_key(ev);
                 ControlFlow::Continue(())
             }
             PanelMode::Color { .. } => {
@@ -515,6 +561,19 @@ impl SettingsPanel {
         }
     }
 
+    fn on_agents_key(&mut self, ev: KeyEvent) {
+        let listed = self.agents.agents.len() + self.agents.refused.len();
+        let PanelMode::Agents(selected) = &mut self.mode else {
+            return;
+        };
+        match ev.code {
+            KeyCode::Up | KeyCode::Char('k') => selected.previous(),
+            KeyCode::Down | KeyCode::Char('j') => selected.next(listed),
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.mode = PanelMode::Browse,
+            _ => {}
+        }
+    }
+
     fn on_confirm_close_key(&mut self, ev: KeyEvent) -> ControlFlow<()> {
         match ev.code {
             KeyCode::Char('s') => {
@@ -578,7 +637,7 @@ impl SettingsPanel {
         match self.selected_row() {
             Row::Setting(_, setting) => Some(setting),
             Row::Heading(section) => SECTIONS[section].enable.as_ref(),
-            Row::AdvancedToggle(_) => None,
+            Row::Agents(_) | Row::AdvancedToggle(_) => None,
         }
     }
 
@@ -628,7 +687,7 @@ impl SettingsPanel {
     fn is_selectable(&self, row: Row) -> bool {
         let is_checkbox = match row {
             Row::Heading(section) => SECTIONS[section].enable.is_some(),
-            Row::Setting(..) | Row::AdvancedToggle(_) => true,
+            Row::Setting(..) | Row::Agents(_) | Row::AdvancedToggle(_) => true,
         };
         is_checkbox && !self.is_locked(row)
     }
@@ -644,6 +703,7 @@ impl SettingsPanel {
     fn activate_selected(&mut self) {
         let setting = match self.selected_row() {
             Row::AdvancedToggle(section) => return self.toggle_advanced(section),
+            Row::Agents(_) => return self.open_agents(),
             Row::Setting(_, setting) => setting,
             Row::Heading(section) => match SECTIONS[section].enable.as_ref() {
                 Some(enable) => enable,
@@ -688,6 +748,13 @@ impl SettingsPanel {
                 self.feedback = None;
             }
         }
+    }
+
+    /// Reads the agent files again and lists what they give.
+    fn open_agents(&mut self) {
+        self.agents = load_agents(&self.document);
+        self.mode = PanelMode::Agents(Selection::default());
+        self.feedback = None;
     }
 
     /// Flips a toggle, or moves a choice or color to its next or previous
@@ -846,6 +913,14 @@ impl SettingsPanel {
 }
 
 /// `saved`, then whatever must restart before the `changed` consumers' keys apply.
+/// The sub-agents a daemon started on `document` as it stands would offer.
+fn load_agents(document: &ConfigDocument) -> AgentCatalog {
+    AgentCatalog::load(
+        &AgentCatalog::dir_beside(document.path()),
+        document.config(),
+    )
+}
+
 fn saved_note(changed: &BTreeSet<Consumer>, host: PanelHost) -> String {
     let restarts: Vec<&str> = changed
         .iter()

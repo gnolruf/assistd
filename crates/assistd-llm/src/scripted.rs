@@ -12,8 +12,8 @@ use tokio::sync::{Notify, mpsc};
 use assistd_ipc::Attachment;
 
 use crate::{
-    LlmBackend, LlmError, LlmEvent, LlmResult, OneShotReply, SlotAssignment, StepOutcome, ToolCall,
-    ToolResultPayload, TurnBackend,
+    LlmBackend, LlmError, LlmEvent, LlmResult, OneShotReply, ReplyLimits, SlotAssignment,
+    StepOutcome, ToolCall, ToolResultPayload, TurnBackend,
 };
 
 /// A point where a scripted step waits until [`Gate::release`]; one never released stalls
@@ -314,6 +314,7 @@ impl LlmBackend for ScriptedBackend {
         &self,
         _system_prompt: String,
         _slot: SlotAssignment,
+        _limits: ReplyLimits,
     ) -> LlmResult<Arc<dyn LlmBackend>> {
         self.seen.lock().isolated_requests += 1;
         self.isolated

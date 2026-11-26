@@ -2,6 +2,7 @@
 //! table's `Default`; an unknown key is a [`ConfigIssue`], and a value its
 //! field's type refuses is a parse error.
 
+pub mod agents;
 pub mod chat;
 pub mod compositor;
 pub mod custom_args;
@@ -26,6 +27,10 @@ pub mod top;
 pub mod values;
 pub mod voice;
 
+pub use agents::{
+    AgentCapabilities, AgentCatalog, AgentCommand, AgentName, AgentOrigin, AgentSpec,
+    AgentSpecLimits, MAX_TOOL_STEPS,
+};
 pub use chat::ChatConfig;
 pub use compositor::{Compositor, CompositorConfig, CompositorType};
 pub use custom_args::{CustomArgs, EmbeddingServer, ModelServer, ServerKind};
@@ -33,10 +38,10 @@ pub use document::ConfigDocument;
 pub use documents::{DocumentsConfig, DocumentsOcrConfig};
 pub use embedding::{EmbeddingConfig, EmbeddingModel};
 pub use errors::{
-    AbsoluteDirError, BlankStringError, ConfigError, ConfigIssue, CustomArgsError,
-    DecimalRangeError, EmbeddingModelError, EmptyListError, HfFileError, IntegerRangeError,
-    McpServerNameError, NoDefaultDirError, SearchCommandError, SttEncoderError, ThemeColorError,
-    ThemeNameError, WakePhraseError, WritablePathError,
+    AbsoluteDirError, AgentFileError, AgentFileIssue, BlankStringError, ConfigError, ConfigIssue,
+    CustomArgsError, DecimalRangeError, EmbeddingModelError, EmptyListError, HfFileError,
+    IntegerRangeError, McpServerNameError, NoDefaultDirError, SearchCommandError, SttEncoderError,
+    ThemeColorError, ThemeNameError, WakePhraseError, WritablePathError,
 };
 pub use mcp::{
     McpAuth, McpConfig, McpHeaders, McpHttpTransport, McpOAuthClient, McpServerConfig,

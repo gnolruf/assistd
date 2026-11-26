@@ -172,6 +172,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         &[],
         &[setting("mcp.servers")],
     ),
+    agent_list(Tab::Tools, "Sub-agents"),
     section(Tab::General, "Memory", &[setting("memory.enabled")]),
     feature(
         Tab::General,
@@ -285,6 +286,8 @@ pub(crate) struct Section {
     /// [`enable`](Self::enable) included, can be edited.
     pub requires: &'static [&'static str],
     pub settings: &'static [Setting],
+    /// Whether a row under the heading opens the list of sub-agents, which no key holds.
+    pub lists_agents: bool,
 }
 
 impl Section {
@@ -300,6 +303,14 @@ const fn section(tab: Tab, title: &'static str, settings: &'static [Setting]) ->
         enable: None,
         requires: &[],
         settings,
+        lists_agents: false,
+    }
+}
+
+const fn agent_list(tab: Tab, title: &'static str) -> Section {
+    Section {
+        lists_agents: true,
+        ..section(tab, title, &[])
     }
 }
 
@@ -316,6 +327,7 @@ const fn feature(
         enable: Some(enable),
         requires,
         settings,
+        lists_agents: false,
     }
 }
 

@@ -12,6 +12,7 @@ use super::super::selection::list_window;
 use super::super::text::{chars_width, chars_within, ellipsize, locate_cursor, wrap_input};
 use super::super::text_editor::TextEditor;
 use super::super::theme::{Theme, color};
+use super::agent_box::{AGENTS_HINT, agent_detail, render_agent_list};
 use super::catalog::{SECTIONS, Setting, Tab};
 use super::color_picker::{ColorPicker, PALETTE_CELL_WIDTH, PickerFocus};
 use super::list_editor::{EntryEditor, ListEditor, ListState, entry_summary};
@@ -28,6 +29,8 @@ pub(super) const NO_POINTER: &str = "  ";
 /// Columns between the longest label and the values.
 const LABEL_GAP: usize = 2;
 const RULE: &str = "─";
+/// Label of the row that opens the sub-agents.
+const AGENTS_LABEL: &str = "agents";
 const CHECKED: &str = "[✓]";
 const UNCHECKED: &str = "[ ]";
 /// Field labels of a search engine entry, padded to one width.
@@ -107,6 +110,9 @@ pub(crate) fn render_settings(frame: &mut Frame<'_>, area: Rect, panel: &mut Set
         match panel.mode() {
             PanelMode::List(_) => render_list_box(frame, box_area, panel, theme),
             PanelMode::Servers(_) => render_server_box(frame, box_area, panel, theme),
+            PanelMode::Agents(selected) => {
+                render_agent_list(frame, box_area, panel.agents(), selected.index(), theme);
+            }
             PanelMode::Color { .. } => render_color_box(frame, box_area, panel, theme),
             PanelMode::Themes { .. } => render_theme_box(frame, box_area, panel, theme),
             _ => render_text_box(frame, box_area, panel, theme),
@@ -235,6 +241,11 @@ fn row_line(
             };
             pointed_line(selected, theme, vec![Span::raw(label), value])
         }
+        Row::Agents(_) => {
+            let label = format!("{AGENTS_LABEL:label_width$}");
+            let summary = ellipsize(&panel.agents_summary(), value_width);
+            pointed_line(selected, theme, vec![Span::raw(label), Span::raw(summary)])
+        }
         Row::AdvancedToggle(section) => {
             let text = if panel.advanced_shown(section) {
                 "▾ hide advanced".to_string()
@@ -334,7 +345,7 @@ fn value_span(
 /// focused field holds.
 fn render_detail(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, theme: &Theme) {
     let Some(setting) = panel.selected_setting() else {
-        return;
+        return render_agents_detail(frame, area, panel, theme);
     };
     let detail = match panel.mode() {
         PanelMode::Servers(list) if let Some(form) = list.form() => {
@@ -354,6 +365,27 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, theme
         }
     };
     let detail = ellipsize(&detail, usize::from(area.width));
+    frame.render_widget(
+        Paragraph::new(Span::styled(detail, theme.meta_style())),
+        area,
+    );
+}
+
+/// The selected sub-agent's description while the list is open, else where the agent
+/// files are read from when their row is selected.
+fn render_agents_detail(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, theme: &Theme) {
+    let detail = match panel.mode() {
+        PanelMode::Agents(selected) => agent_detail(panel.agents(), selected.index()),
+        _ if panel.agents_selected() => format!(
+            "{} : one <name>.toml file per sub-agent, read when the daemon starts",
+            panel.agents_dir().display()
+        ),
+        _ => return,
+    };
+    let detail = ellipsize(
+        &escape_controls_single_line(&detail),
+        usize::from(area.width),
+    );
     frame.render_widget(
         Paragraph::new(Span::styled(detail, theme.meta_style())),
         area,
@@ -400,6 +432,7 @@ fn hint(panel: &SettingsPanel) -> &'static str {
         PanelMode::Edit(_) => "Enter apply · Esc cancel · Ctrl+U clear",
         PanelMode::List(editor) => list_hint(editor.state()),
         PanelMode::Servers(list) => server_hint(list),
+        PanelMode::Agents(_) => AGENTS_HINT,
         PanelMode::Color { picker, .. } => match (picker.hex_input(), picker.focus()) {
             (Some(_), _) => "type 6 hex digits · Backspace erase · Esc stop typing",
             (None, PickerFocus::Palette(_)) => {
@@ -430,6 +463,7 @@ fn has_box(mode: &PanelMode) -> bool {
         PanelMode::Edit(editor) => editor.is_box(),
         PanelMode::List(_)
         | PanelMode::Servers(_)
+        | PanelMode::Agents(_)
         | PanelMode::Color { .. }
         | PanelMode::Themes { .. } => true,
         PanelMode::Browse | PanelMode::ConfirmClose | PanelMode::ConfirmOverwrite => false,

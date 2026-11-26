@@ -29,8 +29,8 @@ use super::think_splitter::{Segment, ThinkSplitter};
 use super::wire;
 use crate::{
     HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
-    LlmResult, OneShotReply, ReadyState, SlotAssignment, SlotHolder, SlotStash, StepOutcome,
-    Thinking, ToolCall, ToolResultPayload, TurnBackend,
+    LlmResult, OneShotReply, ReadyState, ReplyLimits, SlotAssignment, SlotHolder, SlotStash,
+    StepOutcome, Thinking, ToolCall, ToolResultPayload, TurnBackend,
 };
 
 const ERROR_BODY_CAP: usize = 1024;
@@ -778,9 +778,14 @@ impl LlmBackend for LlamaClient {
         &self,
         system_prompt: String,
         slot: SlotAssignment,
+        limits: ReplyLimits,
     ) -> LlmResult<Arc<dyn LlmBackend>> {
         let chat = ChatConfig {
             system_prompt: system_prompt.clone(),
+            max_response_tokens: limits.reply_tokens.unwrap_or(self.chat.max_response_tokens),
+            max_reasoning_tokens: limits
+                .reasoning_tokens
+                .unwrap_or(self.chat.max_reasoning_tokens),
             ..self.chat.clone()
         };
         Ok(Arc::new(Self {

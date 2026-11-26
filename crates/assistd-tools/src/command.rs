@@ -320,6 +320,11 @@ impl CommandRegistry {
         self.commands.insert(cmd.name().to_string(), Box::new(cmd));
     }
 
+    /// Drop every command whose name `keep` refuses.
+    pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        self.commands.retain(|name, _| keep(name));
+    }
+
     /// Look up a registered command by its `name()`.
     pub fn get(&self, name: &str) -> Option<&dyn Command> {
         self.commands.get(name).map(AsRef::as_ref)

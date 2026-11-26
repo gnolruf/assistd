@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::sync::watch;
 use tracing::warn;
 
-use assistd_config::{BashSandboxMode, Config, NoDefaultDirError, WritablePath};
+use assistd_config::{AgentSpec, BashSandboxMode, Config, NoDefaultDirError, WritablePath};
 use assistd_embed::EmbedderHandle;
 use assistd_memory::{SemanticStore, SessionId};
 use assistd_search::{SearchError, SearxngClient};
@@ -108,6 +108,8 @@ pub struct BuildToolsDeps<'a> {
     /// Readiness of the SearXNG instance `web search` goes through.
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
     pub relay: RelayDeps,
+    /// The kinds of sub-agent `relay` offers.
+    pub agents: Vec<AgentSpec>,
     /// The MCP tools approved with "always allow", which a plan's actions are checked against.
     pub mcp_approvals: PinnedApprovalGate,
 }
@@ -153,6 +155,14 @@ pub fn mcp_tool_approvals(config_path: &Path) -> Result<PinnedApprovals, BuildTo
     )?)
 }
 
+/// The cap on what a tool call returns, its overflow spilled into `overflow_dir`.
+fn output_cap(config: &Config, overflow_dir: PathBuf) -> Arc<OutputCap> {
+    Arc::new(OutputCap::new(PresentSpec::from_config(
+        &config.tools.output,
+        overflow_dir,
+    )))
+}
+
 /// Assemble the tool registry: the built-in commands behind `run`, `docs` among them only
 /// with `documents.enabled` and `search` with that or `memory.enabled`, `relay` and, with
 /// `memory.enabled`, `remember`; and beside it the planning registry. Removes earlier spill files from [`BuildToolsDeps::overflow_dir`].
@@ -171,6 +181,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
         window_manager,
         web_search,
         relay,
+        agents,
         mcp_approvals,
     } = deps;
 
@@ -187,10 +198,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
         &approved_hosts,
         mcp_approvals,
     )?;
-    let output_cap = Arc::new(OutputCap::new(PresentSpec::from_config(
-        &config.tools.output,
-        overflow_dir,
-    )));
+    let output_cap = output_cap(config, overflow_dir);
     let stored_text = StoredText {
         config,
         embedder: &embedder,
@@ -227,6 +235,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
             stored_search: stored_text.search_command(),
             output: config.tools.output.clone(),
         },
+        agents,
     );
     let commands = builtin_commands(BuiltinCommandDeps {
         bash_cfg,

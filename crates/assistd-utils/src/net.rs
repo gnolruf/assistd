@@ -24,6 +24,9 @@ const NON_PUBLIC_V4: [(Ipv4Addr, u32); 13] = [
     (Ipv4Addr::new(224, 0, 0, 0), 3),
 ];
 
+/// Longest host name accepted, in bytes.
+pub const MAX_HOST_NAME_BYTES: usize = 253;
+
 const GLOBAL_UNICAST_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0, 0, 0), 3);
 
 const DOCUMENTATION_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32);
@@ -74,6 +77,22 @@ pub async fn reachable_addrs(
         return Err(io::Error::other(NonPublic::Name(host.to_string())));
     }
     Ok(addrs)
+}
+
+/// `host` trimmed and lowercased when that is a host name: ASCII letters, digits, `-` and
+/// `.`, in labels of 1 to 63 bytes that neither start nor end with `-`, at most
+/// [`MAX_HOST_NAME_BYTES`] in all.
+pub fn normalized_host_name(host: &str) -> Option<String> {
+    let lowered = host.trim().to_ascii_lowercase();
+    let label_ok = |label: &str| {
+        (1..=63).contains(&label.len())
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    };
+    (lowered.len() <= MAX_HOST_NAME_BYTES && lowered.split('.').all(label_ok)).then_some(lowered)
 }
 
 /// Whether `err` failed because the host resolves only to addresses a [`FilteredResolver`] refused.

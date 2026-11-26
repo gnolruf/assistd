@@ -46,11 +46,13 @@ impl AgentHost {
     }
 
     /// An agent over an empty history of its own on the same server and model, opened
-    /// with `definition`'s prompt and slot. Errors when the server backend opens none.
+    /// with `definition`'s prompt, slot and reply limits. Errors when the server backend opens none.
     pub fn child(&self, definition: AgentDefinition) -> LlmResult<Agent> {
-        let history = self
-            .server
-            .isolated_backend(definition.system_prompt.clone(), definition.slot)?;
+        let history = self.server.isolated_backend(
+            definition.system_prompt.clone(),
+            definition.slot,
+            definition.reply,
+        )?;
         Ok(self.agent_over(history, definition))
     }
 
