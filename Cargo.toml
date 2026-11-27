@@ -89,7 +89,7 @@ tokio-rusqlite = "0.7"
 rusqlite_migration = "2.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 chrono-tz = "0.10"
-croner = "4.0.2"
+croner = "5.0.0"
 tokio-i3ipc = "0.16"
 swayipc-async = "3"
 url = { version = "2", features = ["serde"] }
@@ -98,7 +98,7 @@ http = "1"
 parking_lot = "0.13"
 ksni = { version = "0.3.4", default-features = false, features = ["tokio"] }
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
-notify = { version = "8.2", default-features = false }
+notify = { version = "9.0", default-features = false }
 sherpa-onnx = { version = "2.0.0", default-features = false, features = ["shared"] }
 sentencepiece-rust = "0.1.1"
 cpal = "0.18.1"
